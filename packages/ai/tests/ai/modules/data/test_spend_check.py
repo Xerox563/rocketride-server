@@ -14,6 +14,7 @@ into OutOfCreditsError.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import threading
 from unittest.mock import AsyncMock, MagicMock
 
@@ -107,7 +108,8 @@ def test_only_a_hosted_task_makes_require_credit_the_pipe_gate(monkeypatch, host
 @pytest.mark.asyncio
 async def test_the_eaas_connection_answers_credit_checks_while_connected(monkeypatch):
     monkeypatch.setattr(data_server, '_eaas_connected', threading.Event())
-    server = data_server.DataServer.__new__(data_server.DataServer)
+    token = 'run-token'
+    server = data_server.DataServer(server=MagicMock(), token_sha256=hashlib.sha256(token.encode('utf-8')).hexdigest())
     server._dapbase_on_connected = AsyncMock()
     server._dapbase_on_disconnected = AsyncMock()
     monkeypatch.setattr(data_server, 'DataConn', lambda **kwargs: _conn())
@@ -118,7 +120,7 @@ async def test_the_eaas_connection_answers_credit_checks_while_connected(monkeyp
         seen['signalled'] = data_server._eaas_connected.is_set()
 
     monkeypatch.setattr(data_server, 'TransportWebSocket', lambda: MagicMock(accept=accept))
-    await server.listen(MagicMock())
+    await server.listen(MagicMock(headers={'authorization': f'Bearer {token}'}))
 
     assert seen['while_connected'] is not None and seen['signalled']
     assert data_server._eaas is None and not data_server._eaas_connected.is_set()
