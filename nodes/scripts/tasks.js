@@ -52,6 +52,7 @@ const {
 	parallel,
 	bracket,
 	parseServerAddress,
+	testServerLogFile,
 	isLinux,
 	loadPackageJson,
 } = require('../../scripts/lib');
@@ -136,6 +137,7 @@ function makeStartTestServerAction(options = {}) {
 			const result = await startServer({
 				script: 'ai/eaas.py',
 				trace: options.trace,
+				logFile: testServerLogFile('nodes'),
 				basePort: 40000, // Use 40000 range for node tests
 				env: {
 					ROCKETRIDE_MOCK: mocksPath,
