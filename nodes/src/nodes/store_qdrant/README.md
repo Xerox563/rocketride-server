@@ -105,7 +105,7 @@ Takes a required `object_ids` string array and removes all points whose `meta.ob
 
 ### `soft_delete` and `restore`
 
-Move documents to the trash and back by object ID. Both take a required `object_ids` string array; `soft_delete` marks every point whose `meta.objectId` matches as deleted, so it leaves search and the read tools until `restore` clears the mark. Both return `{"success": true, "object_ids": [...], "matched_chunks": null}`, since this store does not count the points it marks. A document removed with `delete` cannot be restored.
+Move documents to the trash and back by object ID. Both take a required `object_ids` string array; `soft_delete` marks every point whose `meta.objectId` matches as deleted, so it leaves search and the read tools until `restore` clears the mark. Both return `{"success": true, "object_ids": [...], "matched_chunks": null}`, since this store does not count the points it marks. A document removed with `delete` cannot be restored. Both need a Qdrant server of 1.8 or newer, since they update only the nested `meta.isDeleted` field.
 
 ## Profiles
 
