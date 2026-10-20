@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — since 2026-10-16
 
+### Fixed
+- **nodes**: `parse` extracts embedded images, audio and video only when something is connected to that lane, and reuses its Tika configuration for embedded objects instead of rebuilding it per object; PDFs drawn as thousands of inline images parse in under a second on text pipelines instead of minutes, and image pipelines get the same images about ten times faster (#2745).
+
 ## [3.5.0] - 2026-10-16
 
 ### Added
