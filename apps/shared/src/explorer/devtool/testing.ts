@@ -316,6 +316,8 @@ export interface IPeerSpy {
 	posts: unknown[];
 	/** How many times it was subscribed. */
 	subscribes: number;
+	/** Subscriptions not yet unsubscribed. */
+	active: number;
 }
 
 /**
@@ -328,6 +330,7 @@ export function spyPeer(peer: DevToolPeer): IPeerSpy {
 	const spy: IPeerSpy = {
 		posts: [],
 		subscribes: 0,
+		active: 0,
 		peer: {
 			post: (message) => {
 				spy.posts.push(message);
@@ -335,11 +338,73 @@ export function spyPeer(peer: DevToolPeer): IPeerSpy {
 			},
 			subscribe: (cb) => {
 				spy.subscribes += 1;
-				return peer.subscribe(cb);
+				spy.active += 1;
+				const off = peer.subscribe(cb);
+				let done = false;
+				return () => {
+					if (done) return;
+					done = true;
+					spy.active -= 1;
+					off();
+				};
 			},
 		},
 	};
 	return spy;
+}
+
+// =============================================================================
+// LANE GUARDS (quirk 1: the sidebar peer keeps ONE live subscriber)
+// =============================================================================
+
+/**
+ * Assert a mounted controller left exactly TWO live subscriptions on the
+ * sidebar peer: its channel, then its op server. Nothing can stop a third at
+ * runtime (busPeer.ts hands the live slot to whoever subscribed last, so a
+ * channel built in a render after the effect silently takes every call), so
+ * each lane pins it in its own mount test:
+ *
+ *   const spy = spyPeer(h.sidebarPeer);
+ *   const channel = shellProtocol.createToolChannel(spy.peer);   // as the host does
+ *   <mount the lane's controller wiring over spy.peer and channel>
+ *   assertSidebarSubscribers(spy, 'graph sidebar');
+ *
+ * @param spy - The spied sidebar peer the mount used.
+ * @param label - Names the mount in the error.
+ * @throws Error unless `spy.active === 2`.
+ */
+export function assertSidebarSubscribers(spy: IPeerSpy, label = 'controller mount'): void {
+	if (spy.active === 2) return;
+	throw new Error(`${label}: the sidebar peer has ${spy.active} live subscribers; a mounted controller must leave exactly 2 (its channel, then its op server). `
+		+ 'Any other subscriber takes the op server\'s live slot (busPeer.ts), and every call then goes unanswered.');
+}
+
+/** The protocol factories every app must import in ONE wiring module. */
+const TOOL_FACTORIES = ['createToolChannel', 'createToolOpServer', 'createToolController'];
+
+/**
+ * The files that import a protocol factory (createToolChannel,
+ * createToolOpServer, createToolController) as a VALUE from 'shell'. A lane's
+ * source-reading test asserts the list is exactly its one wiring module, so
+ * no view can build a stray subscriber (see {@link assertSidebarSubscribers}).
+ *
+ * @param files - Each source file's path and text (the test reads them; this module has no fs).
+ * @returns The paths that import one, in the order given.
+ */
+export function findToolFactoryImports(files: ReadonlyArray<{ path: string; text: string }>): string[] {
+	const valueImport = /import\s+(?!type\b)\{([^}]*)\}\s*from\s*'shell'/g;
+	const found: string[] = [];
+	for (const { path, text } of files) {
+		let match: RegExpExecArray | null;
+		let hit = false;
+		valueImport.lastIndex = 0;
+		while ((match = valueImport.exec(text)) !== null) {
+			const names = match[1].split(',').map((part) => part.trim().replace(/^type\s+/, '').split(/\s+as\s+/)[0].trim());
+			if (names.some((name) => TOOL_FACTORIES.includes(name))) hit = true;
+		}
+		if (hit) found.push(path);
+	}
+	return found;
 }
 
 // =============================================================================

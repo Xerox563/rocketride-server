@@ -31,7 +31,11 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { account, assertJsonSafe, createDevToolHarness, createFakeSocketlessRealm, makeBus, settle, shellProtocol } from './testing';
+import type { ToolOpMap, ToolOpSpec } from 'shell';
+import { attachController } from './controller';
+import type { IDeadline } from './deadline';
+import type { Reply } from './reply';
+import { account, assertJsonSafe, assertSidebarSubscribers, createDevToolHarness, createFakeSocketlessRealm, findToolFactoryImports, makeBus, settle, shellProtocol, spyPeer } from './testing';
 
 describe('assertJsonSafe', () => {
 	it('accepts plain JSON data', () => {
@@ -169,3 +173,63 @@ describe('the fake realms follow connection.ts', () => {
 		assert.equal(await realm.cm.read('shell:account'), null);
 	});
 });
+
+describe('the second-subscriber guard (quirk 1) a lane copies into its own mount test', () => {
+	interface GuardOps extends ToolOpMap {
+		'g.read': ToolOpSpec<IDeadline, Reply<number>>;
+	}
+
+	/**
+	 * Mount a controller the way a lane does, over a spied sidebar peer.
+	 *
+	 * @param withHostChannel - Build the host channel first (both real hosts do).
+	 * @returns The spy and the mount.
+	 */
+	function mount(withHostChannel: boolean) {
+		const h = createDevToolHarness();
+		const spy = spyPeer(h.sidebarPeer);
+		const channel = withHostChannel ? shellProtocol.createToolChannel(spy.peer) : undefined;
+		const attach = () => attachController<GuardOps>({
+			peer: spy.peer,
+			...(channel ? { channel } : {}),
+			createToolChannel: shellProtocol.createToolChannel,
+			createToolOpServer: shellProtocol.createToolOpServer,
+			handlers: { 'g.read': () => 1 },
+		});
+		return { h, spy, attach };
+	}
+
+	it('passes for a correct mount, StrictMode remount included (channel + op server)', () => {
+		for (const withHostChannel of [true, false]) {
+			const { spy, attach } = mount(withHostChannel);
+			attach().dispose();
+			const live = attach();
+			assert.doesNotThrow(() => assertSidebarSubscribers(spy, 'mount'));
+			assert.equal(spy.active, 2);
+			live.dispose();
+		}
+	});
+
+	it('fails for a stray subscriber after the mount (a channel built in render), which really does steal every call', async () => {
+		const { h, spy, attach } = mount(true);
+		const live = attach();
+		shellProtocol.createToolChannel(spy.peer);
+		assert.throws(() => assertSidebarSubscribers(spy, 'sql sidebar'), /sql sidebar: the sidebar peer has 3 live subscribers/);
+		const call = shellProtocol.createToolController<GuardOps>(h.newFramePeer());
+		await settle();
+		await assert.rejects(call('g.read', { deadlineAt: Date.now() + 60_000 }, { timeoutMs: 100 }), /did not answer/);
+		live.dispose();
+	});
+
+	it('findToolFactoryImports lists the modules that import a protocol factory as a VALUE from shell', () => {
+		const found = findToolFactoryImports([
+			{ path: 'src/devtool/wiring.ts', text: "import { createToolOpServer, typedToolChannel } from 'shell';" },
+			{ path: 'src/Sidebar.tsx', text: "import {\n\tConnectionManager,\n\tcreateToolChannel,\n} from 'shell';" },
+			{ path: 'src/types.ts', text: "import type { ToolChannel, IToolOpServer } from 'shell';" },
+			{ path: 'src/frame.ts', text: "import { createToolController as makeController } from 'shell';" },
+			{ path: 'src/other.ts', text: "import { useToolState } from 'shell';\n// createToolChannel is mentioned in a comment only" },
+		]);
+		assert.deepEqual(found, ['src/devtool/wiring.ts', 'src/Sidebar.tsx', 'src/frame.ts']);
+	});
+});
+
