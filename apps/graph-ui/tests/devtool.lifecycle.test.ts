@@ -15,7 +15,7 @@ import { describe, it } from 'node:test';
 import { DEFAULT_TOOL_TIMEOUTS, ExplorerToolError } from 'shared/explorer';
 import { codedError, manualClock } from 'shared/explorer/connect/testing';
 import { assertSidebarSubscribers } from 'shared/explorer/devtool/testing';
-import { makeGraphEndpointStore } from '../src/adapters/explorer';
+import { makeGraphEndpointStore, makeGraphHistory } from '../src/adapters/explorer';
 import { OP } from '../src/devtool/protocol';
 import { PREVIEW_MAX_AGE_MS, previewFor } from '../src/graph/previews';
 import { account, graphRow, mountController, mountFrame, readOnlyNode, rocketRealm, settle, signInVsCode, until, vscodeRealm } from './support/devtool';
@@ -163,6 +163,114 @@ describe('T7 - identity fails closed', () => {
 		assert.equal(landing.frame.lastReset(), 'identity', 'and cleared its caches');
 		doc.frame.dispose();
 		landing.frame.dispose();
+		mounted.controller.dispose();
+	});
+});
+
+describe('T7 - history belongs to one identity at a time (the controller side)', () => {
+	it('identity B is never served identity A\'s history, not even while B\'s history file is still loading', async () => {
+		const engine = vscodeRealm();
+		// Hold the history file reads, so the window between B signing in and B's file loading is observable.
+		let holdReads = false;
+		const releases: Array<() => void> = [];
+		const inner = engine.cm.request.bind(engine.cm);
+		const cm = Object.assign(Object.create(null), engine.cm, {
+			request: async (op: string, params: unknown, opts?: { timeoutMs?: number }) => {
+				if (holdReads && (op === 'client.fsStat' || op === 'client.fsReadJson')) await new Promise<void>((resolve) => releases.push(resolve));
+				return inner(op, params, opts);
+			},
+		});
+		signInVsCode(engine.realm, 'u1');
+		const mounted = mountController(cm as never);
+		mounted.h.setHostConnection(true);
+		const landing = mountFrame(mounted.h, undefined);
+		await until(() => Object.keys(landing.frame.env(true).endpoints.get().probes).length === 1, 'the probe');
+		const key = landing.frame.env(true).endpoints.get().endpoints[0].key;
+		await until(() => engine.requests.some((r) => r.op === 'client.fsStat'), 'A\'s history file read');
+		landing.frame.env(true).history.record(key, { id: 'a1', at: 1, kind: 'read', cypher: 'MATCH (a) RETURN a', ms: 1, outcome: 'rows', rows: 1 } as never);
+		await until(() => mounted.controller.stores.history.getHistory(key).length === 1, 'A\'s run recorded');
+
+		holdReads = true;
+		engine.realm.root.disconnect();
+		engine.realm.root.connect(account('u2'));
+		await until(() => mounted.controller.identity.get().known && mounted.controller.identity.get().fingerprint !== null && releases.length > 0, 'B signed in, its file read held');
+		const served = await landing.frame.caller.callReply(OP.historyList, { key }, { timeoutMs: 5_000 });
+		assert.deepEqual(served.entries.map((e) => e.id), [], 'nothing of A while B\'s file loads');
+		assert.deepEqual(mounted.controller.stores.history.getHistory(key), [], 'and nothing of A in the controller\'s memory');
+		for (const release of releases.splice(0)) release();
+		holdReads = false;
+		await settle();
+		landing.frame.dispose();
+		mounted.controller.dispose();
+	});
+
+	it('a run recorded in the last 300 ms before the controller unmounts is still written to the history file', async () => {
+		const engine = vscodeRealm();
+		signInVsCode(engine.realm);
+		const mounted = mountController(engine.cm, { stores: { endpoints: makeGraphEndpointStore({ debounceMs: 0 }), history: makeGraphHistory(300) } });
+		mounted.h.setHostConnection(true);
+		const { frame } = mountFrame(mounted.h, undefined);
+		await until(() => Object.keys(frame.env(true).endpoints.get().probes).length === 1, 'the probe');
+		await until(() => engine.requests.some((r) => r.op === 'client.fsStat'), 'the history file read');
+		await settle();
+		const key = frame.env(true).endpoints.get().endpoints[0].key;
+		frame.env(true).history.record(key, { id: 'last', at: 1, kind: 'read', cypher: 'RETURN 1', ms: 1, outcome: 'rows', rows: 1 } as never);
+		await until(() => mounted.controller.stores.history.getHistory(key).length === 1, 'the controller recorded it');
+		mounted.controller.dispose();
+		await until(() => JSON.stringify([...engine.files.values()]).includes('"last"'), 'the last run in the file', 120);
+		frame.dispose();
+	});
+});
+
+describe('R8/R9 on the controller side: identity clears its caches, and the host\'s activeDocKey wins', () => {
+	it('a switch from account A to B clears the controller\'s schemas and A\'s pending preview, which no frame of B can take', async () => {
+		const engine = vscodeRealm();
+		signInVsCode(engine.realm, 'u1');
+		const mounted = mountController(engine.cm);
+		mounted.h.setHostConnection(true);
+		const landingA = mountFrame(mounted.h, undefined);
+		await until(() => Object.keys(landingA.frame.env(true).endpoints.get().probes).length === 1, 'the probe');
+		const key = landingA.frame.env(true).endpoints.get().endpoints[0].key;
+		const sidebar = mounted.controller.env(true);
+		await sidebar.loadSchema(key);
+		await until(() => mounted.controller.stores.schemas.get(key).status === 'ready', 'A\'s schema');
+		sidebar.previews.request({ endpointKey: key, action: 'label-preview', name: 'Person' });
+		await until(() => landingA.frame.env(true).previews.pending.get() !== null, 'A\'s request reaches the frames');
+		const fingerprintA = mounted.controller.identity.get().fingerprint;
+
+		engine.realm.root.accountChanged(account('u2'));
+		await until(() => mounted.controller.identity.get().known && mounted.controller.identity.get().fingerprint !== fingerprintA, 'account B');
+		assert.deepEqual(mounted.controller.stores.schemas.keys(), [], 'A\'s schema snapshots are gone');
+		assert.equal(mounted.controller.stores.previews.get(), null, 'A\'s pending preview is gone');
+		const landingB = mountFrame(mounted.h, undefined);
+		await settle();
+		assert.equal(landingB.frame.env(true).previews.pending.get(), null, 'a frame of B never sees A\'s request');
+		await until(() => landingA.frame.env(true).previews.pending.get() === null, 'and an older frame stops seeing it');
+		landingA.frame.dispose();
+		landingB.frame.dispose();
+		mounted.controller.dispose();
+	});
+
+	it('noteActiveDocKey drives activeConnection: a string names the fronted document and wins over the frames\' event; null clears it; undefined falls back to the event', async () => {
+		const engine = vscodeRealm();
+		signInVsCode(engine.realm);
+		const mounted = mountController(engine.cm);
+		mounted.h.setHostConnection(true);
+		const { controller } = mounted;
+		controller.noteActiveDocKey('workbench:k1|one');
+		assert.equal(controller.activeConnection.get(), 'k1|one');
+		const other = mountFrame(mounted.h, 'workbench:k1|two');
+		await settle();
+		assert.equal(controller.activeConnection.get(), 'k1|one', 'the host\'s key wins over a frame\'s active event');
+		controller.noteActiveDocKey(null);
+		assert.equal(controller.activeConnection.get(), null, 'null: another tab is fronted');
+		controller.noteActiveDocKey(undefined);
+		assert.equal(controller.activeConnection.get(), 'k1|two', 'undefined: the host cannot tell, so the frames\' event decides');
+		controller.noteActiveDocKey('write:k1|three');
+		assert.equal(controller.activeConnection.get(), 'k1|three', 'a write console belongs to its connection too');
+		controller.noteActiveDocKey('');
+		assert.equal(controller.activeConnection.get(), null, 'the generic frame (the landing) has no connection');
+		other.frame.dispose();
 		mounted.controller.dispose();
 	});
 });

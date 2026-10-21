@@ -400,6 +400,11 @@ export function createGraphController(opts: IGraphControllerOptions): IGraphCont
 		if (owner === historyOwner) return;
 		detachHistory?.();
 		detachHistory = null;
+		// Forget the previous owner's history NOW: an attach under the new owner (or under none) makes the store drop
+		// what it held for anyone else, and the immediate detach leaves nothing attached; the file-backed attach below
+		// hydrates the new owner's bag. Without it A's entries stayed in memory, and were served to B's frames, until
+		// B's history file had loaded.
+		stores.history.attachPrefs(memoryPrefs(), owner)();
 		prefs?.dispose();
 		prefs = null;
 		historyOwner = owner;
@@ -477,6 +482,9 @@ export function createGraphController(opts: IGraphControllerOptions): IGraphCont
 			if (disposed) return;
 			disposed = true;
 			for (const off of offs.splice(0)) off();
+			// Same owner, going away (a disconnect unmounts the controller): hand the batch still waiting in the history
+			// store's debounce to the file accessor BEFORE the last detach drops it; close() then writes the file.
+			stores.history.flush();
 			detachHistory?.();
 			detachHistory = null;
 			const closing = prefs;
