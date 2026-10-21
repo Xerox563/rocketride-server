@@ -95,8 +95,10 @@ interface ScanTraits {
 	hashNeedsSpaceOrBang: boolean;
 	/** `--` only starts a comment when whitespace follows (MySQL only). */
 	dashCommentsNeedSpace: boolean;
-	/** `/* *\/` blocks nest (PostgreSQL only). */
+	/** `/* *\/` blocks nest (PostgreSQL, ClickHouse). */
 	nestedBlockComments: boolean;
+	/** `//` starts a line comment (ClickHouse). */
+	slashComments: boolean;
 	/** `$tag$ ... $tag$` bodies are recognised (PostgreSQL; ClickHouse's heredocs). */
 	dollarQuotes: boolean;
 	/** A dollar quote opens only when its closing tag follows (ClickHouse: an unclosed `$tag$` is not a heredoc). */
@@ -133,14 +135,15 @@ interface Region {
 /**
  * Resolve the lexical traits of a dialect.
  *
- * ClickHouse takes `--` and block comments, and `#` only as `# ` or `#!`
- * ("SQL-style comments start with --, #! or # "); its heredocs are
- * `$tag$ ... $tag$` bodies that need their closing tag; and it treats a
- * backslash inside a string literal as an escape. MySQL is the only dialect
- * here that requires whitespace after `--` before it means a comment.
- * PostgreSQL is the only dialect here with nested block comments, and the
- * only one where a plain `'...'` literal does NOT honour backslash escapes
- * (`standard_conforming_strings`); its `E'...'` form is detected separately.
+ * ClickHouse takes `--` and `//` line comments, nested block comments, and
+ * `#` only as `# ` or `#!` ("SQL-style comments start with --, #! or # ");
+ * its heredocs are `$tag$ ... $tag$` bodies that need their closing tag; and
+ * it treats a backslash inside a string literal as an escape (Lexer.cpp).
+ * MySQL is the only dialect here that requires whitespace after `--` before
+ * it means a comment. PostgreSQL nests block comments too, and is the only
+ * dialect here where a plain `'...'` literal does NOT honour backslash
+ * escapes (`standard_conforming_strings`); its `E'...'` form is detected
+ * separately.
  *
  * @param dialect - The engine dialect.
  * @returns The traits the scanner applies.
@@ -150,7 +153,8 @@ function traitsFor(dialect: SqlDialect): ScanTraits {
 		hashComments: dialect === 'mysql' || dialect === 'clickhouse',
 		hashNeedsSpaceOrBang: dialect === 'clickhouse',
 		dashCommentsNeedSpace: dialect === 'mysql',
-		nestedBlockComments: dialect === 'postgres',
+		nestedBlockComments: dialect === 'postgres' || dialect === 'clickhouse',
+		slashComments: dialect === 'clickhouse',
 		dollarQuotes: dialect === 'postgres' || dialect === 'clickhouse',
 		dollarQuoteNeedsClose: dialect === 'clickhouse',
 		backslashEscapes: dialect === 'mysql' || dialect === 'clickhouse',
@@ -403,6 +407,9 @@ function scanRegions(sql: string, traits: ScanTraits): Region[] {
 			end = skipLineComment(sql, i, traits.crEndsLineComment);
 			kind = 'comment';
 		} else if (traits.hashComments && ch === '#' && (!traits.hashNeedsSpaceOrBang || sql[i + 1] === ' ' || sql[i + 1] === '!')) {
+			end = skipLineComment(sql, i);
+			kind = 'comment';
+		} else if (traits.slashComments && ch === '/' && sql[i + 1] === '/') {
 			end = skipLineComment(sql, i);
 			kind = 'comment';
 		} else if (executable && ch === '*' && sql[i + 1] === '/') {

@@ -197,6 +197,18 @@ const CASES: ISplitCase[] = [
 		expect: ['SELECT $$a;b$$', 'SELECT $h$c;d$h$', 'SELECT 2'],
 	},
 	{
+		name: 'clickhouse: // starts a line comment, so its semicolon does not split',
+		sql: 'SELECT 1 // x; y\n; SELECT 2',
+		dialect: 'clickhouse',
+		expect: ['SELECT 1 // x; y', 'SELECT 2'],
+	},
+	{
+		name: 'clickhouse: block comments nest, so a semicolon inside the outer one does not split',
+		sql: 'SELECT /* a /* b */ ; */ 1; SELECT 2',
+		dialect: 'clickhouse',
+		expect: ['SELECT /* a /* b */ ; */ 1', 'SELECT 2'],
+	},
+	{
 		name: 'clickhouse: an unclosed heredoc tag opens nothing — the semicolon splits',
 		sql: 'SELECT $$a; SELECT 2',
 		dialect: 'clickhouse',
