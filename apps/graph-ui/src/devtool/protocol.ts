@@ -267,6 +267,13 @@ export const ENDPOINTS_STATE_BYTES = MAX_RETAINED_STATE_BYTES - 4 * 1024;
 export const SCHEMAS_STATE_BYTES = 48 * 1024;
 
 /**
+ * Budget of the data-versions snapshot. With the endpoints and schemas budgets this leaves about 3 KiB of the base's
+ * 128 KiB total (MAX_RETAINED_TOTAL_BYTES) for identity, history, previews and the readiness topic, so the fixed
+ * topics always fit together and the guard never has to degrade or withhold one of them.
+ */
+export const VERSIONS_STATE_BYTES = 16 * 1024;
+
+/**
  * Read a plain object's field.
  *
  * @param value - Anything.
@@ -275,6 +282,31 @@ export const SCHEMAS_STATE_BYTES = 48 * 1024;
  */
 export function field(value: unknown, name: string): unknown {
 	return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>)[name] : undefined;
+}
+
+/**
+ * The data-versions snapshot, cut to the budget: the connections a frame can show (those in the published endpoints
+ * snapshot) first, then the most recently written. A connection left out reads as version 0 in the frames, which a
+ * drawn graph that already saw a write treats as "may have changed" (the conservative reading).
+ *
+ * @param all - Every version, ordered from the least to the most recently bumped (IDataVersions.snapshot).
+ * @param shown - The keys in the published endpoints snapshot.
+ * @param maxBytes - The budget.
+ * @returns The snapshot.
+ */
+export function versionsSnapshot(all: Record<string, number>, shown: ReadonlySet<string>, maxBytes: number = VERSIONS_STATE_BYTES): Record<string, number> {
+	if (jsonByteLength(all) <= maxBytes) return { ...all };
+	const newestFirst = Object.keys(all).reverse();
+	const ordered = [...newestFirst.filter((key) => shown.has(key)), ...newestFirst.filter((key) => !shown.has(key))];
+	const out: Record<string, number> = {};
+	let bytes = 2;
+	for (const key of ordered) {
+		const size = jsonByteLength({ [key]: all[key] });
+		if (bytes + size > maxBytes) continue;
+		out[key] = all[key];
+		bytes += size;
+	}
+	return out;
 }
 
 /**

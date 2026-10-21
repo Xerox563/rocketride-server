@@ -84,7 +84,7 @@ import { createSchemaStore } from '../graph/schemaStore';
 import type { ReadQueryResult } from '../graph/types';
 import { createLocalGraphEnv } from '../localEnv';
 import type { IGraphStores } from '../localEnv';
-import { EVENT, GRAPH_APP_ID, OP, STATE, docKeyFor, endpointsSnapshot, field, schemasSnapshot, toWire } from './protocol';
+import { EVENT, GRAPH_APP_ID, OP, STATE, docKeyFor, endpointsSnapshot, field, schemasSnapshot, toWire, versionsSnapshot } from './protocol';
 import type { GraphOps, HistoryEdit, IGraphHistoryView } from './protocol';
 
 /** What the controller needs from its realm's ConnectionManager (structural; tests pass the base's fake realms). */
@@ -319,11 +319,7 @@ export function createGraphController(opts: IGraphControllerOptions): IGraphCont
 	const shrink = (topic: string, snapshot: unknown, info: IOversizeInfo): unknown => {
 		if (topic === STATE.endpoints) return endpointsSnapshot(stores.endpoints.getState(), info.budgetBytes);
 		if (topic === STATE.schemas) return schemasSnapshot(entriesOf(), info.budgetBytes);
-		if (topic === STATE.dataVersions) {
-			// Keep the versions of connections still listed; the others' documents are gone or going.
-			const listed = new Set(stores.endpoints.getState().endpoints.map((e) => e.key));
-			return Object.fromEntries(Object.entries(stores.dataVersions.snapshot()).filter(([key]) => listed.has(key)));
-		}
+		if (topic === STATE.dataVersions) return versionsSnapshot(stores.dataVersions.snapshot(), shownKeys, info.budgetBytes);
 		return snapshot;
 	};
 	let withheld = false;
@@ -345,9 +341,18 @@ export function createGraphController(opts: IGraphControllerOptions): IGraphCont
 		channel.publishState(topic, snapshot);
 		if (!withheld) published.set(topic, text);
 	};
-	const publishEndpoints = (): void => publish(STATE.endpoints, endpointsSnapshot(stores.endpoints.getState()));
+	// The connections the frames can show: the data versions keep theirs first.
+	let shownKeys: ReadonlySet<string> = new Set();
+	const publishEndpoints = (): void => {
+		const snapshot = endpointsSnapshot(stores.endpoints.getState());
+		shownKeys = new Set(snapshot.endpoints.map((endpoint) => endpoint.key));
+		publish(STATE.endpoints, snapshot);
+		publishVersions();
+	};
 	const publishSchemas = (): void => publish(STATE.schemas, schemasSnapshot(entriesOf()));
-	const publishVersions = (): void => publish(STATE.dataVersions, stores.dataVersions.snapshot());
+	function publishVersions(): void {
+		publish(STATE.dataVersions, versionsSnapshot(stores.dataVersions.snapshot(), shownKeys));
+	}
 	let historyRev = 0;
 	const publishHistory = (): void => publish(STATE.history, { rev: historyRev });
 	const publishPreviews = (): void => publish(STATE.previews, { pending: stores.previews.get() });

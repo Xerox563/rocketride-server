@@ -22,7 +22,7 @@ import { assertJsonSafe, manualNow } from 'shared/explorer/devtool/testing';
 import type { DevToolPeer } from 'shared/explorer/devtool/realm';
 import { WRITE_REFUSED_TEXT } from '../src/devtool/controller';
 import type { IGraphFrame } from '../src/devtool/frame';
-import { CONTROLLER_LOCAL_OP_MS, ENDPOINTS_STATE_BYTES, EVENT, OP, SCHEMAS_STATE_BYTES, STATE, endpointsSnapshot, frameTimeoutFor, schemasSnapshot } from '../src/devtool/protocol';
+import { CONTROLLER_LOCAL_OP_MS, ENDPOINTS_STATE_BYTES, EVENT, OP, SCHEMAS_STATE_BYTES, STATE, VERSIONS_STATE_BYTES, endpointsSnapshot, frameTimeoutFor, schemasSnapshot, versionsSnapshot } from '../src/devtool/protocol';
 import { createDataVersions } from '../src/graph/dataVersion';
 import { createSchemaStore } from '../src/graph/schemaStore';
 import { NEO4J_DIALECT, NEO4J_GRAPH, NEO4J_WRITABLE, graphRow, mountController, mountFrame, readOnlyNode, settle, shellProtocol, signInVsCode, until, vscodeRealm } from './support/devtool';
@@ -318,6 +318,7 @@ describe('T11 - no bulk result is retained state, and sizes are guarded', () => 
 	});
 
 	it('400 connections, 40 loaded schemas and 2,000 data versions: the protocol\'s cuts and the base guard agree, and the whole map stays under 128 KiB', async () => {
+		assert.ok(ENDPOINTS_STATE_BYTES + SCHEMAS_STATE_BYTES + VERSIONS_STATE_BYTES + 2 * 1024 <= MAX_RETAINED_TOTAL_BYTES, 'the fixed budgets leave room for the small topics');
 		const names = Array.from({ length: 200 }, (_, i) => `Label${i}WithAReasonablyLongName`);
 		const schemaAnswer = { database: 'neo4j', labels: names, nodes: Object.fromEntries(names.map((n) => [n, [{ property: 'p', type: 'string' }]])), relationships: {} };
 		const rows = Array.from({ length: 400 }, (_, i) => graphRow({ token: `tk_${i}`, pipeline: { project_id: `p${i}`, name: `People ${i}`, components: [{ id: 'graph_1', provider: 'graph_neo4j', name: `People graph ${i}` }] } }));
@@ -343,11 +344,56 @@ describe('T11 - no bulk result is retained state, and sizes are guarded', () => 
 		const schemas = map[STATE.schemas]?.snapshot as Record<string, unknown>;
 		assert.ok(Object.keys(schemas).length > 0 && Object.keys(schemas).length < 40, 'schemas cut newest first');
 		const published = map[STATE.dataVersions]?.snapshot as Record<string, number>;
-		assert.deepEqual(Object.keys(published), [keys[0]], 'data versions degraded to the listed connections');
-		const degraded = mounted.errors.filter((e) => e.where === 'state').map((e) => `${(e.error as { topic?: string }).topic}:${(e.error as { outcome?: string }).outcome}`);
-		assert.ok(degraded.length > 0 && degraded.every((d) => d === 'dataVersions:degraded'), `only the data versions were degraded, never withheld: ${degraded.join(', ')}`);
+		assert.equal(published[keys[0]], 1, 'the listed connection that had a write keeps its version first');
+		assert.ok(jsonByteLength(published) <= VERSIONS_STATE_BYTES && Object.keys(published).length < 2_001, 'the versions are cut to their own budget');
+		assert.ok(Object.keys(published).includes(keys[0]) && Object.keys(published).length > 1, 'then the most recently written fill the rest');
+		const reports = mounted.errors.filter((e) => e.where === 'state').map((e) => `${(e.error as { topic?: string }).topic}:${(e.error as { outcome?: string }).outcome}`);
+		assert.deepEqual(reports, [], 'the fixed topics fit together: the guard never degrades or withholds one');
 		assert.deepEqual(mounted.h.violations, []);
 		mounted.controller.dispose();
+	});
+
+	it('440 connections, 40 schemas and a write on EVERY listed connection: data versions are cut to their budget, the published connections first, never withheld', async () => {
+		const names = Array.from({ length: 200 }, (_, i) => `Label${i}WithAReasonablyLongName`);
+		const schemaAnswer = { database: 'neo4j', labels: names, nodes: Object.fromEntries(names.map((n) => [n, [{ property: 'p', type: 'string' }]])), relationships: {} };
+		const rows = Array.from({ length: 440 }, (_, i) => graphRow({ token: `tk_${i}`, pipeline: { project_id: `p${i}`, name: `People ${i}`, components: [{ id: 'graph_1', provider: 'graph_neo4j', name: `People graph ${i}` }] } }));
+		const engine = vscodeRealm(rows, (call) => (call.tool === 'get_schema' ? schemaAnswer : readOnlyNode(call)));
+		signInVsCode(engine.realm);
+		const mounted = mountController(engine.cm);
+		mounted.h.setHostConnection(true);
+		await until(() => Object.keys(mounted.controller.stores.endpoints.getState().probes).length === 440, '440 probes', 500);
+		const env = mounted.controller.env(true);
+		const keys = mounted.controller.stores.endpoints.getState().endpoints.map((e) => e.key);
+		for (const key of keys.slice(0, 40)) await env.loadSchema(key);
+		const { frame } = mountFrame(mounted.h, undefined);
+		await settle();
+		for (const key of keys) mounted.controller.stores.dataVersions.bump(key);
+		await settle();
+
+		const outcomes = mounted.errors.filter((e) => e.where === 'state').map((e) => `${(e.error as { topic?: string }).topic}:${(e.error as { outcome?: string }).outcome}`);
+		assert.ok(!outcomes.some((o) => o.endsWith(':withheld')), `nothing withheld: ${[...new Set(outcomes)].join(', ')}`);
+		const map = latestStateMap(mounted.h);
+		assert.ok(jsonByteLength(map) <= MAX_RETAINED_TOTAL_BYTES, `the whole map is ${jsonByteLength(map)} bytes`);
+		const published = (map[STATE.endpoints]?.snapshot as { endpoints: Array<{ key: string }> }).endpoints.map((e) => e.key);
+		const versions = map[STATE.dataVersions]?.snapshot as Record<string, number>;
+		assert.ok(published.length > 0 && published.length < 440, 'the premise: the endpoints snapshot is cut');
+		for (const key of published) assert.equal(versions[key], 1, 'every connection a frame can show has its version');
+		await until(() => frame.env(true).dataVersions.get(published[published.length - 1]) === 1, 'a frame sees the write on a published connection');
+		assert.deepEqual(mounted.h.violations, []);
+		frame.dispose();
+		mounted.controller.dispose();
+	});
+
+	it('versionsSnapshot keeps the shown connections first, then the newest, within the budget', () => {
+		const all: Record<string, number> = {};
+		for (let i = 0; i < 300; i += 1) all[`k1|unlisted|${String(i).padStart(4, '0')}`] = 1;
+		all['k1|shown|old'] = 3;
+		for (let i = 300; i < 600; i += 1) all[`k1|unlisted|${String(i).padStart(4, '0')}`] = 1;
+		const cut = versionsSnapshot(all, new Set(['k1|shown|old']), 2_048);
+		assert.ok(jsonByteLength(cut) <= 2_048);
+		assert.equal(cut['k1|shown|old'], 3, 'a shown connection first, however old its write');
+		assert.ok('k1|unlisted|0599' in cut && !('k1|unlisted|0000' in cut), 'then the most recently written');
+		assert.deepEqual(versionsSnapshot({ a: 1 }, new Set(), 2_048), { a: 1 }, 'a small map is kept whole');
 	});
 
 	it('a history list is an op result: the history state is a revision number only', async () => {
