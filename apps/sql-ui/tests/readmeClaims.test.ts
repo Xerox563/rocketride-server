@@ -41,8 +41,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DEFAULT_RETRY_WINDOW_MS } from 'shared/explorer/connect/session';
 import { historyPrefsPath } from 'shared/explorer/devtool/prefs';
+import { UNBOUNDED_TOOL_TIMEOUT_MS } from 'shared/explorer/devtool/timeouts';
 import { DATABASE_PROVIDERS } from '../src/connect';
 import { DIALECT_WAIT_MS, GET_SCHEMA_WAIT_MS, REFRESH_SCHEMA_WAIT_MS, STATEMENT_WAIT_PAD_MS } from '../src/connect/tools';
+import { MAX_WATCHED_HISTORY_KEYS } from '../src/sqlController';
 
 const README = fs.readFileSync(path.resolve(__dirname, '..', 'README.md'), 'utf8');
 const prose = README.replace(/\s+/g, ' ');
@@ -77,6 +79,17 @@ describe('README claims', () => {
 		assert.equal(historyPrefsPath('sql'), '@/User/.workspace/rocketride.sql.history.json');
 		assert.match(prose, /`\.workspace\/rocketride\.sql\.history\.json` in your user storage/);
 		assert.match(prose, /the last one to save wins/);
+	});
+
+	it('states the dev tool\'s gate, history and wait rules the way the code applies them', () => {
+		assert.match(prose, /If the node cannot say which dialect it speaks, the statement is\s+sent once and never repeated\./);
+		assert.match(prose, /`NO_BACKSLASH_ESCAPES`/);
+		assert.match(prose, /`SELECT\s+nextval\('s'\)`\) still counts as a read/);
+		assert.equal(UNBOUNDED_TOOL_TIMEOUT_MS, 24 * 60 * 60 * 1000);
+		assert.match(prose, /waited for up to 24 hours/);
+		assert.equal(MAX_WATCHED_HISTORY_KEYS, 128);
+		assert.match(prose, /More than 128 history views open at once/);
+		assert.match(prose, /Another account signs in:\*\* the previous account's last unsaved\s+statements are dropped/);
 	});
 
 	it('links only to sections that exist', () => {

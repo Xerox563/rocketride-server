@@ -189,10 +189,19 @@ never re-sent, but a read that changes something through a function
 (`nextval` or another volatile function) counts as a read here. It is still
 never run twice, because the refusal comes before the database sees it. A
 statement that reached the database is never re-sent, whatever happens to
-its answer. As a dev tool the connection's engine checks this again for
-every statement it is sent, so a write is never repeated whichever document
-sent it; in VS Code the engine's refusal code does not reach SQL Explorer, so
-there the statement is not sent again and the refusal is shown.
+its answer. As a dev tool the sidebar checks this again for every statement
+it is sent, with the dialect the database node reports (it asks the node
+when it does not know yet), so a write is never repeated whichever document
+sent it. If the node cannot say which dialect it speaks, the statement is
+sent once and never repeated. In VS Code the engine's refusal code does not
+reach SQL Explorer, so there the statement is not sent again and the
+refusal is shown.
+
+The check reads the statement's text, not the server's settings. A setting
+that changes how the server reads text (MySQL's `NO_BACKSLASH_ESCAPES`,
+PostgreSQL with `standard_conforming_strings` off) is not taken into
+account, and a read that changes something through a function (`SELECT
+nextval('s')`) still counts as a read.
 
 ### The row limit
 
@@ -570,9 +579,22 @@ these differences:
   change history at the same time each write the file from what they read, so
   the last one to save wins. The drawer's privacy line says which of these
   applies. The sidebar forgets one account's history as soon as you sign out
-  or another account signs in, before the next account's section is read. A
-  statement run just before the sidebar closes (or the connection drops) is
-  still saved.
+  or another account signs in, before the next account's section is read.
+  What survives a change:
+  - **Sign-out, or the connection drops:** a statement run just before is
+    kept, and written as soon as the server takes the write, at the latest
+    when the same account is signed in again, as long as the sidebar stays
+    open. If the sidebar closes first (in VS Code it closes when the
+    connection drops), the write is tried once more as it closes and is lost
+    if the server cannot be reached then.
+  - **Another account signs in:** the previous account's last unsaved
+    statements are dropped, never written into the new account's file.
+  - **A statement run while the history file is still being read** (just
+    after the sidebar opens or an account signs in) is saved once the read
+    ends; if the account changes or the sidebar closes before that, it is
+    lost.
+  - **More than 128 history views open at once:** the oldest views stop
+    updating until they are opened again.
 - **Switches are for the session.** **Run and stop asking on this
   connection** turns the pattern check off until the document's window
   closes, not for good (the app keeps it in your workspace preferences). A
@@ -580,7 +602,10 @@ these differences:
 - **The connection is the sidebar's.** When the engine connection drops, run
   and apply are disabled in every document, and a statement that was waiting
   is reported as possibly still running (there is no way to cancel it). An
-  action taken while the connection is down is not sent at all. A document
+  action taken while the connection is down is not sent at all. The sidebar
+  reads nothing from the engine (your saved connections, your history file,
+  the running pipelines) until you open it or a document asks it something.
+  A document
   restored before the SQL Explorer sidebar was opened asks you to open it; a
   document that is already open stays open, with run and apply disabled,
   while the sidebar is closed. With several hundred saved connections, the
@@ -597,7 +622,10 @@ these differences:
   the refusal is shown as the engine worded it.
 - **Waits are explicit.** Every request to the engine names how long it may
   take (see [Limits](#limits)); a document waits a little longer than the
-  sidebar, so the sidebar's own answer arrives first.
+  sidebar, so the sidebar's own answer arrives first. A statement on a node
+  that publishes no deadline is waited for up to 24 hours (the longest wait
+  the tool sets on any request), after which the document stops waiting; the
+  statement itself is not stopped.
 
 ## Limits
 
