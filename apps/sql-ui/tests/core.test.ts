@@ -102,6 +102,28 @@ describe('resolution: a saved connection names one running endpoint', () => {
 		}
 	});
 
+	it('with two matching development runs, opens the caller\'s own (the spec\'s resolution rule), whatever their order or state', async () => {
+		// A second development run with the same legacy key as the caller's own.
+		const second = (): IFakeTaskRow => taskRow('p1', { ownerId: 'u2', token: 'tk_sentinel_second' });
+		const tool = (params: { tool: string; token: string }): unknown => {
+			if (params.tool === 'execute') return { rows: [{ ok: 1 }], affected_rows: 0 };
+			// The caller's own run answers its probe late, so its state is worse.
+			if (params.token === 'tk_sentinel_p1') throw new Error('starting');
+			return { dialect: 'postgres' };
+		};
+		const { engine, core } = await rig([PIPELINE], [second(), devRow()], tool as Parameters<typeof engineScript>[2]);
+		try {
+			await core.resolve('c-pipe');
+			const matching = core.endpoints.getState().endpoints.filter((endpoint) => endpoint.legacyKey === 'p1:s1:db_1');
+			assert.equal(matching.length, 2, 'two runs share the legacy key');
+			await core.withSession('c-pipe', (session) => session.execute('SELECT 1'));
+			const executes = engine.requests.filter((request) => request.op === 'client.tool' && (request.params as { tool: string }).tool === 'execute');
+			assert.deepEqual(executes.map((request) => (request.params as { token: string }).token), ['tk_sentinel_p1']);
+		} finally {
+			core.dispose();
+		}
+	});
+
 	it('starts a direct connection\'s temp pipeline with client.use (explicit timeout), then finds it by discovery', async () => {
 		const rows: IFakeTaskRow[] = [];
 		const { engine, core } = await rig([DIRECT], rows);

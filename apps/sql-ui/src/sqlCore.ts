@@ -410,14 +410,20 @@ export function createSqlCore(opts: SqlCoreOptions): SqlCore {
 	};
 
 	/**
-	 * The discovered endpoint a saved connection names, best state first.
+	 * The discovered endpoint a saved connection names: among the
+	 * identity-filtered endpoints whose legacy key matches, the caller's own
+	 * development run first, then the best state.
 	 *
 	 * @param legacyKey - `endpointKeyForConnection(record)`.
 	 * @returns The endpoint, or undefined.
 	 */
-	const match = (legacyKey: string): IExplorerEndpoint | undefined => endpoints.getState().endpoints
-		.filter((endpoint) => endpoint.legacyKey === legacyKey)
-		.sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state])[0];
+	const match = (legacyKey: string): IExplorerEndpoint | undefined => {
+		const me = identity.get().identity?.userId ?? null;
+		const ownRank = (endpoint: IExplorerEndpoint): number => (me !== null && endpoint.runKind === 'dev' && endpoint.ownerKind === 'user' && endpoint.ownerId === me ? 0 : 1);
+		return endpoints.getState().endpoints
+			.filter((endpoint) => endpoint.legacyKey === legacyKey)
+			.sort((a, b) => ownRank(a) - ownRank(b) || STATE_RANK[a.state] - STATE_RANK[b.state])[0];
+	};
 
 	/** Run a discovery now (only while it is allowed), bounded. */
 	const rediscover = async (tool: string): Promise<void> => {
