@@ -33,9 +33,10 @@
 // block comment, or a PostgreSQL dollar-quoted body it is ordinary text.
 //
 // Two lexical rules that decide what a server RUNS, so a statement gate can
-// rely on them: MySQL runs the text inside `/*! ... */` and `/*!NNNNN ... */`
-// (only the markers are comment), and PostgreSQL ends a `--` comment at a
-// bare carriage return as well as at a line feed.
+// rely on them: MySQL runs the text inside `/*! ... */` and `/*!NNNNN ... */`,
+// and MariaDB inside `/*M! ... */` and `/*M!NNNNNN ... */` (only the markers
+// are comment), and PostgreSQL ends a `--` comment at a bare carriage return
+// as well as at a line feed.
 //
 // NOT SUPPORTED — and deliberately so: MySQL's `DELIMITER` directive. A buffer
 // that changes the statement terminator mid-file would need the scanner to
@@ -286,11 +287,14 @@ function skipLineComment(sql: string, open: number, crEnds = false): number {
 }
 
 /**
- * The opening marker of a MySQL executable comment: `/*!`, optionally with
- * the version it needs (`/*!50110`, five or six digits). What follows it, up
- * to the closing `*\/`, is code the server runs.
+ * The opening marker of an executable comment: MySQL's `/*!` and MariaDB's
+ * `/*M!`, optionally with the version they need (`/*!50110`, `/*M!100000`;
+ * five or six digits). What follows, up to the closing `*\/`, is code the
+ * server runs. A MariaDB server reports itself as 'mysql', and MySQL skips
+ * `/*M!` bodies, so reading them as code is right on MariaDB and only the
+ * safe side (a lost retry) on MySQL.
  */
-const EXECUTABLE_COMMENT_OPEN = /^\/\*!(?:\d{6}|\d{5})?/;
+const EXECUTABLE_COMMENT_OPEN = /^\/\*M?!(?:\d{6}|\d{5})?/;
 
 /**
  * Skip a block comment, honouring nesting when the dialect supports it.
@@ -396,7 +400,7 @@ function scanRegions(sql: string, traits: ScanTraits): Region[] {
 			kind = 'comment';
 			executable = false;
 		} else if (ch === '/' && sql[i + 1] === '*') {
-			const marker = traits.executableComments && !executable ? EXECUTABLE_COMMENT_OPEN.exec(sql.slice(i, i + 9)) : null;
+			const marker = traits.executableComments && !executable ? EXECUTABLE_COMMENT_OPEN.exec(sql.slice(i, i + 10)) : null;
 			if (marker) {
 				// MySQL runs what follows: only the marker is comment.
 				end = i + marker[0].length;

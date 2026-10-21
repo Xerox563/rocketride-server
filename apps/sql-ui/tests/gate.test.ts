@@ -39,6 +39,9 @@ describe('T10 — a write the server runs is never repeatable, however it is hid
 		assert.equal(gateStatement('SELECT 1; /*!50000 DELETE FROM orders */', 'mysql', true).idempotent, false);
 		assert.equal(gateStatement('/*!50000 DELETE FROM orders */', 'mysql', true).idempotent, false);
 		assert.equal(gateStatement('SELECT 1 /*!50000 , 2 */', 'mysql', true).idempotent, true, 'control: a read stays a read');
+		// MariaDB's executable comments (DA CE-R2-3).
+		assert.equal(gateStatement('SELECT 1; /*M!100000 DELETE FROM orders */', 'mysql', true).idempotent, false);
+		assert.equal(gateStatement('SELECT 1; /*M! DELETE FROM orders */', 'mysql', true).idempotent, false);
 	});
 
 	it('postgres: a write behind a line comment that a bare carriage return ends', () => {

@@ -409,6 +409,13 @@ describe('what a server runs: MySQL executable comments and PostgreSQL line ends
 		assert.deepEqual(texts("/*!50000 SELECT ';*/' */; SELECT 2", 'mysql'), ["/*!50000 SELECT ';*/' */", 'SELECT 2']);
 	});
 
+	it('mysql: MariaDB\'s /*M! ... */ and /*M!NNNNNN ... */ are code too (a MariaDB server reports itself as mysql)', () => {
+		assert.deepEqual(texts('SELECT 1; /*M!100000 DELETE FROM orders */', 'mysql'), ['SELECT 1', '/*M!100000 DELETE FROM orders */']);
+		assert.equal(stripSqlComments('/*M!100000 DELETE FROM orders */', 'mysql'), '  DELETE FROM orders  ');
+		assert.equal(stripSqlComments('/*M! DELETE FROM orders */', 'unknown'), '  DELETE FROM orders  ');
+		assert.equal(stripSqlComments('/*M!100000 DELETE FROM orders */', 'postgres'), ' ');
+	});
+
 	it('unknown reads them as code too (the safe side); postgres and clickhouse read a comment', () => {
 		assert.equal(stripSqlComments('/*!50000 DELETE FROM orders */', 'unknown'), '  DELETE FROM orders  ');
 		assert.equal(stripSqlComments('/*!50000 DELETE FROM orders */', 'postgres'), ' ');
