@@ -43,7 +43,8 @@ import { commonStyles } from 'shell';
 import { closeDocumentByUri, connectionEditorIdFromUri, createDocs, destroyDocs, endpointKeyFromAnyUri, endpointKeyFromUri, getDocs, isConnectionEditorUri, isDesignUri, isDiagramUri, isQueryUri, isTableDataUri } from './docs';
 import type { QueryDocPayload } from './docs';
 import { setActiveConnection } from './navigation';
-import { connIdFromDirectKey, resetSavedConnections, isDirectEndpointKey } from './connect';
+import { resetSavedConnections, isDirectEndpointKey } from './connect';
+import { directReleasesOnClose } from './directReleases';
 import { createLocalSidebarBridge, createLocalSqlEnv } from './localEnv';
 import type { SqlSidebarBridge } from './sidebarBridge';
 import { createSqlCore } from './sqlCore';
@@ -240,8 +241,11 @@ const SqlAppReady: React.FC<{ docs: Documents; bridge: SqlSidebarBridge }> = ({ 
 
 	// Direct-mode lifecycle: when the LAST open document of a direct
 	// connection closes (any scheme — workbench, query, table, designer,
-	// diagram), stop its temporary tool pipeline. The 15-minute idle TTL is
-	// the backstop for everything this cannot see (reloads, crashes).
+	// diagram), stop its temporary tool pipeline. Grouped by connection
+	// (directReleases.ts): an edit changes the key without re-keying open
+	// documents, so the last one to close releases UNKEYED. The 15-minute
+	// idle TTL is the backstop for everything this cannot see (reloads,
+	// crashes).
 	const openDirectKeysRef = useRef<Set<string>>(new Set());
 	useEffect(() => {
 		const open = new Set<string>();
@@ -249,10 +253,7 @@ const SqlAppReady: React.FC<{ docs: Documents; bridge: SqlSidebarBridge }> = ({ 
 			const key = endpointKeyFromAnyUri(editor.documentUri);
 			if (key && isDirectEndpointKey(key)) open.add(key);
 		}
-		for (const key of openDirectKeysRef.current) {
-			const connId = connIdFromDirectKey(key);
-			if (!open.has(key) && connId !== null) env.releaseEndpoint(connId, key);
-		}
+		for (const release of directReleasesOnClose(openDirectKeysRef.current, open)) env.releaseEndpoint(release.connId, release.key);
 		openDirectKeysRef.current = open;
 	}, [state, env]);
 
