@@ -30,7 +30,7 @@ import { manualClock } from '../connect/testing';
 import { createHistoryStore } from '../history/store';
 import type { IHistoryEntry } from '../history/types';
 import type { IExplorerBus } from './busClient';
-import { attachWhenLoaded, createFsPrefs, historyPrefsPath, PREFS_FILE_VERSION, PREFS_FS_TIMEOUT_MS, PREFS_WRITE_DEBOUNCE_MS } from './prefs';
+import { attachWhenLoaded, createFsPrefs, historyPrefsPath, PREFS_FILE_VERSION, PREFS_FS_TIMEOUT_MS, PREFS_LOAD_ATTEMPTS, PREFS_WRITE_DEBOUNCE_MS, PREFS_WRITE_RETRIES } from './prefs';
 import type { IFsPrefsOptions } from './prefs';
 import { settle } from './testing';
 
@@ -145,6 +145,8 @@ describe('createFsPrefs — load first', () => {
 		const prefs = createFsPrefs(opts);
 		const attached: string[] = [];
 		attachWhenLoaded(prefs, (_api, owner) => { attached.push(owner); return () => undefined; });
+		// A failed request is retried (PREFS_LOAD_ATTEMPTS in all) before the session falls back to memory.
+		await clock.advance(60_000);
 		await settle();
 		assert.equal(prefs.status(), 'failed');
 		assert.deepEqual(attached, [OWNER], 'the store still attaches (session-only history)');
@@ -152,8 +154,9 @@ describe('createFsPrefs — load first', () => {
 		assert.deepEqual(prefs.getPref('graph.history'), { k1: [entry('e9', 90)] });
 		await clock.advance(PREFS_WRITE_DEBOUNCE_MS * 5);
 		await prefs.flush();
-		assert.deepEqual(requests.map((r) => r.op), ['client.fsStat', 'client.fsReadJson'], 'no mkdir, no write');
-		assert.deepEqual(errors, ['load']);
+		const attempt = ['client.fsStat', 'client.fsReadJson'];
+		assert.deepEqual(requests.map((r) => r.op), Array.from({ length: PREFS_LOAD_ATTEMPTS }, () => attempt).flat(), 'retried reads only: no mkdir, no write');
+		assert.deepEqual(errors, ['load'], 'reported once, after the last attempt');
 	});
 
 	it('a file in an unknown or newer format is never overwritten either', async () => {
@@ -282,3 +285,147 @@ describe('createFsPrefs — writes', () => {
 		assert.throws(() => createFsPrefs({ cm, path: PATH, owner: '' }), RangeError);
 	});
 });
+
+describe('createFsPrefs — round 3: nothing a person changed is lost to timing', () => {
+	/**
+	 * An adapter over a scripted bus, with a manual clock.
+	 *
+	 * @param script - The fs answers.
+	 * @param over - Option overrides.
+	 * @returns The adapter, clock, writes and requests.
+	 */
+	function make(script: Record<string, (params: Record<string, unknown>) => unknown>, over: Partial<IFsPrefsOptions> = {}) {
+		const writes: unknown[] = [];
+		const { cm, requests } = fakeFs({
+			'client.fsMkdir': () => undefined,
+			'client.fsWriteJson': (params) => { writes.push(params.value); },
+			...script,
+		});
+		const { clock, opts } = options(cm, over);
+		return { prefs: createFsPrefs(opts), clock, writes, requests };
+	}
+	const ownPrefs = (value: unknown): Record<string, unknown> => (value as { owners: Record<string, { prefs: Record<string, unknown> }> }).owners[OWNER].prefs;
+
+	it('a write that falls due while the identity is transiently unknown is kept, and written once the same owner is back (CE-4)', async () => {
+		let current: string | null = OWNER;
+		const { prefs, clock, writes } = make({ 'client.fsStat': () => ({ exists: false }) }, { ownerNow: () => current });
+		await prefs.load();
+		prefs.setPref('k', 'v');
+		current = null;
+		await clock.advance(PREFS_WRITE_DEBOUNCE_MS);
+		await settle();
+		assert.equal(writes.length, 0, 'nothing is written while nobody is vouched for');
+		current = OWNER;
+		await clock.advance(60_000);
+		await settle();
+		assert.equal(writes.length, 1, 'the kept change is written once the same owner is back, without another setPref');
+		assert.deepEqual(ownPrefs(writes[0]), { k: 'v' });
+	});
+
+	it('a different owner still drops the pending change', async () => {
+		let current: string | null = OWNER;
+		const { prefs, clock, writes } = make({ 'client.fsStat': () => ({ exists: false }) }, { ownerNow: () => current });
+		await prefs.load();
+		prefs.setPref('k', 'v');
+		current = 'user-b|org-1|team-1';
+		await clock.advance(60_000);
+		await prefs.close();
+		assert.equal(writes.length, 0);
+	});
+
+	it('a failed write keeps the change and retries, a bounded number of times', async () => {
+		let failures = 1;
+		const attempts: number[] = [];
+		const { prefs, clock, writes } = make({
+			'client.fsStat': () => ({ exists: false }),
+			'client.fsWriteJson': (params) => {
+				attempts.push(1);
+				if (failures > 0) { failures -= 1; throw new Error('Op failed at the root'); }
+				writes.push(params.value);
+			},
+		});
+		await prefs.load();
+		prefs.setPref('k', 1);
+		await clock.advance(PREFS_WRITE_DEBOUNCE_MS);
+		await settle();
+		assert.equal(writes.length, 0);
+		await clock.advance(60_000);
+		await settle();
+		assert.equal(writes.length, 1, 'retried and written');
+		failures = 1_000;
+		prefs.setPref('k', 2);
+		const before = attempts.length;
+		await clock.advance(30 * 60_000);
+		await settle();
+		assert.equal(attempts.length - before, 1 + PREFS_WRITE_RETRIES, 'bounded: the first attempt plus PREFS_WRITE_RETRIES');
+	});
+
+	it('a change made while the file is loading is written once the load is ready, without another setPref (review finding 1)', async () => {
+		let release: (value: unknown) => void = () => undefined;
+		const { prefs, clock, writes } = make({
+			'client.fsStat': () => ({ exists: true }),
+			'client.fsReadJson': () => new Promise((resolve) => { release = resolve; }),
+		});
+		const loading = prefs.load();
+		await settle();
+		prefs.setPref('a', 1);
+		release(file({ stored: true }));
+		assert.equal(await loading, 'ready');
+		await clock.advance(PREFS_WRITE_DEBOUNCE_MS);
+		await settle();
+		assert.equal(writes.length, 1);
+		assert.deepEqual(ownPrefs(writes[0]), { stored: true, a: 1 });
+	});
+
+	it('a change made before load() is queued and applied over the loaded file (CE-5)', async () => {
+		const { prefs, clock, writes } = make({
+			'client.fsStat': () => ({ exists: true }),
+			'client.fsReadJson': () => file({ stored: 1, early: 'old' }),
+		});
+		prefs.setPref('early', true);
+		await prefs.load();
+		assert.equal(prefs.getPref('early'), true, 'the queued change wins over the stored value');
+		assert.equal(prefs.getPref('stored'), 1);
+		await clock.advance(PREFS_WRITE_DEBOUNCE_MS);
+		await settle();
+		assert.deepEqual(ownPrefs(writes[0]), { stored: 1, early: true });
+	});
+
+	it('a transient load failure is retried; a first run never ends up session-only (engine fs_stat: {exists:false} for a missing file or folder)', async () => {
+		let failures = 1;
+		const { prefs, clock } = make({
+			'client.fsStat': () => {
+				if (failures > 0) { failures -= 1; throw new Error("Op 'client.fsStat' timed out after 15000ms"); }
+				return { exists: false };
+			},
+		});
+		const loading = prefs.load();
+		await clock.advance(60_000);
+		assert.equal(await loading, 'ready');
+		const stuck = make({ 'client.fsStat': () => { throw new Error('Not connected to server'); } });
+		const stuckLoading = stuck.prefs.load();
+		await stuck.clock.advance(5 * 60_000);
+		assert.equal(await stuckLoading, 'failed');
+		assert.equal(stuck.requests.filter((r) => r.op === 'client.fsStat').length, PREFS_LOAD_ATTEMPTS, 'bounded');
+	});
+
+	it('the file cap measures what the SDK writes: pretty JSON with two-space indents (client.ts fsWriteJson)', async () => {
+		const value = { k1: [entry('e1', 1)] };
+		const compact = JSON.stringify(file({ 'graph.history': value })).length;
+		const { prefs, writes } = make({ 'client.fsStat': () => ({ exists: false }) }, { maxFileChars: compact + 40 });
+		await prefs.load();
+		prefs.setPref('graph.history', value);
+		await prefs.flush();
+		assert.equal(writes.length, 0, 'the indented file is over the cap although the compact one is not');
+	});
+
+	it('close() works when taken off the object', async () => {
+		const { prefs, writes } = make({ 'client.fsStat': () => ({ exists: false }) });
+		await prefs.load();
+		prefs.setPref('k', 1);
+		const { close } = prefs;
+		await close();
+		assert.equal(writes.length, 1);
+	});
+});
+

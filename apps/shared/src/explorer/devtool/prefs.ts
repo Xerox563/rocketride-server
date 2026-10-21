@@ -36,24 +36,38 @@
 //   LOAD FIRST. The history store reads getPref synchronously at attach, so an
 //     accessor attached before the file is read starts empty and its first
 //     write overwrites the file. `attachWhenLoaded(prefs, attach)` attaches
-//     only once `load()` settled.
+//     only once `load()` settled. A change made before or during the load is
+//     QUEUED and applied over the loaded file (it wins over the stored value),
+//     then written once the load is ready.
 //   NEVER CLOBBER. `client.fsStat` tells a missing file (first run: start
-//     empty, writes allowed) from one that exists; a file that exists but
-//     cannot be read, or holds an unknown or newer format, is never written:
-//     the session keeps its history in memory and the failure is reported.
+//     empty, writes allowed) from one that exists. The engine answers
+//     `{exists: false}` for a missing file AND for a missing parent folder
+//     (packages/ai/src/ai/account/file_store.py FileStore.stat: an absent
+//     prefix lists nothing, and get_file_info's StorageNotFoundError is
+//     caught), so a first run is always a clean `ready`. Only a failed request
+//     fails a load; it is retried (PREFS_LOAD_ATTEMPTS in all) before the
+//     session falls back to memory. A file that exists but cannot be read, or
+//     holds an unknown or newer format, is never written: the session keeps
+//     its history in memory and the failure is reported.
 //   ONE BAG PER OWNER. The owner is the identity fingerprint (user,
 //     organization, development team). The file keeps one bag per owner and
 //     an accessor reads and writes only its own; the others are written back
 //     untouched (at most MAX_PREFS_OWNERS bags, the least recently written
-//     dropped). An accessor is made for ONE owner and never writes once
-//     `ownerNow()` names someone else (an identity change drops its pending
-//     write, as the history store drops its own).
+//     dropped once a write succeeds). An accessor is made for ONE owner:
+//       - `ownerNow()` null (a reconnect: nobody is vouched for yet) HOLDS a
+//         due write, which is retried and lands once the same owner is back;
+//       - `ownerNow()` naming someone else DROPS it (an identity change), as
+//         the history store drops its own.
 //   CAPS. The history store trims its bag to MAX_HISTORY_BAG_CHARS (256 KB);
-//     the whole file is capped at MAX_PREFS_FILE_CHARS, other owners' bags
-//     being dropped first, and a file still over it is refused, not written.
+//     the whole file, measured as the SDK writes it (two-space indented
+//     JSON, client.ts fsWriteJson), is capped at MAX_PREFS_FILE_CHARS, other
+//     owners' bags being dropped first, and a file still over it is refused,
+//     not written.
 //   WRITES are debounced (PREFS_WRITE_DEBOUNCE_MS), serialised, and made
-//     after one `client.fsMkdir` of the folder. Every fs request names its
-//     bus timeout (PREFS_FS_TIMEOUT_MS).
+//     after one `client.fsMkdir` of the folder. A failed or held write keeps
+//     the change and retries with backoff, PREFS_WRITE_RETRIES times; the next
+//     change, flush() or close() tries again after that. Every fs request
+//     names its bus timeout (PREFS_FS_TIMEOUT_MS).
 //   LAST WRITER WINS across windows: each window writes the whole file from
 //     what it loaded, so two windows of the same user that both write keep
 //     only the later one's view. A known limitation.
@@ -75,8 +89,20 @@ export const PREFS_FS_TIMEOUT_MS = 15_000;
 /** Quiet period before a batch of preference changes is written. */
 export const PREFS_WRITE_DEBOUNCE_MS = 1_000;
 
-/** Ceiling on the whole file's JSON (characters): two full history bags. */
+/** Ceiling on the whole file as written (two-space indented JSON, characters): two full history bags. */
 export const MAX_PREFS_FILE_CHARS = 2 * MAX_HISTORY_BAG_CHARS;
+
+/** Load attempts (the first plus retries) before a failed request leaves the session in memory. */
+export const PREFS_LOAD_ATTEMPTS = 3;
+
+/** Pause before load retry n (1-based): 1 s, then 3 s. */
+const LOAD_RETRY_DELAYS_MS = [1_000, 3_000];
+
+/** Retries of a failed or held write before it waits for the next change, flush() or close(). */
+export const PREFS_WRITE_RETRIES = 5;
+
+/** The longest pause between write retries (the backoff doubles from the debounce up to this). */
+const MAX_WRITE_RETRY_DELAY_MS = 30_000;
 
 /** Owner bags one file keeps (the least recently written beyond it are dropped). */
 export const MAX_PREFS_OWNERS = 8;
@@ -88,6 +114,10 @@ export const MAX_PREFS_OWNERS = 8;
  * @returns `@/User/.workspace/rocketride.<tool>.history.json`.
  */
 export function historyPrefsPath(tool: string): string {
+	// '@/User/.workspace/…' and the scope-less '.workspace/…' that SQL's saved
+	// connections use (sql-ui savedConnections.ts) are the SAME folder: a
+	// scope-less store path defaults to the User scope (client.ts
+	// validateStorePath; file_store.py scope resolution). Keep the explicit form.
 	return `@/User/.workspace/rocketride.${tool}.history.json`;
 }
 
@@ -138,7 +168,11 @@ export interface IFsPrefs extends IPrefsAccessor {
 	readonly path: string;
 	/** Where it is in its life. */
 	status(): FsPrefsStatus;
-	/** Read the file (once; later calls return the same promise). Never rejects. */
+	/**
+	 * Read the file (once; later calls return the same promise). Never rejects.
+	 * A failed request is retried (PREFS_LOAD_ATTEMPTS in all); changes made
+	 * before it settles are applied over what it read.
+	 */
 	load(): Promise<FsPrefsStatus>;
 	/** Write pending changes now. */
 	flush(): Promise<void>;
@@ -146,6 +180,18 @@ export interface IFsPrefs extends IPrefsAccessor {
 	close(): Promise<void>;
 	/** Stop, DROPPING pending changes (identity change). Idempotent. */
 	dispose(): void;
+}
+
+/** The stored file is not in this module's format (it is never written over). */
+class FileFormatError extends Error {
+	/**
+	 * @param message - What is wrong.
+	 */
+	constructor(message: string) {
+		super(message);
+		this.name = 'FileFormatError';
+		Object.setPrototypeOf(this, FileFormatError.prototype);
+	}
 }
 
 /**
@@ -157,7 +203,7 @@ export interface IFsPrefs extends IPrefsAccessor {
  */
 function readFile(raw: unknown): Record<string, IOwnerBag> {
 	if (!isPlainObject(raw) || raw.version !== PREFS_FILE_VERSION || !isPlainObject(raw.owners)) {
-		throw new Error(`The history file is not in format version ${PREFS_FILE_VERSION}; it is left untouched.`);
+		throw new FileFormatError(`The history file is not in format version ${PREFS_FILE_VERSION}; it is left untouched.`);
 	}
 	const owners: Record<string, IOwnerBag> = {};
 	for (const [id, bag] of Object.entries(raw.owners)) {
@@ -187,58 +233,107 @@ export function createFsPrefs(opts: IFsPrefsOptions): IFsPrefs {
 	const setTimer = opts.setTimer ?? ((fn: () => void, ms: number): unknown => setTimeout(fn, ms));
 	const clearTimer = opts.clearTimer ?? ((handle: unknown): void => clearTimeout(handle as ReturnType<typeof setTimeout>));
 	const dir = opts.dir ?? (path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '');
-	const stillOwner = (): boolean => (opts.ownerNow ? opts.ownerNow() === owner : true);
+	/** Who is signed in now, relative to the owner. */
+	const ownerState = (): 'owner' | 'unknown' | 'other' => {
+		if (!opts.ownerNow) return 'owner';
+		const current = opts.ownerNow();
+		if (current === owner) return 'owner';
+		return current === null || current === undefined || current === '' ? 'unknown' : 'other';
+	};
+	const sleep = (ms: number): Promise<void> => new Promise<void>((resolve) => { setTimer(resolve, ms); });
 
 	let status: FsPrefsStatus = 'idle';
 	let loading: Promise<FsPrefsStatus> | null = null;
 	let others: Record<string, IOwnerBag> = {};
 	let mine: Record<string, unknown> = {};
+	/** Changes made before the load reached ready: applied over what it read. */
+	const queued: Record<string, unknown> = {};
 	let dirty = false;
 	let timer: unknown = null;
+	let retries = 0;
 	let madeDir = false;
 	let disposed = false;
 	let chain: Promise<void> = Promise.resolve();
+
+	/** Arm the write timer (debounce, or a retry backoff) when a write is due. */
+	const schedule = (delayMs: number = debounceMs): void => {
+		if (disposed || status !== 'ready' || !dirty || timer !== null) return;
+		timer = setTimer(() => {
+			timer = null;
+			void writeNow();
+		}, delayMs);
+	};
+
+	/** Schedule the next retry of a failed or held write, if any are left. */
+	const retryLater = (): void => {
+		if (retries >= PREFS_WRITE_RETRIES) return;
+		retries += 1;
+		schedule(Math.min(debounceMs * 2 ** retries, MAX_WRITE_RETRY_DELAY_MS));
+	};
+
+	/** One attempt at reading the file. */
+	const readOnce = async (): Promise<void> => {
+		const stat = await busRequest(cm, 'client.fsStat', { path }, timeoutMs);
+		if (isPlainObject(stat) && stat.exists === false) return;
+		if (!isPlainObject(stat) || stat.exists !== true) throw new Error('client.fsStat gave no answer about the history file.');
+		const owners = readFile(await busRequest(cm, 'client.fsReadJson', { path }, timeoutMs));
+		mine = { ...(owners[owner]?.prefs ?? {}) };
+		delete owners[owner];
+		others = owners;
+	};
 
 	const load = (): Promise<FsPrefsStatus> => {
 		if (loading !== null) return loading;
 		status = 'loading';
 		loading = (async (): Promise<FsPrefsStatus> => {
-			try {
-				if (!stillOwner()) throw new Error('The signed-in identity changed before the history file was read.');
-				const stat = await busRequest(cm, 'client.fsStat', { path }, timeoutMs);
-				if (isPlainObject(stat) && stat.exists === false) {
-					status = 'ready';
-					return status;
+			let lastError: unknown = null;
+			for (let attempt = 1; attempt <= PREFS_LOAD_ATTEMPTS && !disposed; attempt += 1) {
+				if (ownerState() === 'other') {
+					lastError = new Error('The signed-in identity changed before the history file was read.');
+					break;
 				}
-				if (!isPlainObject(stat) || stat.exists !== true) throw new Error('client.fsStat gave no answer about the history file.');
-				const owners = readFile(await busRequest(cm, 'client.fsReadJson', { path }, timeoutMs));
-				mine = { ...(owners[owner]?.prefs ?? {}) };
-				delete owners[owner];
-				others = owners;
-				status = 'ready';
-			} catch (error) {
-				status = 'failed';
-				opts.onError?.(error, 'load');
+				try {
+					await readOnce();
+					lastError = null;
+					break;
+				} catch (error) {
+					lastError = error;
+					// A file in a foreign format will not change on a retry.
+					if (error instanceof FileFormatError) break;
+					if (attempt < PREFS_LOAD_ATTEMPTS) await sleep(LOAD_RETRY_DELAYS_MS[attempt - 1] ?? LOAD_RETRY_DELAYS_MS[LOAD_RETRY_DELAYS_MS.length - 1]);
+				}
 			}
+			if (lastError !== null) {
+				mine = {};
+				status = 'failed';
+				opts.onError?.(lastError, 'load');
+			} else {
+				status = 'ready';
+			}
+			// Changes made before the load win over what it read.
+			if (Object.keys(queued).length > 0) {
+				Object.assign(mine, queued);
+				for (const key of Object.keys(queued)) delete queued[key];
+				dirty = true;
+			}
+			schedule();
 			return status;
 		})();
 		return loading;
 	};
 
 	/**
-	 * The file to write, or null when it is over the cap (reported).
+	 * The file to write, and the other owners it keeps; null when it is over the cap (reported).
 	 *
-	 * @returns The file.
+	 * @returns The file and the kept owners.
 	 */
-	const compose = (): { version: number; owners: Record<string, IOwnerBag> } | null => {
+	const compose = (): { file: { version: number; owners: Record<string, IOwnerBag> }; kept: Record<string, IOwnerBag> } | null => {
 		const own: IOwnerBag = { at: now(), prefs: JSON.parse(JSON.stringify(mine)) as Record<string, unknown> };
 		const kept = Object.entries(others).sort((a, b) => b[1].at - a[1].at).slice(0, maxOwners - 1);
 		for (;;) {
 			const file = { version: PREFS_FILE_VERSION, owners: { ...Object.fromEntries(kept), [owner]: own } };
-			if (JSON.stringify(file).length <= maxFileChars) {
-				others = Object.fromEntries(kept);
-				return file;
-			}
+			// Measured as client.ts fsWriteJson writes it: JSON.stringify(obj, null, 2).
+			if (JSON.stringify(file, null, 2).length <= maxFileChars) return { file, kept: Object.fromEntries(kept) };
 			if (kept.length === 0) break;
 			kept.pop();
 		}
@@ -248,10 +343,20 @@ export function createFsPrefs(opts: IFsPrefsOptions): IFsPrefs {
 
 	const write = async (): Promise<void> => {
 		if (status !== 'ready' || !dirty) return;
+		const who = ownerState();
+		if (who === 'other') {
+			// The identity changed: this owner's pending change is dropped.
+			dirty = false;
+			return;
+		}
+		if (who === 'unknown') {
+			// Nobody is vouched for (a reconnect): keep the change, try again later.
+			retryLater();
+			return;
+		}
+		const composed = compose();
 		dirty = false;
-		if (!stillOwner()) return;
-		const file = compose();
-		if (file === null) return;
+		if (composed === null) return;
 		try {
 			if (!madeDir && dir !== '') {
 				try {
@@ -261,10 +366,13 @@ export function createFsPrefs(opts: IFsPrefsOptions): IFsPrefs {
 				}
 				madeDir = true;
 			}
-			await busRequest(cm, 'client.fsWriteJson', { path, value: file }, timeoutMs);
+			await busRequest(cm, 'client.fsWriteJson', { path, value: composed.file }, timeoutMs);
+			others = composed.kept;
+			retries = 0;
 		} catch (error) {
 			dirty = true;
 			opts.onError?.(error, 'write');
+			retryLater();
 		}
 	};
 
@@ -277,35 +385,38 @@ export function createFsPrefs(opts: IFsPrefsOptions): IFsPrefs {
 		return chain;
 	};
 
+	const dispose = (): void => {
+		if (disposed) return;
+		disposed = true;
+		if (timer !== null) {
+			clearTimer(timer);
+			timer = null;
+		}
+		dirty = false;
+	};
+
 	return {
 		owner,
 		path,
 		status: () => status,
 		load,
-		getPref: (key) => mine[key],
+		getPref: (key) => (status === 'idle' || status === 'loading' ? queued[key] : mine[key]),
 		setPref(key, value) {
+			if (status === 'idle' || status === 'loading') {
+				queued[key] = value;
+				return;
+			}
 			mine[key] = value;
 			dirty = true;
-			if (disposed || status !== 'ready' || timer !== null) return;
-			timer = setTimer(() => {
-				timer = null;
-				void writeNow();
-			}, debounceMs);
+			retries = 0;
+			schedule();
 		},
 		flush: () => (disposed ? chain : writeNow()),
-		async close() {
+		close: async () => {
 			if (!disposed) await writeNow();
-			this.dispose();
+			dispose();
 		},
-		dispose() {
-			if (disposed) return;
-			disposed = true;
-			if (timer !== null) {
-				clearTimer(timer);
-				timer = null;
-			}
-			dirty = false;
-		},
+		dispose,
 	};
 }
 
