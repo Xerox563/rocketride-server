@@ -257,10 +257,17 @@ changes. An attach under a different owner, a sign-out included, first forgets
 every entry, switch, queued run and pending write held in memory, so one
 account's history is never shown to, merged into or written for the next one
 that signs in on the same page. Writes are batched (`persistDelayMs`, 300 ms
-by default) and the LAST detach drops a batch still waiting, so a mount that is
-going away under the same owner (an unmount, a disconnect) calls `flush()`
-first: it writes the pending batch at once through the attached accessor, and
-does nothing when nothing is pending or nothing is attached. Code outside React
+by default) and the LAST detach drops a batch still waiting. So call `flush()`
+before every detach that ends an owner's attachment while that batch is still
+theirs: an unmount, and the moment the identity becomes unknown or changes (a
+disconnect, a sign-out and an account switch all reach the identity before
+anything unmounts, so an unmount-time flush comes too late for them).
+`flush()` hands the pending batch at once to the attached accessor, and does
+nothing when nothing is pending or nothing is attached. What happens to it
+next is the accessor's rule: the dev-tool fs accessor (`devtool/prefs.ts`)
+writes it for its owner, holds it while nobody is known, and drops it once
+another identity is known, so keep that accessor alive (do not dispose it)
+while the identity is merely unknown. Code outside React
 reads the store with `getHistory(key)`, `getRecording(key)` and
 `subscribe(listener)`. Per-connection booleans use
 `createConnectionFlags` ([`history/flags.ts`](../../../apps/shared/src/explorer/history/flags.ts)).
