@@ -167,6 +167,61 @@ function connectionsState(): ConnectionsState {
 }
 
 /**
+ * Whether a value is one JSON can carry unchanged (finite numbers; plain
+ * arrays and objects of such values).
+ *
+ * @param value - Anything a frame sent.
+ * @param depth - Nesting so far (bounded).
+ * @returns True for a JSON value.
+ */
+function isJsonValue(value: unknown, depth = 0): boolean {
+	if (depth > 32) return false;
+	if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+	if (typeof value === 'number') return Number.isFinite(value);
+	if (Array.isArray(value)) return value.every((item) => isJsonValue(item, depth + 1));
+	if (typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) return Object.values(value as Record<string, unknown>).every((item) => isJsonValue(item, depth + 1));
+	return false;
+}
+
+/**
+ * A frame's input that does not fit an op (R3): answered as `invalid` Reply
+ * data before anything is resolved, gated or sent.
+ *
+ * @param tool - The tool it was for.
+ * @param message - What is wrong.
+ * @returns The error.
+ */
+function invalidInput(tool: string, message: string): ExplorerToolError {
+	return new ExplorerToolError({ kind: 'invalid', tool, message });
+}
+
+/**
+ * Check `sql.execute`'s input.
+ *
+ * @param input - The op params.
+ * @param input.sql - The statement text.
+ * @param input.params - Bind values.
+ * @param input.idempotent - What the frame asked for.
+ * @throws ExplorerToolError `invalid` naming what is wrong.
+ */
+export function checkExecuteInput(input: { sql: unknown; params?: unknown; idempotent?: unknown }): void {
+	if (typeof input.sql !== 'string') throw invalidInput('execute', 'The statement must be text.');
+	if (input.params !== undefined && (!Array.isArray(input.params) || !input.params.every((value) => isJsonValue(value)))) throw invalidInput('execute', 'The statement parameters must be a list of JSON values.');
+	if (input.idempotent !== undefined && typeof input.idempotent !== 'boolean') throw invalidInput('execute', 'idempotent must be true or false.');
+}
+
+/**
+ * Check `sql.getSchema`'s input.
+ *
+ * @param input - The op params.
+ * @param input.table - One table, or none for all.
+ * @throws ExplorerToolError `invalid` naming what is wrong.
+ */
+export function checkSchemaInput(input: { table?: unknown }): void {
+	if (input.table !== undefined && typeof input.table !== 'string') throw invalidInput('get_schema', 'The table name must be text.');
+}
+
+/**
  * How many connections' history the controller follows at once (the
  * `history` topic's keys): the ones read most recently. A frame whose key is
  * dropped reads it again, which follows it again; only more open history
@@ -321,14 +376,20 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 		'sql.resolveEndpoint': ({ connId }) => core.resolve(connId),
 		'sql.releaseEndpoint': async ({ connId }) => { await core.release(connId); },
 		'sql.discoverEndpoints': () => core.pickable(),
-		'sql.execute': ({ connId, sql, params, idempotent }) => core.withSession(connId, async (session, ctx) => {
-			// Classified with the node's own dialect (asked for when no probe has
-			// it); with none, the gate fails closed: sent once, never repeated.
-			const gate = gateStatement(sql, await ctx.dialect(), idempotent === true);
-			if (gate.refusal !== null) throw new ExplorerToolError({ kind: 'invalid', tool: 'execute', message: gate.refusal });
-			return session.execute(sql, { ...(params && params.length > 0 ? { params } : {}), idempotent: gate.idempotent });
-		}),
-		'sql.getSchema': ({ connId, table }) => core.withSession(connId, (session) => session.getSchema(table)),
+		'sql.execute': ({ connId, sql, params, idempotent }) => {
+			checkExecuteInput({ sql, params, idempotent });
+			return core.withSession(connId, async (session, ctx) => {
+				// Classified with the node's own dialect (asked for when no probe has
+				// it); with none, the gate fails closed: sent once, never repeated.
+				const gate = gateStatement(sql, await ctx.dialect(), idempotent === true);
+				if (gate.refusal !== null) throw new ExplorerToolError({ kind: 'invalid', tool: 'execute', message: gate.refusal });
+				return session.execute(sql, { ...(params && params.length > 0 ? { params } : {}), idempotent: gate.idempotent });
+			});
+		},
+		'sql.getSchema': ({ connId, table }) => {
+			checkSchemaInput({ table });
+			return core.withSession(connId, (session) => session.getSchema(table));
+		},
 		'sql.refreshSchema': ({ connId }) => core.withSession(connId, (session) => session.refreshSchema()),
 		'sql.dialect': ({ connId }) => core.withSession(connId, (session) => session.dialect()),
 		'sql.getService': async ({ provider }) => (await core.getService(provider)) as JsonValue,

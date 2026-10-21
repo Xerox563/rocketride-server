@@ -51,7 +51,7 @@ import { SQL_APP_ID } from '../src/appId';
 import { applyReplicaConnections, deleteSavedConnection, endpointForConnection, endpointKeyForConnection, getSavedConnections, getSavedConnectionsPartial, getSavedConnectionsStatus, ownSavedConnections, resetSavedConnections } from '../src/connect';
 import type { PipelineBoundConnection, SavedSqlConnection } from '../src/connect';
 import { lookupConnection } from '../src/connectionRecord';
-import { MAX_WATCHED_HISTORY_KEYS } from '../src/sqlController';
+import { MAX_WATCHED_HISTORY_KEYS, checkExecuteInput, checkSchemaInput } from '../src/sqlController';
 import type { ConnectionsState, HistoryState } from '../src/ops';
 import { connectionDocState, routeDocKey, sqlChannel } from '../src/sqlFrame';
 import { RESOLVE_BUDGET_MS, SQL_OP_TIMEOUT_MS } from '../src/sqlTimeouts';
@@ -552,6 +552,36 @@ describe('T10 — write gates hold in the controller even when a frame calls the
 			const fn = 'CREATE FUNCTION bump() RETURNS void AS $$\nDECLARE x int;\nBEGIN\n  PERFORM 1;\nEND;\n$$ LANGUAGE plpgsql';
 			assert.deepEqual(await call(fn), { rows: [], affected_rows: 0 }, 'sent, and the node decides');
 			assert.equal(toolRequests(r.engine, 'execute').length, 2);
+		} finally {
+			r.dispose();
+		}
+	});
+
+	it('malformed input is `invalid` Reply data, before anything is resolved, gated or sent (R3)', async () => {
+		const r = await rig();
+		try {
+			await r.env.resolveEndpoint(PIPELINE);
+			const before = r.engine.requests.length;
+			const call = (op: 'sql.execute' | 'sql.getSchema', params: Record<string, unknown>) => r.frame.caller.callReply(op, { connId: 'c-pipe', ...params } as never, { timeoutMs: SQL_OP_TIMEOUT_MS[op] });
+			const bad: Array<['sql.execute' | 'sql.getSchema', Record<string, unknown>]> = [
+				['sql.execute', { sql: 42 }],
+				['sql.execute', { sql: null }],
+				['sql.execute', { sql: ['SELECT 1'] }],
+				['sql.execute', { sql: 'SELECT ?', params: 'x' }],
+				['sql.execute', { sql: 'SELECT ?', params: { 0: 1 } }],
+				['sql.execute', { sql: 'SELECT 1', idempotent: 'yes' }],
+				['sql.getSchema', { table: 7 }],
+			];
+			for (const [op, params] of bad) {
+				await assert.rejects(call(op, params), (error: unknown) => error instanceof ExplorerToolError && error.kind === 'invalid', JSON.stringify(params));
+			}
+			assert.deepEqual(r.engine.requests.slice(before).map((q) => q.op), [], 'nothing reached the engine');
+			assert.deepEqual(await call('sql.execute', { sql: 'SELECT ?', params: [null, 1, 'a', true, { k: [1] }] }), { rows: [{ id: 1, name: 'a' }, { id: 2, name: null }], affected_rows: 0 }, 'control');
+			// What only a same-realm frame (no JSON wire) could send.
+			for (const params of [[Number.NaN], [() => 1], [new Date(0)], [Infinity]]) {
+				assert.throws(() => checkExecuteInput({ sql: 'SELECT ?', params }), (error: unknown) => error instanceof ExplorerToolError && error.kind === 'invalid');
+			}
+			assert.throws(() => checkSchemaInput({ table: ['t'] }), (error: unknown) => error instanceof ExplorerToolError && error.kind === 'invalid');
 		} finally {
 			r.dispose();
 		}
