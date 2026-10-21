@@ -43,12 +43,11 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react';
 import type { DevToolProps, ToolChannel } from 'shell';
 import { EmptyState, useConnectionReady } from 'shell';
-import { isDirectEndpointKey } from './connect';
 import { useConnectionRecord } from './connectionRecord';
 import type { SqlEndpoint } from './connect';
 import { setActiveConnection } from './navigation';
 import { SQL_TOOL_PROTOCOL, frameChannel } from './sqlBridge';
-import { attachSqlFrame, connectionDocState, followControllerReady, followVouched, routeDocKey, sqlChannel } from './sqlFrame';
+import { attachSqlFrame, connectionDocState, directReleaseKey, followControllerReady, followVouched, routeDocKey, sqlChannel } from './sqlFrame';
 import type { SqlFrameMount } from './sqlFrame';
 import { createRemoteHistory } from './history/remoteHistory';
 import type { RemoteHistory } from './history/remoteHistory';
@@ -136,16 +135,25 @@ const SqlConnectionDocument: React.FC<{ connId: string; sidebarClosed: boolean; 
 		return () => { alive = false; };
 	}, [env, conn, onOpenError]);
 
-	// Publish the active connection for the sidebar's schema tree, and stop a
-	// direct connection's temp pipeline when its document closes (the 15-min
-	// idle TTL backstops teardowns this cleanup never sees).
+	// Publish the active connection for the sidebar's schema tree.
+	const endpointKey = endpoint?.key ?? null;
 	useEffect(() => {
-		if (!endpoint) return;
-		setActiveConnection(endpoint.key);
-		return () => {
-			if (isDirectEndpointKey(endpoint.key)) env.releaseEndpoint(connId);
-		};
-	}, [endpoint, env, connId]);
+		if (endpointKey !== null) setActiveConnection(endpointKey);
+	}, [endpointKey]);
+
+	// Stop a direct connection's temp pipeline when its document goes away,
+	// and only then: a re-resolve (a list republish, a controller remount)
+	// gives a new endpoint object with the same key, and a new env (the
+	// ready flag flips) is not a close either. Keyed on the endpoint KEY; the
+	// env is read through a ref. The 15-minute idle TTL backstops teardowns
+	// this cleanup never sees.
+	const envRef = useRef(env);
+	envRef.current = env;
+	const releaseKey = directReleaseKey(endpoint);
+	useEffect(() => {
+		if (releaseKey === null) return undefined;
+		return () => { envRef.current.releaseEndpoint(connId); };
+	}, [releaseKey, connId]);
 
 	let body: React.ReactNode;
 	switch (connectionDocState({ ready: env.ready, sidebarClosed, listStatus: status, found: conn !== null, failed: resolveError !== null, opened: endpoint !== null })) {

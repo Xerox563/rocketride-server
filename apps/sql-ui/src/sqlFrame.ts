@@ -63,8 +63,8 @@ import type { FrameResetReason } from 'shared/explorer/devtool/frameIdentity';
 import { channelFor, CONTROLLER_STATE_TOPIC } from 'shared/explorer/devtool/realm';
 import { ExplorerToolError } from 'shared/explorer/errors';
 import type { DevToolPeer } from 'shared/explorer/devtool/realm';
-import { applyReplicaConnections } from './connect';
-import type { SavedConnectionsStatus } from './connect';
+import { applyReplicaConnections, isDirectEndpointKey } from './connect';
+import type { SavedConnectionsStatus, SqlEndpoint } from './connect';
 import { parseConnectionEditorDocKey } from './docs';
 import { getActiveConnection, subscribeActiveConnection } from './navigation';
 import { clearSchemas } from './schema/schemaStore';
@@ -119,6 +119,20 @@ export function routeDocKey(docKey: string | null | undefined): SqlDocRoute {
 	const editor = parseConnectionEditorDocKey(docKey);
 	if (editor) return { kind: 'editor', connId: editor.connId };
 	return { kind: 'connection', connId: docKey };
+}
+
+/**
+ * What a connection document's release is keyed on: a direct connection's
+ * endpoint key (its temp pipeline is stopped when the document goes away),
+ * or null (nothing to release: a pipeline connection, or not opened yet).
+ * The KEY, not the endpoint object: every re-resolve makes a new object for
+ * the same pipeline.
+ *
+ * @param endpoint - The document's endpoint, if it opened.
+ * @returns The key to release on, or null.
+ */
+export function directReleaseKey(endpoint: SqlEndpoint | null): string | null {
+	return endpoint !== null && isDirectEndpointKey(endpoint.key) ? endpoint.key : null;
 }
 
 /** What a connection document shows. */

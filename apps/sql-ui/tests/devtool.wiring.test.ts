@@ -53,7 +53,7 @@ import type { PipelineBoundConnection, SavedSqlConnection } from '../src/connect
 import { lookupConnection } from '../src/connectionRecord';
 import { MAX_WATCHED_HISTORY_KEYS, checkExecuteInput, checkSchemaInput } from '../src/sqlController';
 import type { ConnectionsState, HistoryState } from '../src/ops';
-import { connectionDocState, routeDocKey, sqlChannel } from '../src/sqlFrame';
+import { connectionDocState, directReleaseKey, routeDocKey, sqlChannel } from '../src/sqlFrame';
 import { RESOLVE_BUDGET_MS, SQL_OP_TIMEOUT_MS } from '../src/sqlTimeouts';
 import { DIALECT_WAIT_MS, GET_SCHEMA_WAIT_MS, REFRESH_SCHEMA_WAIT_MS } from '../src/connect/tools';
 import { USER, until } from './realm';
@@ -729,6 +729,44 @@ describe('T11 — no bulk result is retained state; each topic stays within 64 K
 		assert.match(controller, /shrink: shrinkSqlState,/);
 		assert.match(controller, /const handlers: RequiredControllerHandlers<SqlOps> = \{/);
 		assert.match(controller, /publishIdentityState\(guarded, core\.identity\)/, 'identity counts toward the total budget');
+	});
+});
+
+describe('a direct connection\'s temp pipeline is released when its document goes away, and only then (reviewer F2)', () => {
+	it('the release is keyed on the endpoint key: a re-resolve (a list republish, a controller remount) keeps it', async () => {
+		const first = endpointForConnection(DIRECT);
+		const again = endpointForConnection({ ...DIRECT });
+		assert.notEqual(first, again, 'a re-resolve makes a new endpoint object');
+		assert.equal(directReleaseKey(first), directReleaseKey(again));
+		assert.equal(directReleaseKey(first), 'sqlconn-c-direct:tools_1:db_mysql_1');
+		assert.equal(directReleaseKey(endpointForConnection(PIPELINE)), null, 'a pipeline connection releases nothing');
+		assert.equal(directReleaseKey(null), null);
+	});
+
+	it('the document\'s release effect depends on that key and the connection id only, never on env or the endpoint object', () => {
+		const devTool = source('SqlDevTool.tsx');
+		const doc = devTool.slice(devTool.indexOf('const SqlConnectionDocument'), devTool.indexOf('/** A document that cannot open yet'));
+		assert.match(doc, /const releaseKey = directReleaseKey\(endpoint\);\s*useEffect\(\(\) => \{\s*if \(releaseKey === null\) return undefined;\s*return \(\) => \{ envRef\.current\.releaseEndpoint\(connId\); \};\s*\}, \[releaseKey, connId\]\);/);
+		assert.equal((doc.match(/releaseEndpoint\(/g) ?? []).length, 1, 'one release site');
+		assert.doesNotMatch(doc, /\}, \[endpoint, env, connId\]\);/);
+	});
+
+	it('a controller remount and a list republish send no release and no terminate of their own', async () => {
+		const r = await rig();
+		try {
+			await r.env.resolveEndpoint(PIPELINE);
+			const owner = r.frame.owner();
+			await r.frame.caller.callReply('sql.saveConnection', { connection: { ...PIPELINE, id: 'c-other', name: 'Other' }, owner }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.saveConnection'] });
+			r.mount.dispose();
+			r.remount();
+			r.engine.realm.login(USER);
+			await settle();
+			await r.env.resolveEndpoint(PIPELINE);
+			assert.equal(r.frameCalls.some((call) => call.op === 'sql.releaseEndpoint'), false);
+			assert.equal(r.engine.ops().some((op) => op === 'client.terminate' || op === 'client.getTaskToken'), false);
+		} finally {
+			r.dispose();
+		}
 	});
 });
 
