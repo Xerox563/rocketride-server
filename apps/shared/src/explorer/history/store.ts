@@ -150,6 +150,16 @@ export interface IHistoryStore<F extends string> {
 	useHistory(key: string): IHistoryEntry<F>[];
 	/** Subscribe to one connection's recording switch (default on). */
 	useRecording(key: string): boolean;
+	/**
+	 * One connection's history now, for code outside React (a dev-tool
+	 * controller serving its frames): the snapshot `useHistory` would render,
+	 * referentially stable until that list changes.
+	 */
+	getHistory(key: string): IHistoryEntry<F>[];
+	/** One connection's recording switch now, for code outside React. */
+	getRecording(key: string): boolean;
+	/** Be told about every change from code outside React; returns unsubscribe. */
+	subscribe(listener: () => void): () => void;
 	/** Forget one entry. */
 	removeEntry(key: string, id: string): void;
 	/** Flip one entry's pinned state. */
@@ -662,6 +672,9 @@ export function createHistoryStore<F extends string>(options: IHistoryStoreOptio
 		attachPrefs,
 		useHistory,
 		useRecording,
+		getHistory: viewOf,
+		getRecording: recordingOf,
+		subscribe,
 		removeEntry,
 		togglePin,
 		setNote,
