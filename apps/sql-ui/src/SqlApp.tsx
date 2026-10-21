@@ -36,7 +36,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import type { ShellAppProps } from 'shell';
-import { ConnectionManager, DocTabs, DocSplitLayout, AppLayout, useShellConnection } from 'shell';
+import { ConnectionManager, DocTabs, DocSplitLayout, AppLayout, usePrefs, useShellConnection } from 'shell';
 import type { Documents } from 'shell';
 import { EmptyState } from 'shell';
 import { commonStyles } from 'shell';
@@ -169,6 +169,17 @@ const SqlApp: React.FC<ShellAppProps> = (_props) => {
 		};
 	}, []);
 
+	// The shell's workspace preferences, behind a stable accessor: the full
+	// app keeps history (HistoryPrefsBridge below) and the pattern-check switch
+	// there. Dev-tool mounts never call usePrefs.
+	const shellPrefs = usePrefs();
+	const prefsRef = useRef(shellPrefs);
+	prefsRef.current = shellPrefs;
+	const prefs = useMemo(() => ({
+		getPref: (key: string) => prefsRef.current.getPref(key),
+		setPref: (key: string, value: unknown) => prefsRef.current.setPref(key, value),
+	}), []);
+
 	// The in-document sidebar bridge over the core (one per core).
 	const localBridge = useMemo(() => (core ? createLocalSidebarBridge(core) : null), [core]);
 
@@ -178,7 +189,7 @@ const SqlApp: React.FC<ShellAppProps> = (_props) => {
 
 	// The FULL APP's engine surface: the realm legitimately owns a connection,
 	// so the views get the LOCAL environment (dev-tool frames get the remote one).
-	const env = useMemo(() => (core ? createLocalSqlEnv(core, isConnected, serviceTitle) : null), [core, isConnected]);
+	const env = useMemo(() => (core ? createLocalSqlEnv(core, isConnected, serviceTitle, prefs) : null), [core, isConnected, prefs]);
 
 	// Two-column app: the navigation/schema sidebar mounts once Documents is
 	// ready (it shares the singleton with the workbench documents).

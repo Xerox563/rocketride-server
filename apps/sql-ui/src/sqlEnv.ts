@@ -38,6 +38,13 @@
 // The provider decides which one a subtree gets; views only ever call
 // useSqlEnv(). `ready` is the run/apply enablement: the shell connection in
 // the full app, the host's `host:connection` snapshot in a frame.
+//
+// Persistence follows the mount (§3.5): the full app keeps history and its
+// switches in the shell's workspace preferences; a dev-tool frame never calls
+// `usePrefs` (in rocket-ui it would write into rocket-ui's own bag, in VS
+// Code it does nothing): history lives in the controller (`history`), and
+// the per-connection pattern-check switch is session-only (`prefs`, an
+// in-memory accessor per window).
 // =============================================================================
 
 import { createContext, useContext } from 'react';
@@ -46,6 +53,8 @@ import type { JsonValue } from 'shared/explorer/devtool/reply';
 import type { SqlOps } from './ops';
 import type { SqlEndpoint, SqlExecuteResult, SqlSchemaResponse, SqlSession, SavedSqlConnection, SqlDialect } from './connect';
 import { SQL_OP_TIMEOUT_MS } from './sqlTimeouts';
+import type { IPrefsAccessor } from 'shared/explorer/history/types';
+import type { SqlHistoryApi } from './history/api';
 
 // =============================================================================
 // THE SEAM
@@ -79,7 +88,20 @@ export interface SqlEnv {
 	deleteConnection(conn: SavedSqlConnection): Promise<void>;
 	/** A provider's display title from the realm's cached service list, when it has one. */
 	serviceTitle(provider: string): string | undefined;
+	/** Statement history: read, record and edit (where it lives depends on the mount). */
+	history: SqlHistoryApi;
+	/** Small per-user switches (`sql.patternChecks`): workspace preferences in the full app, this session only in a dev-tool frame. */
+	prefs: IPrefsAccessor;
 }
+
+/** A realm's session-only preferences (dev-tool frames): kept in memory, never written anywhere. */
+const sessionPrefValues = new Map<string, unknown>();
+
+/** The session-only accessor every dev-tool frame of this window shares. */
+export const SESSION_PREFS: IPrefsAccessor = {
+	getPref: (key) => sessionPrefValues.get(key),
+	setPref: (key, value) => { sessionPrefValues.set(key, value); },
+};
 
 const SqlEnvContext = createContext<SqlEnv | null>(null);
 
@@ -148,10 +170,13 @@ function remoteSession(caller: IFrameCaller<SqlOps>, endpoint: SqlEndpoint): Sql
  * @param caller - The frame's caller (sqlFrame.ts).
  * @param ready - The controller realm's server reachability (`host:connection`).
  * @param owner - The identity fingerprint the frame belongs to (sent with mutations).
+ * @param history - The frame's view of the controller's history (history/remoteHistory.ts).
  * @returns The environment (rebuild when `ready` changes).
  */
-export function createRemoteSqlEnv(caller: IFrameCaller<SqlOps>, ready: boolean, owner: () => string | null): SqlEnv {
+export function createRemoteSqlEnv(caller: IFrameCaller<SqlOps>, ready: boolean, owner: () => string | null, history: SqlHistoryApi): SqlEnv {
 	return {
+		history,
+		prefs: SESSION_PREFS,
 		ready,
 		getSession: (endpoint) => remoteSession(caller, endpoint),
 		resolveEndpoint: (conn) => caller.callReply('sql.resolveEndpoint', { connId: conn.id }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.resolveEndpoint'] }),

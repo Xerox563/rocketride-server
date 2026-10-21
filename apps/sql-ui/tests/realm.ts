@@ -112,19 +112,33 @@ export function scriptedSocketlessRealm(script: BusScript): IScriptedRealm<IFake
 /** The signed-in user the suites use. */
 export const USER = account('u1', 'org-1', 'team-1');
 
+/** The saved-connection file (scope-less: the user's store). */
+export const SAVED_PATH = '.workspace/rocketride.sql.json';
+
 /**
  * A script for an engine with these saved connections and running tasks.
  *
  * @param saved - The saved-connection file's contents.
  * @param rows - What `client.getTasks` lists (read at call time: mutate it to change the answer).
  * @param tool - What `client.tool` answers.
+ * @param files - Other files in the user's store, by path (mutable: writes land here).
  * @returns The script.
  */
-export function engineScript(saved: SavedSqlConnection[], rows: IFakeTaskRow[], tool: (params: { token: string; tool: string; input?: Record<string, unknown>; timeout?: number }) => unknown = () => ({ dialect: 'postgres' })): BusScript {
+export function engineScript(saved: SavedSqlConnection[], rows: IFakeTaskRow[], tool: (params: { token: string; tool: string; input?: Record<string, unknown>; timeout?: number }) => unknown = () => ({ dialect: 'postgres' }), files: Record<string, unknown> = {}): BusScript {
+	const read = (path: string): unknown => (path === SAVED_PATH ? saved : files[path]);
 	return {
 		'client.fsMkdir': () => ({}),
-		'client.fsReadJson': () => JSON.parse(JSON.stringify(saved)) as unknown,
-		'client.fsWriteJson': () => ({}),
+		'client.fsStat': (params) => ({ exists: read((params as { path: string }).path) !== undefined }),
+		'client.fsReadJson': (params) => {
+			const value = read((params as { path: string }).path);
+			if (value === undefined) throw new Error('File not found');
+			return JSON.parse(JSON.stringify(value)) as unknown;
+		},
+		'client.fsWriteJson': (params) => {
+			const { path, value } = params as { path: string; value: unknown };
+			if (path !== SAVED_PATH) files[path] = JSON.parse(JSON.stringify(value)) as unknown;
+			return {};
+		},
 		'client.getTasks': () => rows.map((row) => ({ ...row })),
 		'client.getTaskPipeline': () => undefined,
 		'client.tool': (params) => tool(params as { token: string; tool: string }),

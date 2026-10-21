@@ -49,6 +49,8 @@ import { setActiveConnection } from './navigation';
 import { SQL_TOOL_PROTOCOL, frameChannel } from './sqlBridge';
 import { attachSqlFrame, connectionDocState, routeDocKey, sqlChannel } from './sqlFrame';
 import type { SqlFrameMount } from './sqlFrame';
+import { createRemoteHistory } from './history/remoteHistory';
+import type { RemoteHistory } from './history/remoteHistory';
 import { SqlEnvProvider, createRemoteSqlEnv, useSqlEnv } from './sqlEnv';
 import ConnectionView from './views/ConnectionView';
 import ConnectionOverlays from './components/ConnectionOverlays';
@@ -188,23 +190,29 @@ export const SqlDevTool: React.FC<DevToolProps> = ({ peer, channel, docKey, docu
 	// frame caller, the realm's read-only connection replica, the active-key
 	// pushes, and the identity guard — mounted in an effect, disposed with it.
 	const toolChannel = useMemo(() => frameChannel(peer, channel), [peer, channel]);
-	const [mount, setMount] = useState<SqlFrameMount | null>(null);
+	const [mount, setMount] = useState<{ frame: SqlFrameMount; history: RemoteHistory } | null>(null);
 	useEffect(() => {
-		const attached = attachSqlFrame({
+		let history: RemoteHistory | null = null;
+		const frame = attachSqlFrame({
 			peer,
 			channel: toolChannel,
 			docKey: docKey ?? null,
 			...(documents ? { documents } : {}),
 			protocol: SQL_TOOL_PROTOCOL,
+			onReset: () => history?.reset(),
 		});
-		setMount(attached);
-		return () => attached.dispose();
+		history = createRemoteHistory({ caller: frame.caller, channel: sqlChannel(frame.channel), owner: frame.owner });
+		setMount({ frame, history });
+		return () => {
+			history?.dispose();
+			frame.dispose();
+		};
 	}, [peer, toolChannel, docKey, documents]);
 
 	// FRAMES HOLD NO ROCKETRIDE CLIENT: run/apply enablement is the host's
 	// `host:connection` snapshot, and every call is a controller op.
 	const engineReady = useConnectionReady(toolChannel);
-	const env = useMemo(() => (mount ? createRemoteSqlEnv(mount.caller, engineReady, mount.owner) : null), [mount, engineReady]);
+	const env = useMemo(() => (mount ? createRemoteSqlEnv(mount.frame.caller, engineReady, mount.frame.owner, mount.history) : null), [mount, engineReady]);
 	const onOpenError = useCallback((message: string) => sqlChannel(toolChannel).sendEvent('openError', message), [toolChannel]);
 
 	if (!env) return null;

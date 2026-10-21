@@ -33,9 +33,17 @@
 //   - the preference keys `sql.history` and `sql.historyRecording`
 //   - the `sql` field of a persisted entry
 //   - the bounds (100 entries, 8 KiB of statement, 1 KiB of error)
+//
+// The module instance below is the FULL APP's (it persists through the
+// shell's workspace preferences, HistoryPrefsBridge). A dev-tool controller
+// makes its own with createSqlHistoryStore() and attaches it to a file in the
+// user's store instead (sqlController.ts); dev-tool frames import neither and
+// reach history through ops.
 // =============================================================================
 
 import { createHistoryStore } from 'shared/explorer/history/store';
+import type { IHistoryStore } from 'shared/explorer/history/store';
+import { createRunEvents } from 'shared/explorer/history/runEvents';
 import { createHistoryPrefsBridge } from 'shared/explorer/react';
 import type { HistoryEntry } from './types';
 import { DEFAULT_HISTORY_LIMITS } from './trim';
@@ -55,17 +63,33 @@ const PREF_RECORDING = 'sql.historyRecording';
 // THE STORE
 // =============================================================================
 
-const store = createHistoryStore<'sql'>({
-	historyKey: PREF_HISTORY,
-	recordingKey: PREF_RECORDING,
-	textField: 'sql',
-	limits: {
-		maxEntries: DEFAULT_HISTORY_LIMITS.maxEntries,
-		maxTextChars: DEFAULT_HISTORY_LIMITS.maxSqlChars,
-		maxErrorChars: DEFAULT_HISTORY_LIMITS.maxErrorChars,
-	},
-	runs: sqlRunEvents,
-});
+/** A SQL Explorer history store (same keys, field and bounds as the module one). */
+export type SqlHistoryStore = IHistoryStore<'sql'>;
+
+/**
+ * Create a SQL Explorer history store with its own run bus: the same
+ * preference keys, `sql` field and bounds, so a file written by one is read
+ * by another.
+ *
+ * @param runs - The run bus to listen on (default: a fresh one).
+ * @returns The store.
+ */
+export function createSqlHistoryStore(runs = createRunEvents<'sql'>()): SqlHistoryStore {
+	return createHistoryStore<'sql'>({
+		historyKey: PREF_HISTORY,
+		recordingKey: PREF_RECORDING,
+		textField: 'sql',
+		limits: {
+			maxEntries: DEFAULT_HISTORY_LIMITS.maxEntries,
+			maxTextChars: DEFAULT_HISTORY_LIMITS.maxSqlChars,
+			maxErrorChars: DEFAULT_HISTORY_LIMITS.maxErrorChars,
+		},
+		runs,
+	});
+}
+
+/** The full app's store (module-level), on the app's run bus. */
+const store = createSqlHistoryStore(sqlRunEvents);
 
 /**
  * Attach the shell's preference accessor and hydrate from it.

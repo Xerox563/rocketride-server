@@ -38,6 +38,9 @@
 //                           on every change (never over the retained-state
 //                           size cap).
 //   STATE  'identity'      { fingerprint }: who the core vouches for (R9).
+//   STATE  'history'       { storage, keys }: where history is kept and, per
+//                           connection a frame has read, a revision and the
+//                           recording switch. Entries travel as op results.
 //   EVENT  'active'        heard: a frame's active endpoint key.
 //   EVENT  'openError'     heard: a connection a frame could not open.
 //
@@ -51,6 +54,18 @@
 //   - a mutation (save, delete) is refused unless the calling frame belongs
 //     to the identity signed in now (`owner`), so a call from before a change
 //     of account can never write into the next account's list.
+//
+// HISTORY (§3.5). The controller owns SQL history in dev-tool mounts: its
+// own history store (same keys, field and bounds as the full app's), kept in
+// a per-user file beside the saved connections,
+// `@/User/.workspace/rocketride.sql.history.json` (the dev-tool library's
+// createFsPrefs): the file is READ before the store attaches (an attach
+// before the read would start empty and overwrite it), the folder is made
+// before the first write, writes are debounced, one bag per identity
+// fingerprint, the 256 KB bag cap holds, and a file that exists but cannot be
+// read is never written (history is kept for the session). A new identity
+// gets a new accessor and the store forgets what it held. Last writer wins
+// across windows (a known limitation the privacy line states).
 //
 // LIFETIME (R6, R7). `attachSqlController` runs inside the sidebar's
 // `useEffect` and its `dispose` is the cleanup: exactly one op server per
@@ -68,13 +83,21 @@ import type { DeadlineError } from 'shared/explorer/devtool/deadline';
 import { publishIdentityState } from 'shared/explorer/devtool/frameIdentity';
 import type { JsonValue } from 'shared/explorer/devtool/reply';
 import { guardRetainedState } from 'shared/explorer/devtool/state';
+import { attachWhenLoaded, createFsPrefs, historyPrefsPath } from 'shared/explorer/devtool/prefs';
+import type { IFsPrefs } from 'shared/explorer/devtool/prefs';
+import type { IIdentitySnapshot } from 'shared/explorer/devtool/identity';
 import type { IStoreClock } from 'shared/explorer/connect/store';
 import type { DevToolPeer } from 'shared/explorer/devtool/realm';
 import type { IFocusTarget } from 'shared/explorer/devtool/watch';
 import { SQL_APP_ID } from './appId';
 import { getSavedConnections, getSavedConnectionsStatus, subscribeSavedConnections } from './connect';
 import { connectionEditorDocKey } from './docs';
-import type { ConnectionsState, SqlOps } from './ops';
+import type { ConnectionsState, HistoryState, SqlOps } from './ops';
+import { checkHistoryEdit, checkHistoryEntry } from './history/api';
+import type { HistoryEdit, HistoryStorage } from './history/api';
+import type { HistoryEntry } from './history/types';
+import { createSqlHistoryStore } from './history/historyStore';
+import type { SqlHistoryStore } from './history/historyStore';
 import type { SqlSidebarBridge } from './sidebarBridge';
 import { gateStatement } from './sql/gate';
 import { createSqlCore } from './sqlCore';
@@ -112,6 +135,8 @@ export interface SqlControllerMount {
 	readonly bridge: SqlSidebarBridge;
 	/** The controller's engine core. */
 	readonly core: SqlCore;
+	/** The controller's history store (persisted in the user's history file). */
+	readonly history: SqlHistoryStore;
 	/** The channel the controller serves on. */
 	readonly channel: ToolChannel;
 	/** Feed every new activeDocKey prop value (activation, R7). */
@@ -128,6 +153,23 @@ export interface SqlControllerMount {
 function connectionsState(): ConnectionsState {
 	const status = getSavedConnectionsStatus();
 	return { status, list: status === 'ready' ? getSavedConnections() : [] };
+}
+
+/**
+ * Apply one edit a frame asked for.
+ *
+ * @param store - The controller's history store.
+ * @param key - The connection's history key.
+ * @param edit - The checked edit.
+ */
+function applyHistoryEdit(store: SqlHistoryStore, key: string, edit: HistoryEdit): void {
+	switch (edit.action) {
+		case 'remove': store.removeEntry(key, edit.id); break;
+		case 'pin': store.togglePin(key, edit.id); break;
+		case 'note': store.setNote(key, edit.id, edit.note); break;
+		case 'clear': store.clearForKey(key); break;
+		default: store.setRecording(key, edit.on);
+	}
 }
 
 /**
@@ -158,6 +200,48 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 		if (owner !== now) throw new ExplorerToolError({ kind: 'stale', tool, message: 'The signed-in account changed since this document opened, so nothing was changed.' });
 	};
 
+	// ── History, persisted in the user's file, per identity ──────────────────
+
+	const history = createSqlHistoryStore();
+	let storage: HistoryStorage = 'none';
+	let historyOwner: string | null = null;
+	let prefs: IFsPrefs | null = null;
+	let detachHistory: (() => void) | null = null;
+	/** Keys frames have read, with the snapshot last seen and its revision. */
+	const watched = new Map<string, { entries: unknown; rev: number; recording: boolean }>();
+	let publishHistory: () => void = () => undefined;
+
+	const followHistoryOwner = (snapshot: IIdentitySnapshot): void => {
+		const owner = snapshot.known ? snapshot.fingerprint : null;
+		if (owner === historyOwner) return;
+		historyOwner = owner;
+		// The previous identity's accessor stops (its pending write is dropped:
+		// writes stop once the signed-in identity is not its owner).
+		detachHistory?.();
+		detachHistory = null;
+		prefs?.dispose();
+		prefs = null;
+		watched.clear();
+		storage = owner === null ? 'none' : 'file';
+		if (owner !== null) {
+			const accessor = createFsPrefs({
+				cm: opts.cm,
+				path: historyPrefsPath('sql'),
+				owner,
+				ownerNow: () => core.identity.get().fingerprint,
+				onError: (_error, phase) => {
+					if (phase !== 'load' || prefs !== accessor) return;
+					storage = 'session';
+					publishHistory();
+				},
+			});
+			prefs = accessor;
+			// Load FIRST, then attach (the store reads its preferences at attach).
+			detachHistory = attachWhenLoaded(accessor, (api, fingerprint) => history.attachPrefs(api, fingerprint));
+		}
+		publishHistory();
+	};
+
 	const handlers: ControllerHandlers<SqlOps> = {
 		'sql.resolveEndpoint': ({ connId }) => core.resolve(connId),
 		'sql.releaseEndpoint': async ({ connId }) => { await core.release(connId); },
@@ -180,6 +264,24 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 		'sql.deleteConnection': async ({ connId, owner }) => {
 			requireOwner(owner, 'deleteConnection');
 			await core.deleteConnection(connId);
+		},
+		'sql.history': async ({ connId }) => {
+			const key = await core.keyOf(connId);
+			if (!watched.has(key)) {
+				watched.set(key, { entries: history.getHistory(key), rev: 1, recording: history.getRecording(key) });
+				publishHistory();
+			}
+			return history.getHistory(key) as HistoryEntry[];
+		},
+		'sql.historyRecord': async ({ connId, entry, owner }) => {
+			requireOwner(owner, 'historyRecord');
+			const key = await core.keyOf(connId);
+			history.runs.emitRun(key, checkHistoryEntry(entry));
+		},
+		'sql.historyEdit': async ({ connId, edit, owner }) => {
+			requireOwner(owner, 'historyEdit');
+			const key = await core.keyOf(connId);
+			applyHistoryEdit(history, key, checkHistoryEdit(edit));
 		},
 	};
 
@@ -205,6 +307,27 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 	publishConnections();
 	const offConnections = subscribeSavedConnections(publishConnections);
 	const offIdentity = publishIdentityState(attached.channel, core.identity);
+
+	// History revisions: a key's revision moves whenever its list or its
+	// switch changes, so frames know to read it again.
+	publishHistory = (): void => {
+		const keys: HistoryState['keys'] = {};
+		for (const [key, seen] of watched) keys[key] = { rev: seen.rev, recording: seen.recording };
+		state.publishState('history', { storage, keys });
+	};
+	const offHistory = history.subscribe(() => {
+		let changed = false;
+		for (const [key, seen] of watched) {
+			const entries = history.getHistory(key);
+			const recording = history.getRecording(key);
+			if (entries === seen.entries && recording === seen.recording) continue;
+			watched.set(key, { entries, rev: seen.rev + 1, recording });
+			changed = true;
+		}
+		if (changed) publishHistory();
+	});
+	followHistoryOwner(core.identity.get());
+	const offHistoryOwner = core.identity.subscribe(followHistoryOwner);
 
 	// ── Frame -> sidebar feeds (idempotent hints) ───────────────────────────
 
@@ -253,6 +376,7 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 	return {
 		bridge,
 		core,
+		history,
 		channel: attached.channel,
 		noteActiveDocKey: (key) => core.activation.noteActiveDocKey(key),
 		dispose() {
@@ -261,6 +385,11 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 			attached.dispose();
 			offConnections();
 			offIdentity();
+			offHistory();
+			offHistoryOwner();
+			// Unmounting under the same identity: write what is pending, then stop.
+			detachHistory?.();
+			void prefs?.close();
 			offActive();
 			offError();
 			activeSubs.clear();

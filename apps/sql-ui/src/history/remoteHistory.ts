@@ -1,0 +1,200 @@
+// =============================================================================
+// MIT License
+// Copyright (c) 2026 Aparavi Software AG
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+// =============================================================================
+// HISTORY — A FRAME'S VIEW OF THE CONTROLLER'S HISTORY
+// =============================================================================
+//
+// In a dev tool the controller owns history (sqlController.ts). A frame:
+//
+//   reads    the retained `history` topic: where history is kept, and per
+//            connection it has read, a revision and the recording switch. On
+//            first use, and whenever a revision moves on, it reads the
+//            entries again with `sql.history` (an op result: a history bag
+//            does not fit the retained-state cap);
+//   writes   through ops only: `sql.historyRecord` for a finished statement,
+//            `sql.historyEdit` for delete, pin, note, clear and the switch.
+//            Each carries the identity the frame belongs to; the controller
+//            refuses a write for anyone else.
+//
+// Nothing here touches the shell's preferences: in a rocket-ui dev-tool mount
+// `usePrefs` would write into rocket-ui's own bag, and in VS Code it is a
+// no-op.
+// =============================================================================
+
+import { useEffect, useSyncExternalStore } from 'react';
+import type { TypedToolChannel } from 'shell';
+import type { IFrameCaller } from 'shared/explorer/devtool/frame';
+import type { SqlEndpoint } from '../connect';
+import type { HistoryState, SqlEventMap, SqlOps, SqlStateMap } from '../ops';
+import { SQL_OP_TIMEOUT_MS } from '../sqlTimeouts';
+import { devToolPrivacyNotice } from './api';
+import type { HistoryEdit, SqlHistoryApi } from './api';
+import type { HistoryEntry } from './types';
+
+/** Shared empty list, so an unread connection keeps a stable snapshot. */
+const NO_ENTRIES: HistoryEntry[] = [];
+
+/** A frame's history view, with its lifetime. */
+export interface RemoteHistory extends SqlHistoryApi {
+	/** Forget every entry read (identity change, sign-out, a dropped connection). */
+	reset(): void;
+	/** Stop following the channel. */
+	dispose(): void;
+}
+
+/** What {@link createRemoteHistory} needs. */
+export interface RemoteHistoryOptions {
+	/** The frame's caller. */
+	caller: IFrameCaller<SqlOps>;
+	/** The frame's channel. */
+	channel: TypedToolChannel<SqlStateMap, SqlEventMap>;
+	/** The identity fingerprint the frame belongs to (sent with writes). */
+	owner: () => string | null;
+}
+
+/**
+ * A history entry as JSON carries it (no undefined fields).
+ *
+ * @param entry - The entry.
+ * @returns The entry without undefined fields.
+ */
+function jsonEntry(entry: HistoryEntry): HistoryEntry {
+	return Object.fromEntries(Object.entries(entry).filter(([, value]) => value !== undefined)) as HistoryEntry;
+}
+
+/**
+ * Build a frame's history view over its controller.
+ *
+ * @param opts - See {@link RemoteHistoryOptions}.
+ * @returns The view; dispose it with the frame.
+ */
+export function createRemoteHistory(opts: RemoteHistoryOptions): RemoteHistory {
+	const { caller, channel, owner } = opts;
+	/** What this frame has read, per endpoint key. */
+	const read = new Map<string, { endpoint: SqlEndpoint; entries: HistoryEntry[]; rev: number | null; loading: boolean; again: boolean }>();
+	let state: HistoryState | undefined;
+	let epoch = 0;
+	const listeners = new Set<() => void>();
+	const notify = (): void => listeners.forEach((listener) => listener());
+	const subscribe = (listener: () => void): (() => void) => {
+		listeners.add(listener);
+		return () => { listeners.delete(listener); };
+	};
+
+	/**
+	 * Read one connection's entries from the controller.
+	 *
+	 * @param key - The endpoint key.
+	 */
+	const fetch = (key: string): void => {
+		const slot = read.get(key);
+		if (!slot || typeof slot.endpoint.connId !== 'string') return;
+		if (slot.loading) {
+			slot.again = true;
+			return;
+		}
+		slot.loading = true;
+		const asked = epoch;
+		const rev = state?.keys[key]?.rev ?? null;
+		caller.callReply('sql.history', { connId: slot.endpoint.connId }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] })
+			.then((entries) => {
+				if (asked !== epoch || read.get(key) !== slot) return;
+				slot.entries = Array.isArray(entries) ? entries : NO_ENTRIES;
+				slot.rev = rev;
+				notify();
+			})
+			.catch(() => undefined)
+			.finally(() => {
+				slot.loading = false;
+				if (slot.again && asked === epoch) {
+					slot.again = false;
+					fetch(key);
+				}
+			});
+	};
+
+	const offState = channel.onState('history', (snapshot) => {
+		state = snapshot;
+		for (const [key, slot] of read) {
+			const rev = snapshot?.keys?.[key]?.rev;
+			if (rev !== undefined && rev !== slot.rev) fetch(key);
+		}
+		notify();
+	});
+
+	/**
+	 * Start following one connection (first use reads its entries).
+	 *
+	 * @param endpoint - The connection's endpoint.
+	 */
+	const watch = (endpoint: SqlEndpoint): void => {
+		if (read.has(endpoint.key)) return;
+		read.set(endpoint.key, { endpoint, entries: NO_ENTRIES, rev: null, loading: false, again: false });
+		fetch(endpoint.key);
+	};
+
+	/**
+	 * Send one write; failures are dropped (the controller's state is the truth).
+	 *
+	 * @param endpoint - The connection.
+	 * @param send - The op call.
+	 */
+	const write = (endpoint: SqlEndpoint, send: (connId: string) => Promise<unknown>): void => {
+		if (typeof endpoint.connId !== 'string') return;
+		void send(endpoint.connId).catch(() => undefined);
+	};
+	const edit = (endpoint: SqlEndpoint, change: HistoryEdit): void => write(endpoint, (connId) => caller.callReply('sql.historyEdit', { connId, edit: change, owner: owner() }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.historyEdit'] }));
+
+	return {
+		useHistory(endpoint) {
+			// The epoch moves on a reset, so a reset view reads the entries again.
+			const seen = useSyncExternalStore(subscribe, () => epoch);
+			useEffect(() => { watch(endpoint); }, [endpoint, seen]);
+			return useSyncExternalStore(subscribe, () => read.get(endpoint.key)?.entries ?? NO_ENTRIES);
+		},
+		useRecording(endpoint) {
+			const seen = useSyncExternalStore(subscribe, () => epoch);
+			useEffect(() => { watch(endpoint); }, [endpoint, seen]);
+			return useSyncExternalStore(subscribe, () => state?.keys?.[endpoint.key]?.recording ?? true);
+		},
+		usePrivacyNotice() {
+			return useSyncExternalStore(subscribe, () => devToolPrivacyNotice(state?.storage ?? 'none'));
+		},
+		record: (endpoint, entry) => write(endpoint, (connId) => caller.callReply('sql.historyRecord', { connId, entry: jsonEntry(entry), owner: owner() }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.historyRecord'] })),
+		removeEntry: (endpoint, id) => edit(endpoint, { action: 'remove', id }),
+		togglePin: (endpoint, id) => edit(endpoint, { action: 'pin', id }),
+		setNote: (endpoint, id, note) => edit(endpoint, { action: 'note', id, note }),
+		clearForKey: (endpoint) => edit(endpoint, { action: 'clear' }),
+		setRecording: (endpoint, on) => edit(endpoint, { action: 'recording', on }),
+		reset() {
+			epoch += 1;
+			read.clear();
+			notify();
+		},
+		dispose() {
+			offState();
+			read.clear();
+			listeners.clear();
+		},
+	};
+}

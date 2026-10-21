@@ -155,6 +155,11 @@ export interface SqlCore {
 	 * @throws ExplorerToolError `invalid` (no such connection) or `unavailable` (not signed in, not running).
 	 */
 	resolve(connId: string): Promise<SqlEndpoint>;
+	/**
+	 * The endpoint key a saved connection's history and schema are kept under
+	 * (`endpointKeyForConnection(record)`), once the list is read; no engine call.
+	 */
+	keyOf(connId: string): Promise<string>;
 	/** A session whose every call resolves its connection first (`endpoint.connId` is required). */
 	sessionFor(endpoint: SqlEndpoint): SqlSession;
 	/**
@@ -443,6 +448,7 @@ export function createSqlCore(opts: SqlCoreOptions): SqlCore {
 			await locate(record, 'resolve');
 			return endpointForConnection(record);
 		},
+		keyOf: async (connId) => endpointKeyForConnection(await recordOf(connId, 'history')),
 		sessionFor,
 		withSession: (connId, fn) => withSession(connId, fn),
 		async release(connId) {

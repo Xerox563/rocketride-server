@@ -58,6 +58,8 @@ import type { IDeadline } from 'shared/explorer/devtool/deadline';
 import type { JsonValue, Reply } from 'shared/explorer/devtool/reply';
 import type { IIdentityState } from 'shared/explorer/devtool/frameIdentity';
 import type { SqlEndpoint, SqlExecuteResult, SqlSchemaResponse, SavedSqlConnection, SavedConnectionsStatus, SqlDialect } from './connect';
+import type { HistoryEdit, HistoryStorage } from './history/api';
+import type { HistoryEntry } from './history/types';
 
 /**
  * Who a mutation was made for: the identity fingerprint the calling frame
@@ -104,6 +106,13 @@ export interface SqlOps extends ToolOpMap {
 	'sql.saveConnection': ToolOpSpec<IDeadline & IOwnedCall & { connection: SavedSqlConnection }, Reply<null>>;
 	/** Delete a saved connection (a direct one's temp pipeline is stopped first, best effort). */
 	'sql.deleteConnection': ToolOpSpec<IDeadline & IOwnedCall & { connId: string }, Reply<null>>;
+	// ── History (the controller owns it; frames read and edit through these) ──
+	/** One connection's history entries, newest first (bulk: an op result, never retained state). */
+	'sql.history': ToolOpSpec<IDeadline & { connId: string }, Reply<HistoryEntry[]>>;
+	/** Record one finished statement (dropped when recording is off for the connection). */
+	'sql.historyRecord': ToolOpSpec<IDeadline & IOwnedCall & { connId: string; entry: HistoryEntry }, Reply<null>>;
+	/** Edit one connection's history: delete, pin, note, clear, or the recording switch. */
+	'sql.historyEdit': ToolOpSpec<IDeadline & IOwnedCall & { connId: string; edit: HistoryEdit }, Reply<null>>;
 }
 
 /** The saved-connection list as the controller publishes it. */
@@ -114,10 +123,26 @@ export interface ConnectionsState {
 	list: SavedSqlConnection[];
 }
 
+/**
+ * What frames need to follow history without holding it: where it is kept,
+ * and, per connection a frame has read, a revision that moves on every change
+ * plus the recording switch. The entries themselves are an op result
+ * (`sql.history`): a history bag (up to 256 KB) does not fit the retained
+ * state cap.
+ */
+export interface HistoryState {
+	/** Where the controller keeps history (the privacy line says so). */
+	storage: HistoryStorage;
+	/** Per endpoint key a frame has read: the revision and the recording switch. */
+	keys: Record<string, { rev: number; recording: boolean }>;
+}
+
 /** The sql tool's state topics (controller → documents). Fixed topics; never one per document. */
 export interface SqlStateMap extends ToolStateMap {
 	/** The saved-connection list, replicated to every document realm. */
 	connections: ConnectionsState;
+	/** History revisions and switches (entries travel as op results). */
+	history: HistoryState;
 	/** Who the controller vouches for (the fingerprint only; R9). */
 	identity: IIdentityState;
 }

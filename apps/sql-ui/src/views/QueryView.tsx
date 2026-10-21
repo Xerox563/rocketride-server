@@ -48,7 +48,6 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
-import { usePrefs } from 'shell';
 import type { GridCellComponent, GridColumnDefinition } from 'shell';
 import { Banner, Button, Card, CardDataGrid, ConfirmDialog, ContentHeader, EmptyState, StatusBadge, ToggleGroup, commonStyles, monoEl, mutedEl } from 'shell';
 import type { SqlEndpoint, SqlDialect } from '../connect';
@@ -79,7 +78,6 @@ import type { FailureNotice } from '../sql/failure';
 import { inferColumnTypes } from '../sql/resultTypes';
 import { buildCompletionModel } from '../sql/completion';
 import { buildExplain } from '../sql/explain';
-import { emitRun } from '../history/runEvents';
 import type { HistoryEntry } from '../history/types';
 import { DatabaseIcon } from '../icons';
 
@@ -302,13 +300,15 @@ function toHistoryEntry(run: StatementRun): HistoryEntry {
 		at: Date.now() - (run.ms ?? 0),
 		ms: run.ms ?? 0,
 		outcome,
-		rows: run.outcome === 'rows' ? run.rows?.length ?? 0 : undefined,
-		affected: run.outcome === 'affected' ? run.affected ?? 0 : undefined,
-		error: run.error,
 		kind: run.kind,
+		// Absent fields are left out rather than set to undefined: the entry may
+		// cross to a dev tool's controller as JSON.
+		...(run.outcome === 'rows' ? { rows: run.rows?.length ?? 0 } : {}),
+		...(run.outcome === 'affected' ? { affected: run.affected ?? 0 } : {}),
+		...(run.error !== undefined ? { error: run.error } : {}),
 		// Only a limit the APP appended is reported; a statement's own LIMIT is
 		// already visible in the stored text.
-		limit: run.limitState === 'applied' ? run.limitApplied ?? undefined : undefined,
+		...(run.limitState === 'applied' && typeof run.limitApplied === 'number' ? { limit: run.limitApplied } : {}),
 	};
 }
 
@@ -331,7 +331,9 @@ function toHistoryEntry(run: StatementRun): HistoryEntry {
 export const QueryView: React.FC<QueryViewProps> = ({ endpoint, label, initialSql, origin }) => {
 	const env = useSqlEnv();
 	const snapshot = useSchema(endpoint.key);
-	const prefs = usePrefs();
+	// The pattern-check switch: workspace preferences in the full app, this
+	// session only in a dev-tool frame (SqlEnv prefs; never usePrefs here).
+	const prefs = env.prefs;
 
 	// ── Editor + run state ───────────────────────────────────────────────────
 	const [sql, setSql] = useState(initialSql ?? '');
@@ -415,8 +417,9 @@ export const QueryView: React.FC<QueryViewProps> = ({ endpoint, label, initialSq
 	// ── Preferences ──────────────────────────────────────────────────────────
 
 	/**
-	 * Turn the pattern check on or off for THIS connection, in the workspace
-	 * prefs (server-side, per user) and in local state.
+	 * Turn the pattern check on or off for THIS connection, in the mount's
+	 * preferences (the full app's workspace preferences, server-side and per
+	 * user; a dev-tool frame's session) and in local state.
 	 *
 	 * @param on - Whether the check should run.
 	 */
@@ -578,8 +581,8 @@ export const QueryView: React.FC<QueryViewProps> = ({ endpoint, label, initialSq
 	 */
 	const record = useCallback((run: StatementRun): void => {
 		if (!mountedRef.current) return;
-		emitRun(endpoint.key, toHistoryEntry(run));
-	}, [endpoint.key]);
+		env.history.record(endpoint, toHistoryEntry(run));
+	}, [env, endpoint]);
 
 	/**
 	 * Commit a run list to state and to the ref the abandon path reads.

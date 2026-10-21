@@ -42,134 +42,20 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { IToolOpServer, ToolControllerFn, ToolOpMap } from 'shell';
 import { ExplorerToolError } from 'shared/explorer/errors';
-import { assertJsonSafe, assertSidebarSubscribers, createDevToolHarness, findToolFactoryImports, manualNow, settle, shellProtocol, spyPeer } from 'shared/explorer/devtool/testing';
-import type { IDevToolHarness, IPeerSpy } from 'shared/explorer/devtool/testing';
+import { assertJsonSafe, assertSidebarSubscribers, findToolFactoryImports, manualNow, settle } from 'shared/explorer/devtool/testing';
 import { BUS_TOOL_MARGIN_MS, FRAME_OP_MARGIN_MS, SDK_TIMEOUT_SLACK_MS, UNBOUNDED_TOOL_TIMEOUT_MS } from 'shared/explorer/devtool/timeouts';
 import { MAX_RETAINED_STATE_BYTES } from 'shared/explorer/devtool/state';
-import type { DevToolPeer } from 'shared/explorer/devtool/realm';
 import { SQL_APP_ID } from '../src/appId';
 import { applyReplicaConnections, deleteSavedConnection, getSavedConnections, getSavedConnectionsStatus, ownSavedConnections, resetSavedConnections } from '../src/connect';
 import type { SavedSqlConnection } from '../src/connect';
-import { attachSqlController } from '../src/sqlController';
-import type { SqlControllerMount } from '../src/sqlController';
-import { attachSqlFrame, connectionDocState, routeDocKey, sqlChannel } from '../src/sqlFrame';
-import type { SqlFrameMount, SqlToolProtocol } from '../src/sqlFrame';
-import { createRemoteSqlEnv } from '../src/sqlEnv';
-import type { SqlEnv } from '../src/sqlEnv';
+import { connectionDocState, routeDocKey, sqlChannel } from '../src/sqlFrame';
 import { RESOLVE_BUDGET_MS, SQL_OP_TIMEOUT_MS } from '../src/sqlTimeouts';
 import { DIALECT_WAIT_MS, GET_SCHEMA_WAIT_MS, REFRESH_SCHEMA_WAIT_MS } from '../src/connect/tools';
-import { taskRow } from './support';
-import type { IFakeTaskRow } from './support';
-import { USER, engineScript, scriptedClientRealm, until } from './realm';
-import type { IScriptedRealm } from './realm';
-import type { IFakeClientRealm } from 'shared/explorer/devtool/testing';
-
-// =============================================================================
-// FIXTURES
-// =============================================================================
+import { USER, until } from './realm';
+import { DIRECT, PIPELINE, postgres, rig, toolRequests } from './devtoolRig';
 
 const SRC = path.resolve(__dirname, '..', 'src');
-const PIPELINE: SavedSqlConnection = { id: 'c-pipe', mode: 'pipeline', name: 'Orders', projectId: 'p1', pipelineName: 'Pipeline A', source: 's1', nodeId: 'db_1', provider: 'db_postgres' };
-const DIRECT: SavedSqlConnection = { id: 'c-direct', mode: 'direct', name: 'Scratch', provider: 'db_mysql', config: { host: 'db.internal' } };
-
-/**
- * A tool answer for each tool, like a postgres node.
- *
- * @param params - The client.tool params.
- * @returns The answer.
- */
-function postgres(params: { tool: string }): unknown {
-	switch (params.tool) {
-		case 'execute': return { rows: [{ id: 1, name: 'a' }, { id: 2, name: null }], affected_rows: 0 };
-		case 'get_schema': return { database: 'shop', tables: { orders: { columns: [{ column: 'id', type: 'INT' }] } } };
-		case 'refresh_schema': return { database: 'shop', tables: {} };
-		default: return { dialect: 'postgres' };
-	}
-}
-
-/** A controller, a frame on it, and everything recorded. */
-interface IRig {
-	h: IDevToolHarness;
-	engine: IScriptedRealm<IFakeClientRealm>;
-	spy: IPeerSpy;
-	protocol: SqlToolProtocol;
-	mount: SqlControllerMount;
-	frame: SqlFrameMount;
-	env: SqlEnv;
-	docs: { opened: Array<[string, string]>; closed: string[] };
-	frameCalls: Array<{ op: string; timeoutMs: number | undefined }>;
-	servers: { created: number; disposed: number };
-	/** Remount the controller (the old one must be disposed first). */
-	remount(): SqlControllerMount;
-	dispose(): void;
-}
-
-/**
- * Mount a controller (as the hosts do: a host channel on the sidebar peer,
- * then the controller in an effect) and one frame on a connection document.
- *
- * @param opts - The engine's saved list, tasks and tool answers; whether to sign in.
- * @returns The rig.
- */
-async function rig(opts: { saved?: SavedSqlConnection[]; rows?: IFakeTaskRow[]; tool?: (params: { tool: string; input?: Record<string, unknown> }) => unknown; login?: boolean; now?: () => number; docKey?: string } = {}): Promise<IRig> {
-	resetSavedConnections({ force: true });
-	const h = createDevToolHarness(SQL_APP_ID, { json: true });
-	const engine = scriptedClientRealm(engineScript(opts.saved ?? [PIPELINE, DIRECT], opts.rows ?? [taskRow('p1')], opts.tool ?? postgres));
-	const spy = spyPeer(h.sidebarPeer);
-	const hostChannel = shellProtocol.createToolChannel(spy.peer);
-	const docs = { opened: [] as Array<[string, string]>, closed: [] as string[] };
-	const documents = { open: (key: string, title: string) => { docs.opened.push([key, title]); }, close: (key: string) => { docs.closed.push(key); } };
-	const frameCalls: Array<{ op: string; timeoutMs: number | undefined }> = [];
-	const servers = { created: 0, disposed: 0 };
-	const protocol: SqlToolProtocol = {
-		createToolChannel: shellProtocol.createToolChannel,
-		createToolController: <O extends ToolOpMap>(peer: DevToolPeer): ToolControllerFn<O> => {
-			const fn = shellProtocol.createToolController<O>(peer);
-			return ((op: keyof O & string, params: never, callOpts?: { timeoutMs?: number }) => {
-				frameCalls.push({ op, timeoutMs: callOpts?.timeoutMs });
-				return fn(op, params, callOpts);
-			}) as ToolControllerFn<O>;
-		},
-		createToolOpServer: <O extends ToolOpMap>(peer: DevToolPeer): IToolOpServer<O> => {
-			servers.created += 1;
-			const server = shellProtocol.createToolOpServer<O>(peer);
-			return { serve: (op, handler) => server.serve(op, handler), dispose: () => { servers.disposed += 1; server.dispose(); } };
-		},
-	};
-	const controllerOpts = { peer: spy.peer, channel: hostChannel, documents, cm: engine.cm, protocol, focusTarget: null, ...(opts.now ? { now: opts.now } : {}) };
-	let mount = attachSqlController(controllerOpts);
-	if (opts.login !== false) engine.realm.login(USER);
-	h.setHostConnection(true);
-	const frame = attachSqlFrame({ peer: h.newFramePeer(), docKey: opts.docKey ?? 'c-pipe', documents, protocol, ...(opts.now ? { now: opts.now } : {}) });
-	const env = createRemoteSqlEnv(frame.caller, true, frame.owner);
-	await settle();
-	const rigged: IRig = {
-		h, engine, spy, protocol, mount, frame, env, docs, frameCalls, servers,
-		remount: () => {
-			mount = attachSqlController(controllerOpts);
-			rigged.mount = mount;
-			return mount;
-		},
-		dispose: () => {
-			frame.dispose();
-			mount.dispose();
-		},
-	};
-	return rigged;
-}
-
-/**
- * The ops the controller's engine received for one tool.
- *
- * @param engine - The scripted realm.
- * @param tool - The tool name.
- * @returns Those `client.tool` requests.
- */
-function toolRequests(engine: IScriptedRealm<IFakeClientRealm>, tool: string) {
-	return engine.requests.filter((request) => request.op === 'client.tool' && (request.params as { tool: string }).tool === tool);
-}
 
 /**
  * Read a source file of the app.
@@ -287,6 +173,12 @@ describe('T3 — every op round-trips JSON-safe; failures come back as equal Exp
 				validate: await r.env.validate({ version: 1, component: { id: 'db_mysql_1', provider: 'db_mysql', config: {} } }),
 				envKeys: await r.env.getEnvironmentKeys(),
 			};
+			const owner = r.frame.owner();
+			const entry = { id: 'h1', sql: 'SELECT 1', at: 1, ms: 2, outcome: 'rows' as const, rows: 1, kind: 'read' as const };
+			await r.frame.caller.callReply('sql.historyRecord', { connId: 'c-pipe', entry, owner }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.historyRecord'] });
+			await r.frame.caller.callReply('sql.historyEdit', { connId: 'c-pipe', edit: { action: 'pin', id: 'h1' }, owner }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.historyEdit'] });
+			results.history = await r.frame.caller.callReply('sql.history', { connId: 'c-pipe' }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] });
+			assert.deepEqual(results.history, [{ ...entry, pinned: true }]);
 			await r.env.saveConnection({ ...PIPELINE, id: 'c-new', name: 'New' });
 			await r.env.deleteConnection({ ...PIPELINE, id: 'c-new', name: 'New' });
 			r.env.releaseEndpoint('c-direct');
@@ -622,7 +514,7 @@ describe('T11 — no bulk result is retained state, and a size guard exists', ()
 		try {
 			await r.env.getSession(await r.env.resolveEndpoint(PIPELINE)).execute('SELECT * FROM orders');
 			const states = r.spy.posts.filter((post) => (post as { __rrtool?: string }).__rrtool === 'state').map((post) => (post as { topic: string }).topic);
-			assert.deepEqual([...new Set(states)].sort(), ['connections', 'identity']);
+			assert.deepEqual([...new Set(states)].sort(), ['connections', 'history', 'identity']);
 			assert.equal(JSON.stringify(r.spy.posts.filter((post) => (post as { __rrtool?: string }).__rrtool === 'state')).includes('"rows"'), false);
 		} finally {
 			r.dispose();

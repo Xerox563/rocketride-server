@@ -31,10 +31,28 @@
 // =============================================================================
 
 import { connectionEditorUri, connectionUri, getDocs } from './docs';
+import type { IPrefsAccessor } from 'shared/explorer/history/types';
+import { APP_PRIVACY_NOTICE } from './history/api';
+import type { SqlHistoryApi } from './history/api';
+import { clearForKey, removeEntry, setNote, setRecording, togglePin, useHistory, useRecording } from './history/historyStore';
+import { emitRun } from './history/runEvents';
 import { getActiveConnection, subscribeActiveConnection } from './navigation';
 import type { SqlSidebarBridge } from './sidebarBridge';
 import type { SqlCore } from './sqlCore';
 import type { SqlEnv } from './sqlEnv';
+
+/** The full app's history: the module store, persisted through the shell's workspace preferences. */
+export const LOCAL_HISTORY: SqlHistoryApi = {
+	useHistory: (endpoint) => useHistory(endpoint.key),
+	useRecording: (endpoint) => useRecording(endpoint.key),
+	usePrivacyNotice: () => APP_PRIVACY_NOTICE,
+	record: (endpoint, entry) => emitRun(endpoint.key, entry),
+	removeEntry: (endpoint, id) => removeEntry(endpoint.key, id),
+	togglePin: (endpoint, id) => togglePin(endpoint.key, id),
+	setNote: (endpoint, id, note) => setNote(endpoint.key, id, note),
+	clearForKey: (endpoint) => clearForKey(endpoint.key),
+	setRecording: (endpoint, on) => setRecording(endpoint.key, on),
+};
 
 /**
  * The core-backed environment (the full app).
@@ -42,10 +60,13 @@ import type { SqlEnv } from './sqlEnv';
  * @param core - The realm's engine core.
  * @param isConnected - The shell's connection flag.
  * @param serviceTitle - A provider's title from the realm's cached service list.
+ * @param prefs - The shell's workspace preferences (a stable accessor over `usePrefs`).
  * @returns The environment (rebuild on core/connection change).
  */
-export function createLocalSqlEnv(core: SqlCore, isConnected: boolean, serviceTitle: (provider: string) => string | undefined): SqlEnv {
+export function createLocalSqlEnv(core: SqlCore, isConnected: boolean, serviceTitle: (provider: string) => string | undefined, prefs: IPrefsAccessor): SqlEnv {
 	return {
+		history: LOCAL_HISTORY,
+		prefs,
 		ready: isConnected,
 		getSession: (endpoint) => core.sessionFor(endpoint),
 		resolveEndpoint: (conn) => core.resolve(conn.id),
