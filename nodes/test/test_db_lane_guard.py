@@ -140,6 +140,8 @@ def test_requirement_defaults_and_overrides():
 def test_the_lane_lists_the_graph_suites_and_the_pooler_pass():
     out = _lane({'required': []})
     for suite in (
+        'test_rocketride_vector_tools_full.py',
+        'test_vector_store_writes_full.py',
         'test_rocketride_graph_full.py',
         'test_graph_age_full.py',
         'test_graph_drivers_full.py',

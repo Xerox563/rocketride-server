@@ -105,6 +105,9 @@ const CPP_NODE_BUILDS = [...SRC_NODE_DIRS]
 // deliberate "NOT RUN:" reason.
 const DB_LIVE_SUITES = [
 	'test_rocketride_db_full.py',
+	// rocketride_vector's agent tools and the vector-store writes, on pgvector.
+	'test_rocketride_vector_tools_full.py',
+	'test_vector_store_writes_full.py',
 	'test_rocketride_graph_full.py',
 	'test_graph_age_full.py',
 	'test_graph_drivers_full.py',

@@ -537,7 +537,8 @@ Integration tests execute the test cases defined in `services*.json` through a l
 
 Some suites drive a node's real driver against a real database server:
 `test_rocketride_graph_full.py` and `test_graph_age_full.py` (Apache AGE),
-`test_rocketride_db_full.py` (PostgreSQL with pgvector),
+`test_rocketride_db_full.py`, `test_rocketride_vector_tools_full.py` and
+`test_vector_store_writes_full.py` (PostgreSQL with pgvector),
 `test_graph_neo4j_full.py` (Neo4j) and `test_graph_falkordb_full.py`
 (FalkorDB). Two more need the real driver packages: `test_graph_drivers_full.py`
 (real driver objects, no server) and `test_graph_wire_fixtures_full.py`, which
