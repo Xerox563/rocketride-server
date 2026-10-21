@@ -133,7 +133,6 @@ describe('attachController — every op answers a Reply (R3)', () => {
 
 	it('refuses, at compile time, `any` params or results and a `never` result (round 3)', () => {
 		interface AnyOps extends ToolOpMap {
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
 			'x.any': ToolOpSpec<any, any>;
 		}
 		interface NeverOps extends ToolOpMap {
