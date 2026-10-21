@@ -1,0 +1,135 @@
+// =============================================================================
+// MIT License
+// Copyright (c) 2026 Aparavi Software AG
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+// =============================================================================
+// EXPLORER DEV TOOL — THE HARNESS ITSELF (it must reproduce the real platform)
+// =============================================================================
+//
+// The harness is only worth something if it IS the platform: these checks pin
+// the busPeer quirks the dev-tool design works around, over the real modules,
+// so a harness that drifted into a hand-written fake would fail here first.
+// =============================================================================
+
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import { account, assertJsonSafe, createDevToolHarness, createFakeSocketlessRealm, settle, shellProtocol } from './testing';
+
+describe('assertJsonSafe', () => {
+	it('accepts plain JSON data', () => {
+		for (const ok of [null, true, 0, -1.5, 'text', [], {}, [1, 'a', null, { b: [true] }], { nested: { list: [{ x: 1 }] } }, Object.create(null) as object]) {
+			assert.doesNotThrow(() => assertJsonSafe(ok), JSON.stringify(ok));
+		}
+	});
+
+	it('rejects everything a JSON round trip changes or drops', () => {
+		class Point { x = 1; }
+		const cases: Array<[string, unknown]> = [
+			['Map', new Map([['a', 1]])],
+			['Set', new Set([1])],
+			['function', () => 1],
+			['nested function', { run: () => 1 }],
+			['class instance', new Point()],
+			['Date', new Date(0)],
+			['Error', new Error('x')],
+			['typed array', new Uint8Array([1, 2])],
+			['ArrayBuffer', new ArrayBuffer(2)],
+			['undefined', undefined],
+			['undefined in an array', [1, undefined]],
+			['undefined property', { a: undefined }],
+			['NaN', Number.NaN],
+			['Infinity', { n: Number.POSITIVE_INFINITY }],
+			['-0', -0],
+			['bigint', { n: BigInt(1) }],
+			['symbol', { s: Symbol('x') }],
+			['sparse array', new Array(2)],
+		];
+		for (const [label, value] of cases) {
+			assert.throws(() => assertJsonSafe(value, label), Error, label);
+		}
+	});
+
+	it('names where the problem is', () => {
+		assert.throws(() => assertJsonSafe({ rows: [[1, new Map()]] }, 'result'), /result\.rows\[0\]\[1\]/);
+	});
+});
+
+describe('the harness runs the REAL busPeer (fidelity checks)', () => {
+	it('quirk 1: the sidebar peer keeps ONE live subscriber; calls reach the last one', async () => {
+		const h = createDevToolHarness();
+		const first: unknown[] = [];
+		const second: unknown[] = [];
+		h.sidebarPeer.subscribe((m) => first.push(m));
+		h.sidebarPeer.subscribe((m) => second.push(m));
+		const frame = h.newFramePeer();
+		frame.subscribe(() => undefined);
+		await settle();
+		frame.post({ __rrtool: 'call', id: 'x:1', op: 't.op', args: {} });
+		await settle();
+		assert.equal(first.length, 0);
+		assert.equal(second.length, 1);
+	});
+
+	it('quirk 2: the live subscriber hears a frame event twice (signal + retained slot)', async () => {
+		const h = createDevToolHarness();
+		const seen: unknown[] = [];
+		h.sidebarPeer.subscribe((m) => seen.push(m));
+		const frame = h.newFramePeer();
+		const channel = shellProtocol.createToolChannel(frame);
+		await settle();
+		channel.sendEvent('active', 'k');
+		await settle();
+		assert.equal(seen.filter((m) => (m as { name?: string }).name === 'active').length, 2);
+	});
+
+	it('quirk 6: with no sidebar subscriber, a call is held and delivered synchronously to the next subscriber', async () => {
+		const h = createDevToolHarness();
+		const frame = h.newFramePeer();
+		frame.subscribe(() => undefined);
+		await settle();
+		frame.post({ __rrtool: 'call', id: 'x:1', op: 't.op', args: {} });
+		await settle();
+		const seen: unknown[] = [];
+		h.sidebarPeer.subscribe((m) => seen.push(m));
+		assert.equal(seen.length, 1, 'delivered inside subscribe(), before any handler could be registered');
+	});
+
+	it('records every topic write, and the summon op', async () => {
+		const h = createDevToolHarness();
+		h.sidebarPeer.post({ __rrtool: 'event', name: 'open', payload: 'x' });
+		await settle();
+		assert.deepEqual(h.emitted, [{ op: 'host.openToolPanel', params: { appId: h.appId } }]);
+		h.setHostConnection(false);
+		assert.ok(h.wire.some((entry) => entry.topic === shellProtocol.HOST_CONNECTION_TOPIC));
+	});
+});
+
+describe('the fake realms follow connection.ts', () => {
+	it('a socketless realm ignores a falsy account snapshot but its topic carries it', async () => {
+		const realm = createFakeSocketlessRealm();
+		realm.root.connect(account('u'));
+		await settle();
+		realm.root.accountChanged(null);
+		await settle();
+		assert.equal((realm.cm.getAccountInfo() as { userId?: string }).userId, 'u');
+		assert.equal(await realm.cm.read('shell:account'), null);
+	});
+});
