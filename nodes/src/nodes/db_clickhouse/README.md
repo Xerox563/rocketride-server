@@ -16,15 +16,16 @@ On the `questions` lane, the node gives its reflected database schema and
 optional database description to the connected LLM, asks it for a `SELECT`,
 validates that query with `EXPLAIN`, and sends the result to the requested
 `table`, `text`, or `answers` lane. It is also an agent tool node, so an agent
-can retrieve data, inspect the startup-reflected schema, generate SQL, or—when
-explicitly enabled—run raw SQL. Unlike a write-oriented relational database
-node, its declared lanes contain no data-ingestion input.
+can retrieve data, inspect the cached schema snapshot (refreshable with
+`refresh_schema`), generate SQL, or—when explicitly enabled—run raw SQL.
+Unlike a write-oriented relational database node, its declared lanes contain
+no data-ingestion input.
 
 ## Connections
 
 | Connection | Required | Description |
 | --- | --- | --- |
-| `llm` | yes | LLM used to craft SQL queries from questions |
+| `llm` | no | LLM used to craft SQL queries from questions; not needed for execute (raw SQL) |
 
 ## Lanes
 
@@ -42,28 +43,73 @@ configurable server-name prefix.
 | Function | Description |
 | --- | --- |
 | `get_data` | Generate a safe `SELECT` from a question and execute it. |
-| `get_schema` | Return the schema reflected when the node started. |
+| `get_schema` | Return the schema snapshot the node currently holds. |
+| `refresh_schema` | Re-read the schema, replace the cache, and return it. |
 | `get_sql` | Generate a safe `SELECT` without executing it. |
 | `execute` | Run raw SQL, bypassing LLM translation and the safety check. |
-| `begin` | Open a transaction and return its session ID. |
-| `commit` | Commit and close a transaction session. |
-| `rollback` | Roll back and close a transaction session. |
+| `begin` | Reserve a connection and return its session ID; no transaction is opened. |
+| `commit` | Close a session; its statements were already executed. |
+| `rollback` | Close a session; this undoes nothing. |
 | `dialect` | Return `{ "dialect": "clickhouse" }`. |
 
 `get_data` and `get_sql` require a non-empty `question`; `get_data` accepts an
 optional `limit`, defaulting to 250 and clamped to 1–25,000. `get_schema`
 accepts an optional `table`; an unknown table returns an `error` field, while
-omitting it returns all reflected tables. `get_data` returns `{valid, rows,
-sql, row_limit}` on success; a non-database question returns `{valid: false,
-answer}`, and a query execution failure returns `{valid: false, error, sql,
-rows: []}`.
+omitting it returns all reflected tables. `get_schema` serves the snapshot the
+node currently holds — the reflection taken at start-up, replaced by each
+`refresh_schema` call — so DDL run since the last reflection is invisible to
+it until the next one. `refresh_schema` takes no arguments, re-reflects the
+database, replaces that database-wide cache, and returns the `get_schema`
+shape plus a `refreshed_at` UTC timestamp. If the database refuses the
+reflection — a revoked grant, a lock timeout, a table dropped mid-walk — the
+call fails with `Schema refresh failed:` followed by the database's own
+message (for a table that disappeared mid-walk, the name of that table) and
+leaves the cached schema exactly as it was. `get_data` returns
+`{valid, rows, sql, row_limit}` on success; a non-database question returns
+`{valid: false, answer}`, and a query execution failure returns
+`{valid: false, error, sql, rows: []}`.
 
-`execute` requires non-empty `sql` and optionally accepts a transaction
-`session_id` plus positional values for `$1`, `$2`, and so on. It returns
-`{rows, affected_rows}`. `begin` takes no arguments and returns `{session_id}`;
+`execute` requires non-empty `sql` and optionally accepts a `session_id`
+from `begin` plus positional values for `$1`, `$2`, and so on. It returns
+`{rows, affected_rows}`. A failed statement raises `SQL execution failed:`
+followed by `Error <code>:` and ClickHouse's own primary message,
+identically with and without a `session_id`. The `clickhouse+native://`
+driver does not raise a DBAPI error, so the node unwraps it to the driver
+error it carries; the code and message come from the server's
+own `ServerException`. The driver interpolates bound values into the
+statement, so where ClickHouse repeats the statement or its input it repeats
+the caller's values. That is removed: SQLAlchemy's `[SQL: ...]` /
+`[parameters: ...]` echo, the stack trace, the `failed at position` quotation,
+the rest of the input after `here:`, `before:` or `at:` (the remaining
+`INSERT ... VALUES` rows), the expression after `Cannot deduce template of
+expression:` and `(result column not found):`, the `Row N:` dump of a CSV or
+TSV parse error, the text after `in scope`, `In query`, `while processing
+query:`, `while processing:` and `While processing` (with the `required
+columns` list), and a runtime context, `: while executing 'FUNCTION ...'`.
+These are the shapes the node recognises, not a promise that ClickHouse has no
+other. ClickHouse's own sentence is kept, so it can name a value or an
+identifier the statement carried or touched. A `throwIf` message (code 395) is
+the caller's own text: it comes back whole with its runtime context dropped,
+while one reported without that context gets the markers like any other
+message. If the cut leaves only the exception class, the result says the
+server's message only repeated the statement. That is deliberate:
+reaching this tool at all requires **Allow direct query execution**, and a
+caller who has it can read the same data with a `SELECT`. The full text is
+written to the server log. `begin` takes no arguments and returns `{session_id}`;
 `commit` and `rollback` require that ID and return `{ok: true}`. These four
 write-capable operations fail when **Allow direct query execution** is off;
 unknown or expired session IDs also fail. Invalid tool input raises an error.
+
+A session opens no ClickHouse transaction. `begin` reserves a connection for
+the `session_id`, but every statement sent on it is executed when it is sent,
+and other connections see its effect without waiting for a `commit`;
+`commit` and `rollback` only close the session, so `rollback` discards
+nothing. Savepoints do not exist either: `SAVEPOINT` is a syntax error, and
+`rollback to savepoint <name>` fails with `unknown savepoint`. To undo a
+write, run a statement that reverses it. A failed statement leaves the
+session open. Its error text is byte-identical with and without a
+`session_id` and carries no advice, so this policy is stated in the `execute`
+tool description instead. The idle reaper closes a session that is abandoned.
 
 ## Configuration
 
@@ -110,9 +156,10 @@ subsequent execution will succeed.
 
 Leave this off by default. When on, the `execute`, `begin`, `commit`, and
 `rollback` tools can bypass LLM translation and the generated-query safety
-check, and raw statements use a transaction that commits on success. Enable it
-only for trusted callers that need writes or dialect-specific SQL; use
-`get_data` for ordinary read-only retrieval.
+check, and each raw statement is applied when it runs: ClickHouse holds no
+transaction for it to commit or roll back. Enable it only for trusted callers
+that need writes or dialect-specific SQL; use `get_data` for ordinary
+read-only retrieval.
 
 ## Limitations
 
@@ -147,7 +194,7 @@ columns and best-effort primary keys but no foreign-key relationships.
 
 | Field | Type | Description | Default |
 |---|---|---|---|
-| `clickhouse.allow_execute` | `boolean` | **Allow direct query execution**<br/>Permit QuestionType.EXECUTE callers to run raw SQL without LLM translation or safety checks. Leave OFF unless a trusted application explicitly needs to issue SQL directly. | `false` |
+| `clickhouse.allow_execute` | `boolean` | **Allow direct query execution**<br/>Permit the execute, begin, commit, and rollback tool functions to run raw SQL without LLM translation or safety checks. Leave OFF unless a trusted application explicitly needs to issue SQL directly. | `false` |
 | `clickhouse.database` | `string` | **Database name**<br/>Name of database | `"default"` |
 | `clickhouse.db_description` | `string` | **Database description**<br/>What is this database used for? Describe its content and purpose, this helps the LLM generate more accurate queries. | `""` |
 | `clickhouse.host` | `string` | **ClickHouse host**<br/>Host name or IP address of the ClickHouse server, optionally including a native-protocol port (e.g. localhost:9440). Defaults to port 9000 when none is given. | `"localhost"` |

@@ -61,6 +61,18 @@ def _client() -> TestClient:
     return TestClient(app)
 
 
+def _shell_client() -> TestClient:
+    """
+    Build an app with only the shell asset route, as ``initModule`` registers it.
+
+    Returns:
+        TestClient: client for ``GET /shell/{file_path:path}``.
+    """
+    app = FastAPI()
+    app.get('/shell/{file_path:path}')(shell_static)
+    return TestClient(app)
+
+
 @pytest.fixture
 def shell_root(tmp_path, monkeypatch):
     """
@@ -114,8 +126,66 @@ def test_public_routes_contains_home_ui_pages():
         '/about',
         '/careers',
         '/contact',
+        '/superfans',
     ):
         assert route in PUBLIC_ROUTES
+
+
+LEGAL_PAGES = (
+    '/legal',
+    '/legal/terms',
+    '/legal/privacy-policy',
+    '/legal/dpa',
+    '/legal/acceptable-use',
+    '/legal/subprocessors',
+    '/legal/trademark-policy',
+)
+
+
+def test_legal_pages_are_public_routes_and_listed():
+    # The legal index and the six published documents serve the SPA on a hard
+    # reload and are advertised like the other pages.
+    for route in LEGAL_PAGES:
+        assert route in PUBLIC_ROUTES
+        assert route in LISTED_ROUTES
+
+
+def test_legal_routes_are_exact_paths():
+    # Only the published documents are public: no pattern, so a slug that is not
+    # a document (a typo, an unpublished slug) stays behind the auth middleware
+    # like any other unregistered path.
+    legal = [route for route in PUBLIC_ROUTES if route == '/legal' or route.startswith('/legal/')]
+    assert sorted(legal) == sorted(LEGAL_PAGES)
+    for route in legal:
+        assert '{' not in route
+    assert '/legal/not-a-document' not in PUBLIC_ROUTES
+
+
+def test_legal_index_description_mirrors_the_client_manifest():
+    # The description is the client's string (routes.ts), character for character.
+    description = dict((route, desc) for route, _, desc in PUBLIC_ROUTE_MANIFEST)['/legal']
+    assert description == (
+        'The policies and terms that govern RocketRide Cloud - each document with its version, '
+        'effective date, and latest change.'
+    )
+
+
+def test_superfans_page_is_an_exact_public_listed_route():
+    # The superfans page (routes.ts) serves the SPA on a hard reload and is
+    # advertised. One exact path: nothing below it is public.
+    assert '/superfans' in PUBLIC_ROUTES
+    assert '/superfans' in LISTED_ROUTES
+    assert [route for route in PUBLIC_ROUTES if route.startswith('/superfans')] == ['/superfans']
+
+
+def test_superfans_entry_mirrors_the_client_manifest():
+    # routes.ts title minus the ' | RocketRide' suffix; the description verbatim.
+    title, description = {route: (t, d) for route, t, d in PUBLIC_ROUTE_MANIFEST}['/superfans']
+    assert title == 'Superfans'
+    assert description == (
+        'The developers who build with RocketRide and tell us the truth. Earn early builds, '
+        'a hand on the roadmap, and artifacts you can only be given.'
+    )
 
 
 def test_mcp_api_paths_are_not_shell_pages():
@@ -245,6 +315,58 @@ def test_llms_lists_all_pages_with_absolute_urls(app_url):
     assert f'- [Docs]({DOCS_URL}): Product and API documentation.' in resp.text
 
 
+def test_sitemap_and_llms_list_the_legal_and_superfans_pages(app_url):
+    # Named here rather than read from LISTED_ROUTES, so the test fails if one
+    # of these pages drops out of the advertised subset. The expected titles and
+    # descriptions are pinned copies of the client's strings (routes.ts and the
+    # documents' front matter), not read back from PUBLIC_ROUTE_MANIFEST, so a
+    # wrong entry fails here too.
+    expected = {
+        '/legal': (
+            'Legal',
+            'The policies and terms that govern RocketRide Cloud - each document with its version, effective '
+            'date, and latest change.',
+        ),
+        '/legal/terms': (
+            'RocketRide Cloud Terms of Service',
+            'The agreement governing use of RocketRide Cloud, including accounts, payments, and acceptable '
+            'service use.',
+        ),
+        '/legal/privacy-policy': (
+            'Privacy Policy',
+            'How RocketRide collects, uses, and shares personal information across its websites and RocketRide Cloud.',
+        ),
+        '/legal/dpa': (
+            'Data Processing Agreement',
+            'The data processing terms that apply when RocketRide processes personal data on behalf of business '
+            'customers.',
+        ),
+        '/legal/acceptable-use': (
+            'Acceptable Use Policy',
+            'The rules for what may and may not be done with RocketRide Cloud and its services.',
+        ),
+        '/legal/subprocessors': (
+            'RocketRide Cloud Sub-processors',
+            'The third-party sub-processors RocketRide uses to provide RocketRide Cloud, and how the list changes.',
+        ),
+        '/legal/trademark-policy': (
+            'Trademark & Brand Usage Policy',
+            'How the RocketRide name, logo, and brand assets may and may not be used.',
+        ),
+        '/superfans': (
+            'Superfans',
+            'The developers who build with RocketRide and tell us the truth. Earn early builds, a hand on the '
+            'roadmap, and artifacts you can only be given.',
+        ),
+    }
+    assert sorted(expected) == sorted(LEGAL_PAGES + ('/superfans',))
+    sitemap = _client().get('/sitemap.xml').text
+    llms = _client().get('/llms.txt').text
+    for route, (title, description) in expected.items():
+        assert f'<loc>{BASE}{route}</loc>' in sitemap
+        assert f'- [{title}]({BASE}{route}): {description}' in llms
+
+
 def test_llms_sets_cache_control(app_url):
     resp = _client().get('/llms.txt')
     assert resp.headers['cache-control'] == 'public, max-age=3600'
@@ -311,3 +433,163 @@ def test_add_route_registry_unchanged_when_router_rejects(web_server, monkeypatc
 
     monkeypatch.undo()
     web_server.add_route('/rejected', _handler, ['GET'])
+
+
+def test_page_routes_answer_401_off_their_exact_paths(web_server, shell_root):
+    # The routes as initModule registers them, behind the server's own auth
+    # middleware: each page serves the SPA without credentials, while a
+    # sub-path, a trailing slash or a slug that is not a document answers 401.
+    from ai.modules.shell import initModule
+
+    initModule(web_server, {})
+    client = TestClient(web_server.app)
+    for route in LEGAL_PAGES + ('/superfans',):
+        resp = client.get(route)
+        assert resp.status_code == 200, route
+        assert '<title>shell</title>' in resp.text
+    for path in (
+        '/legal/not-a-document',
+        '/legal/',
+        '/legal/terms/',
+        '/legal/terms/extra',
+        '/superfans/',
+        '/superfans/extra',
+    ):
+        assert client.get(path).status_code == 401, path
+
+
+# ---------------------------------------------------------------------------
+# Missing /shell/static/* assets 404 (do not fall through to index.html)
+# ---------------------------------------------------------------------------
+
+
+def test_missing_shell_static_asset_404s(shell_root):
+    """A missing /shell/static/* asset must 404, not the index.html SPA fallback.
+
+    Behind the staging CloudFront the /shell/static/* behavior is edge-cached +
+    immutable; a 200 index.html served under a .js/.css URL gets cached as
+    HTML-under-a-JS-URL and poisons every viewer, breaking app boot. Regression
+    guard: content-hashed asset misses must be a real 404.
+    """
+    r = _shell_client().get('/shell/static/js/does-not-exist.deadbeef.js')
+    assert r.status_code == 404
+
+
+def test_shell_navigation_route_still_serves_index(shell_root):
+    """A non-static /shell/* route still gets the SPA index.html fallback."""
+    r = _shell_client().get('/shell/some/client/route')
+    assert r.status_code == 200
+    assert '<title>shell</title>' in r.text
+
+
+def test_existing_shell_static_asset_is_served(shell_root):
+    """A present /shell/static/* bundle is still served as a file.
+
+    Guards the ordering fix: the 404 check now runs before the serve step, so
+    a check that rejected every /shell/static/* path would otherwise pass.
+    """
+    asset = shell_root / 'static' / 'js' / 'main.abc123.js'
+    asset.parent.mkdir(parents=True)
+    asset.write_text('console.log(1)')
+    r = _shell_client().get('/shell/static/js/main.abc123.js')
+    assert r.status_code == 200
+    assert 'console.log(1)' in r.text
+
+
+def test_shell_static_traversal_does_not_serve_index(shell_root):
+    """A traversal-shaped /shell/static/* URL must 404, never index.html.
+
+    Percent-encoded on purpose: httpx resolves a literal ``../`` before sending,
+    so only ``%2e%2e`` reaches the handler decoded, as a real client's would.
+    """
+    r = _shell_client().get('/shell/static/js/%2e%2e/%2e%2e/%2e%2e/etc/passwd.js')
+    assert r.status_code == 404
+    assert '<title>shell</title>' not in r.text
+
+
+@pytest.mark.parametrize(
+    'url',
+    [
+        '/shell//static/js/missing.abc123.js',  # double slash
+        '/shell/%2e/static/js/missing.abc123.js',  # dot segment
+        '/shell/x/%2e%2e/static/js/missing.abc123.js',  # walks back into static/
+    ],
+)
+def test_shell_static_other_spellings_do_not_serve_index(shell_root, url):
+    """Every spelling that maps into static/ gets the 404, not just '/shell/static/'."""
+    r = _shell_client().get(url)
+    assert r.status_code == 404
+    assert '<title>shell</title>' not in r.text
+
+
+def test_shell_static_unbuilt_shell_is_503(tmp_path, monkeypatch):
+    """With no shell build, an asset URL still gets the 503 that names the build command."""
+    monkeypatch.setattr(shell_mod, '_shell_root', str(tmp_path / 'not-built'))
+    r = _shell_client().get('/shell/static/js/main.abc123.js')
+    assert r.status_code == 503
+    assert 'shell:build' in r.text
+
+
+def test_shell_static_partial_build_is_503(tmp_path, monkeypatch):
+    """A shell dir with no index.html is an unfinished build: 503, not 404."""
+    (tmp_path / 'static' / 'js').mkdir(parents=True)
+    monkeypatch.setattr(shell_mod, '_shell_root', str(tmp_path))
+    r = _shell_client().get('/shell/static/js/missing.abc123.js')
+    assert r.status_code == 503
+    assert 'shell:build' in r.text
+
+
+def test_shell_static_asset_is_cached_immutable_but_index_is_not(shell_root):
+    """Content-hashed static files may be cached for good; the SPA index must not."""
+    asset = shell_root / 'static' / 'js' / 'main.abc123.js'
+    asset.parent.mkdir(parents=True)
+    asset.write_text('console.log(1)')
+    r = _shell_client().get('/shell/static/js/main.abc123.js')
+    assert r.status_code == 200
+    assert r.headers['cache-control'] == 'public, max-age=31536000, immutable'
+    index = _shell_client().get('/shell/some/client/route')
+    assert index.status_code == 200
+    assert 'immutable' not in index.headers.get('cache-control', '')
+
+
+def _capture_client():
+    """Shell routes as initModule registers them: '/' and a public route."""
+    app = FastAPI()
+    app.get('/')(shell_static)
+    app.get('/pricing')(shell_static)
+    app.get('/dashboard')(shell_static)
+    return TestClient(app)
+
+
+def test_prerender_capture_served_when_present(shell_root):
+    """A public route with a capture gets the capture; '/' maps to _prerender/index.html."""
+    (shell_root / '_prerender' / 'pricing').mkdir(parents=True)
+    (shell_root / '_prerender' / 'pricing' / 'index.html').write_text('<title>pricing capture</title>')
+    (shell_root / '_prerender' / 'index.html').write_text('<title>home capture</title>')
+    c = _capture_client()
+    assert 'pricing capture' in c.get('/pricing').text
+    assert 'home capture' in c.get('/').text
+
+
+def test_no_capture_falls_back_to_spa(shell_root):
+    """No capture for the route: the SPA index, as before."""
+    r = _capture_client().get('/dashboard')
+    assert r.status_code == 200
+    assert '<title>shell</title>' in r.text
+
+
+def test_oauth_callback_on_root_gets_the_app_not_the_capture(shell_root):
+    """?code/?state on '/' must reach the SPA so PKCE can complete."""
+    (shell_root / '_prerender').mkdir()
+    (shell_root / '_prerender' / 'index.html').write_text('<title>home capture</title>')
+    r = _capture_client().get('/?code=abc&state=xyz')
+    assert '<title>shell</title>' in r.text
+
+
+def test_any_query_string_gets_the_app_not_the_capture(shell_root):
+    """Invite and verification links carry a token the app must read."""
+    (shell_root / '_prerender' / 'pricing').mkdir(parents=True)
+    (shell_root / '_prerender' / 'pricing' / 'index.html').write_text('<title>pricing capture</title>')
+    c = _capture_client()
+    assert '<title>shell</title>' in c.get('/pricing?token=abc').text
+    assert 'pricing capture' in c.get('/pricing').text

@@ -66,13 +66,6 @@ from rocketride.otelbridge.setup import (
 
 SRC_DIR = Path(__file__).parent.parent / 'src'
 
-try:
-    import opentelemetry.exporter.otlp.proto.grpc  # noqa: F401
-
-    HAS_GRPC_EXPORTER = True
-except ImportError:
-    HAS_GRPC_EXPORTER = False
-
 
 @dataclass
 class BridgeConfigStub:
@@ -85,6 +78,18 @@ class BridgeConfigStub:
     no_metrics: bool = False
     headers: Dict[str, str] = field(default_factory=dict)
     allow_insecure: bool = False
+
+
+def _exporter_headers(exporter):
+    """Headers an OTLP/HTTP exporter sends (1.45 moved them onto ``_client``)."""
+    client = getattr(exporter, '_client', None)
+    return dict(client._headers if client is not None else exporter._headers)
+
+
+def _exporter_session(exporter):
+    """The requests session an OTLP/HTTP exporter posts through, across versions."""
+    client = getattr(exporter, '_client', None)
+    return client._transport._session if client is not None else exporter._session
 
 
 # =========================================================================
@@ -133,7 +138,7 @@ def test_span_exporter_uses_config_endpoint_and_headers():
     config = BridgeConfigStub(endpoint='http://collector:4318', headers={'x-api-key': 'k1'})
     exporter = _build_span_exporter(config)
     assert exporter._endpoint == 'http://collector:4318/v1/traces'
-    assert dict(exporter._headers)['x-api-key'] == 'k1'
+    assert _exporter_headers(exporter)['x-api-key'] == 'k1'
 
 
 def test_metric_exporter_uses_config_endpoint():
@@ -162,7 +167,7 @@ def test_env_headers_honored_when_config_headers_absent(monkeypatch):
     monkeypatch.delenv('OTEL_EXPORTER_OTLP_TRACES_HEADERS', raising=False)
     monkeypatch.setenv('OTEL_EXPORTER_OTLP_HEADERS', 'x-api-key=abc123')
     exporter = _build_span_exporter(BridgeConfigStub(endpoint='http://collector:4318'))
-    assert dict(exporter._headers).get('x-api-key') == 'abc123'
+    assert _exporter_headers(exporter).get('x-api-key') == 'abc123'
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +197,7 @@ def test_generic_env_headers_reach_exporter_via_sdk_not_config(monkeypatch):
     config = _config_from_cli(None)
     assert config.headers == {}
     exporter = _build_span_exporter(config)
-    assert dict(exporter._headers).get('x-api-key') == 'generic'
+    assert _exporter_headers(exporter).get('x-api-key') == 'generic'
 
 
 def test_signal_specific_env_headers_beat_generic_env(monkeypatch):
@@ -202,14 +207,14 @@ def test_signal_specific_env_headers_beat_generic_env(monkeypatch):
     monkeypatch.setenv('OTEL_EXPORTER_OTLP_HEADERS', 'x-api-key=generic')
     monkeypatch.setenv('OTEL_EXPORTER_OTLP_TRACES_HEADERS', 'x-api-key=traces-specific')
     exporter = _build_span_exporter(_config_from_cli(None))
-    assert dict(exporter._headers).get('x-api-key') == 'traces-specific'
+    assert _exporter_headers(exporter).get('x-api-key') == 'traces-specific'
 
 
 def test_signal_specific_metrics_env_headers_beat_generic_env(monkeypatch):
     monkeypatch.setenv('OTEL_EXPORTER_OTLP_HEADERS', 'x-api-key=generic')
     monkeypatch.setenv('OTEL_EXPORTER_OTLP_METRICS_HEADERS', 'x-api-key=metrics-specific')
     exporter = _build_metric_exporter(_config_from_cli(None))
-    assert dict(exporter._headers).get('x-api-key') == 'metrics-specific'
+    assert _exporter_headers(exporter).get('x-api-key') == 'metrics-specific'
 
 
 def test_cli_headers_flag_beats_all_header_env_vars(monkeypatch):
@@ -217,7 +222,7 @@ def test_cli_headers_flag_beats_all_header_env_vars(monkeypatch):
     monkeypatch.setenv('OTEL_EXPORTER_OTLP_HEADERS', 'x-api-key=generic')
     monkeypatch.setenv('OTEL_EXPORTER_OTLP_TRACES_HEADERS', 'x-api-key=traces-specific')
     exporter = _build_span_exporter(_config_from_cli('x-api-key=explicit'))
-    assert dict(exporter._headers).get('x-api-key') == 'explicit'
+    assert _exporter_headers(exporter).get('x-api-key') == 'explicit'
 
 
 # =========================================================================
@@ -345,8 +350,8 @@ def test_missing_otel_message_names_the_extra():
     assert "pip install 'rocketride[otel]'" in missing_otel_message()
 
 
-@pytest.mark.skipif(HAS_GRPC_EXPORTER, reason='OTLP gRPC exporter is installed')
-def test_grpc_protocol_without_grpc_exporter_raises_install_hint():
+def test_grpc_protocol_without_grpc_exporter_raises_install_hint(no_grpc_exporter):
+    """Both gRPC exporter builders name the missing package instead of a raw ImportError."""
     config = BridgeConfigStub(endpoint='http://localhost:4317', protocol='grpc')
     with pytest.raises(OtelNotInstalledError, match='grpc'):
         _build_span_exporter(config)
@@ -446,12 +451,12 @@ def test_http_exporters_do_not_follow_redirects(monkeypatch):
 
 def test_span_exporter_gets_a_non_redirecting_session():
     exporter = _build_span_exporter(BridgeConfigStub(endpoint='https://collector:4318'))
-    assert type(exporter._session).__name__ == '_NoRedirectSession'
+    assert type(_exporter_session(exporter)).__name__ == '_NoRedirectSession'
 
 
 def test_metric_exporter_gets_a_non_redirecting_session():
     exporter = _build_metric_exporter(BridgeConfigStub(endpoint='https://collector:4318'))
-    assert type(exporter._session).__name__ == '_NoRedirectSession'
+    assert type(_exporter_session(exporter)).__name__ == '_NoRedirectSession'
 
 
 def test_build_providers_refuses_cleartext_credentials(monkeypatch):
