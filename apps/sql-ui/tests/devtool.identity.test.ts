@@ -252,7 +252,7 @@ describe('T7 — an account change in a mounted controller: nothing of the previ
 			r.engine.realm.root.connect(USER_A);
 			r.h.setHostConnection(true);
 			await until(() => r.frame.owner() === FP_A, 'account A');
-			const read = async (): Promise<string[]> => (await r.frame.caller.callReply('sql.history', { connId: 'c-pipe' }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] })).map((e) => e.id);
+			const read = async (): Promise<string[]> => (await r.frame.caller.callReply('sql.history', { connId: 'c-pipe', owner: r.frame.owner() }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] })).map((e) => e.id);
 			await until(() => r.controller.history.getHistory(KEY).length > 0, 'A\'s history file');
 			assert.deepEqual(await read(), ['a1']);
 
@@ -340,6 +340,42 @@ describe('T7 — an account change in a mounted controller: nothing of the previ
 			assert.equal(getSavedConnectionsStatus(), 'ready');
 			assert.deepEqual(getSavedConnections().map((c) => c.id), ['c-pipe'], 'B\'s list is untouched');
 			assert.equal(r.engine.requests.some((q) => q.op === 'client.fsWriteJson' && (q.params as { path: string }).path === SAVED_PATH), false, 'nothing was written');
+		} finally {
+			r.dispose();
+		}
+	});
+});
+
+describe('T7 — a frame reads only its own account\'s history (reviewer F3)', () => {
+	it('a frame bound to A that reads once B is signed in is refused `stale`, never served B\'s statements; no owner is refused too', async () => {
+		const r = await vscodeRig(postgres, { [HISTORY_PATH]: historyOfBoth() });
+		try {
+			r.engine.realm.root.connect(USER_A);
+			r.h.setHostConnection(true);
+			await until(() => r.frame.owner() === FP_A, 'account A');
+			r.engine.realm.root.accountChanged(USER_B);
+			await until(() => r.controller.history.getHistory(KEY).length > 0 && getSavedConnectionsStatus() === 'ready', 'B\'s history and list');
+			const read = (owner: string | null) => r.frame.caller.callReply('sql.history', { connId: 'c-pipe', owner }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] });
+			await assert.rejects(read(FP_A), (error: unknown) => error instanceof ExplorerToolError && error.kind === 'stale');
+			await assert.rejects(read(null), (error: unknown) => error instanceof ExplorerToolError && error.kind === 'stale');
+			assert.deepEqual((await read(FP_B)).map((e) => e.id), ['b1'], 'control: B\'s own frame reads B\'s');
+		} finally {
+			r.dispose();
+		}
+	});
+
+	it('a read that waits for the saved list while the account changes is refused after the lookup', async () => {
+		const r = await vscodeRig(postgres, { [HISTORY_PATH]: historyOfBoth() });
+		try {
+			const slowList = hold(r, ['client.fsReadJson'], (params) => (params as { path?: string }).path === SAVED_PATH);
+			r.engine.realm.root.connect(USER_A);
+			r.h.setHostConnection(true);
+			await until(() => r.frame.owner() === FP_A, 'account A');
+			const reading = r.frame.caller.callReply('sql.history', { connId: 'c-pipe', owner: FP_A }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] });
+			await until(() => slowList.held() > 0, 'A\'s list read');
+			r.engine.script['client.fsReadJson'] = engineScript([PIPELINE], [], postgres, { [HISTORY_PATH]: historyOfBoth() })['client.fsReadJson']!;
+			r.engine.realm.root.accountChanged(USER_B);
+			await assert.rejects(reading, (error: unknown) => error instanceof ExplorerToolError && error.kind === 'stale');
 		} finally {
 			r.dispose();
 		}

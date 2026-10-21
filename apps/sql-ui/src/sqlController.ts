@@ -320,8 +320,9 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 	 */
 	const requireOwner = (owner: string | null | undefined, tool: string): void => {
 		const now = core.identity.get().fingerprint;
-		if (now === null) throw new ExplorerToolError({ kind: 'unavailable', tool, message: 'Not signed in to a RocketRide server, so nothing was changed.' });
-		if (owner !== now) throw new ExplorerToolError({ kind: 'stale', tool, message: 'The signed-in account changed since this document opened, so nothing was changed.' });
+		const outcome = tool === 'history' ? 'this history was not read' : 'nothing was changed';
+		if (now === null) throw new ExplorerToolError({ kind: 'unavailable', tool, message: `Not signed in to a RocketRide server, so ${outcome}.` });
+		if (owner !== now) throw new ExplorerToolError({ kind: 'stale', tool, message: `The signed-in account changed since this document opened, so ${outcome}.` });
 	};
 
 	// ── History, persisted in the user's file, per identity ──────────────────
@@ -406,12 +407,12 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 			requireOwner(owner, 'deleteConnection');
 			await core.deleteConnection(connId, () => requireOwner(owner, 'deleteConnection'));
 		},
-		'sql.history': async ({ connId }) => {
-			const askedFor = historyOwner;
+		'sql.history': async ({ connId, owner }) => {
+			// Only the frame's own account's history, checked again after the
+			// lookup: a frame bound to A never reads B's statements.
+			requireOwner(owner, 'history');
 			const key = await core.keyOf(connId);
-			// The account changed while the connection was looked up: the
-			// answer would be another account's history.
-			if (historyOwner !== askedFor) throw new ExplorerToolError({ kind: 'stale', tool: 'history', message: 'The signed-in account changed, so this history was not read.' });
+			requireOwner(owner, 'history');
 			const seen = watched.get(key);
 			if (seen) {
 				// Most recently read last (the eviction order).

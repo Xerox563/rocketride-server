@@ -211,7 +211,7 @@ describe('T3 — every op round-trips JSON-safe; failures come back as equal Exp
 			const entry = { id: 'h1', sql: 'SELECT 1', at: 1, ms: 2, outcome: 'rows' as const, rows: 1, kind: 'read' as const };
 			await r.frame.caller.callReply('sql.historyRecord', { connId: 'c-pipe', entry, owner }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.historyRecord'] });
 			await r.frame.caller.callReply('sql.historyEdit', { connId: 'c-pipe', edit: { action: 'pin', id: 'h1' }, owner }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.historyEdit'] });
-			results.history = await r.frame.caller.callReply('sql.history', { connId: 'c-pipe' }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] });
+			results.history = await r.frame.caller.callReply('sql.history', { connId: 'c-pipe', owner: r.frame.owner() }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] });
 			assert.deepEqual(results.history, [{ ...entry, pinned: true }]);
 			await r.env.saveConnection({ ...PIPELINE, id: 'c-new', name: 'New' });
 			await r.env.deleteConnection({ ...PIPELINE, id: 'c-new', name: 'New' });
@@ -651,7 +651,7 @@ describe('T11 — no bulk result is retained state; each topic stays within 64 K
 		const r = await rig({ saved });
 		try {
 			await until(() => getSavedConnections().length === 400, 'the list');
-			for (const conn of saved.slice(0, 200)) await r.frame.caller.callReply('sql.history', { connId: conn.id }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] });
+			for (const conn of saved.slice(0, 200)) await r.frame.caller.callReply('sql.history', { connId: conn.id, owner: r.frame.owner() }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] });
 			await settle();
 			const last = retained(r.spy.posts);
 			let total = 0;
@@ -714,7 +714,7 @@ describe('T11 — no bulk result is retained state; each topic stays within 64 K
 			r.history.watch(mine);
 			await until(() => snapshots.at(-1)?.keys[mine.key] !== undefined, 'the frame\'s key to be followed');
 			// Other documents read as many other connections as the controller follows.
-			for (const conn of saved.slice(1, MAX_WATCHED_HISTORY_KEYS + 1)) await r.frame.caller.callReply('sql.history', { connId: conn.id }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] });
+			for (const conn of saved.slice(1, MAX_WATCHED_HISTORY_KEYS + 1)) await r.frame.caller.callReply('sql.history', { connId: conn.id, owner: r.frame.owner() }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] });
 			assert.ok(snapshots.some((snapshot) => snapshot.keys[mine.key] === undefined), 'it was dropped');
 			await until(() => snapshots.at(-1)?.keys[mine.key] !== undefined, 'the frame to read it again');
 			assert.ok(Object.keys(snapshots.at(-1)!.keys).length <= MAX_WATCHED_HISTORY_KEYS);

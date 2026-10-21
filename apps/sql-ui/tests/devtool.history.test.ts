@@ -73,7 +73,7 @@ describe('§3.5 — the controller keeps SQL history in the user\'s history file
 		const files: Record<string, unknown> = { [HISTORY_PATH]: historyFile(OWNER, { [KEY]: [entry('o1', 'SELECT 1', 10)] }) };
 		const r = await rig({ files });
 		try {
-			const read = async (): Promise<HistoryEntry[]> => r.frame.caller.callReply('sql.history', { connId: 'c-pipe' }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] });
+			const read = async (): Promise<HistoryEntry[]> => r.frame.caller.callReply('sql.history', { connId: 'c-pipe', owner: r.frame.owner() }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] });
 			await until(() => r.engine.ops().includes('client.fsReadJson') && r.engine.requests.filter((q) => q.op === 'client.fsReadJson').some((q) => (q.params as { path: string }).path === HISTORY_PATH), 'the history file to be read');
 			await settle();
 			assert.deepEqual((await read()).map((e) => e.id), ['o1']);
@@ -130,7 +130,7 @@ describe('§3.5 — the controller keeps SQL history in the user\'s history file
 			await until(() => r.engine.ops().includes('client.fsStat'), 'the history file check');
 			const owner = r.frame.owner();
 			const call = r.frame.caller;
-			await call.callReply('sql.history', { connId: 'c-pipe' }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] });
+			await call.callReply('sql.history', { connId: 'c-pipe', owner: r.frame.owner() }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] });
 			const snapshots: Array<{ storage: string; keys: Record<string, { rev: number; recording: boolean }> }> = [];
 			const off = r.frame.channel.onState('history', (snapshot) => { snapshots.push(snapshot as never); });
 			try {
@@ -146,7 +146,7 @@ describe('§3.5 — the controller keeps SQL history in the user\'s history file
 				assert.equal(snapshots.at(-1)?.keys[KEY]?.recording, false);
 				// Recording off: a run is not kept.
 				await call.callReply('sql.historyRecord', { connId: 'c-pipe', entry: entry('n2', 'SELECT 3', 30), owner }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.historyRecord'] });
-				assert.deepEqual((await call.callReply('sql.history', { connId: 'c-pipe' }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] })).map((e) => e.id), ['n1']);
+				assert.deepEqual((await call.callReply('sql.history', { connId: 'c-pipe', owner: r.frame.owner() }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] })).map((e) => e.id), ['n1']);
 			} finally {
 				off();
 			}
@@ -164,7 +164,7 @@ describe('§3.5 — the controller keeps SQL history in the user\'s history file
 			await assert.rejects(record(entry('x', 'SELECT 1', 1), 'someone-else'), (error: unknown) => error instanceof ExplorerToolError && error.kind === 'stale');
 			await assert.rejects(record({ id: 'x', sql: 'SELECT 1' }, owner), (error: unknown) => error instanceof ExplorerToolError && error.kind === 'invalid');
 			await assert.rejects(r.frame.caller.callReply('sql.historyEdit', { connId: 'c-pipe', edit: { action: 'wipe-everything' } as never, owner }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.historyEdit'] }), (error: unknown) => error instanceof ExplorerToolError && error.kind === 'invalid');
-			assert.deepEqual(await r.frame.caller.callReply('sql.history', { connId: 'c-pipe' }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] }), []);
+			assert.deepEqual(await r.frame.caller.callReply('sql.history', { connId: 'c-pipe', owner: r.frame.owner() }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] }), []);
 		} finally {
 			r.dispose();
 		}
@@ -183,7 +183,7 @@ describe('§3.5 — the controller keeps SQL history in the user\'s history file
 				await new Promise<void>((resolve) => { setTimeout(resolve, 1_600); });
 				assert.deepEqual(files[HISTORY_PATH], { not: 'the history format' }, 'the unreadable file is left alone');
 				assert.equal(r.engine.requests.some((q) => q.op === 'client.fsWriteJson' && (q.params as { path: string }).path === HISTORY_PATH), false);
-				assert.deepEqual((await r.frame.caller.callReply('sql.history', { connId: 'c-pipe' }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] })).map((e) => e.id), ['n1'], 'kept for the session');
+				assert.deepEqual((await r.frame.caller.callReply('sql.history', { connId: 'c-pipe', owner: r.frame.owner() }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] })).map((e) => e.id), ['n1'], 'kept for the session');
 			} finally {
 				off();
 			}

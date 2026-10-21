@@ -120,7 +120,7 @@ export function createRemoteHistory(opts: RemoteHistoryOptions): RemoteHistory {
 		slot.loading = true;
 		const asked = epoch;
 		const rev = state?.keys[key]?.rev ?? null;
-		caller.callReply('sql.history', { connId: slot.endpoint.connId }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] })
+		caller.callReply('sql.history', { connId: slot.endpoint.connId, owner: owner() }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] })
 			.then((entries) => {
 				if (asked !== epoch || read.get(key) !== slot) return;
 				slot.entries = Array.isArray(entries) ? entries : NO_ENTRIES;
@@ -154,6 +154,16 @@ export function createRemoteHistory(opts: RemoteHistoryOptions): RemoteHistory {
 			if ((rev !== undefined && rev !== slot.rev) || (!slot.loaded && snapshot?.storage !== 'none') || unfollowed) fetch(key);
 		}
 		notify();
+	});
+
+	// A read refused because the frame had not yet learnt its account (its
+	// owner was null) is tried again once the controller vouches for one.
+	const offIdentity = channel.onState('identity', (snapshot) => {
+		const value = snapshot !== null && typeof snapshot === 'object' ? (snapshot as { fingerprint?: unknown }).fingerprint : undefined;
+		if (typeof value !== 'string' || value === '') return;
+		for (const [key, slot] of read) {
+			if (!slot.loaded && !slot.loading) fetch(key);
+		}
 	});
 
 	/**
@@ -210,6 +220,7 @@ export function createRemoteHistory(opts: RemoteHistoryOptions): RemoteHistory {
 		},
 		dispose() {
 			offState();
+			offIdentity();
 			read.clear();
 			listeners.clear();
 		},

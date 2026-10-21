@@ -113,8 +113,8 @@ export interface SqlOps extends ToolOpMap {
 	/** Delete a saved connection (a direct one's temp pipeline is stopped first, best effort). */
 	'sql.deleteConnection': ToolOpSpec<IDeadline & IOwnedCall & { connId: string }, Reply<null>>;
 	// ── History (the controller owns it; frames read and edit through these) ──
-	/** One connection's history entries, newest first (bulk: an op result, never retained state). */
-	'sql.history': ToolOpSpec<IDeadline & { connId: string }, Reply<HistoryEntry[]>>;
+	/** One connection's history entries, newest first (bulk: an op result, never retained state); only for the frame's own account. */
+	'sql.history': ToolOpSpec<IDeadline & IOwnedCall & { connId: string }, Reply<HistoryEntry[]>>;
 	/** Record one finished statement (dropped when recording is off for the connection). */
 	'sql.historyRecord': ToolOpSpec<IDeadline & IOwnedCall & { connId: string; entry: HistoryEntry }, Reply<null>>;
 	/** Edit one connection's history: delete, pin, note, clear, or the recording switch. */
