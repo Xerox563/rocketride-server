@@ -84,7 +84,7 @@ describe('README claims', () => {
 
 	it('states the dev tool\'s gate, history and wait rules the way the code applies them', () => {
 		assert.match(prose, /If the node cannot say which dialect it speaks, the statement is\s+sent once and never repeated\./);
-		assert.match(prose, /`NO_BACKSLASH_ESCAPES`/);
+		assert.match(prose, /`NO_BACKSLASH_ESCAPES` or `ANSI_QUOTES`/);
 		assert.match(prose, /`SELECT\s+nextval\('s'\)`\) still counts as a read/);
 		assert.equal(UNBOUNDED_TOOL_TIMEOUT_MS, 24 * 60 * 60 * 1000);
 		assert.match(prose, /waited for up to 24 hours/);

@@ -198,9 +198,9 @@ reach SQL Explorer, so there the statement is not sent again and the
 refusal is shown.
 
 The check reads the statement's text, not the server's settings. A setting
-that changes how the server reads text (MySQL's `NO_BACKSLASH_ESCAPES`,
-PostgreSQL with `standard_conforming_strings` off) is not taken into
-account, and a read that changes something through a function (`SELECT
+that changes how the server reads text (MySQL's `NO_BACKSLASH_ESCAPES` or
+`ANSI_QUOTES`, PostgreSQL with `standard_conforming_strings` off) is not
+taken into account, and a read that changes something through a function (`SELECT
 nextval('s')`) still counts as a read.
 
 ### The row limit

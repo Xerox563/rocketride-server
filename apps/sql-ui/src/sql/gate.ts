@@ -46,7 +46,7 @@
 // once, and the node decides.
 //
 // LIMITS. The classification reads the text, not the server: a server setting
-// that changes lexing (MySQL NO_BACKSLASH_ESCAPES, PostgreSQL
+// that changes lexing (MySQL NO_BACKSLASH_ESCAPES or ANSI_QUOTES, PostgreSQL
 // standard_conforming_strings off) is not seen, and a read with side effects
 // (`SELECT nextval('s')`) is a read.
 //
