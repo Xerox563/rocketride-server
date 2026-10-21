@@ -28,6 +28,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { IToolOpServer, ToolChannel, ToolOpMap, ToolOpSpec } from 'shell';
 import { attachController } from './controller';
+import type { RequiredControllerHandlers } from './controller';
 import type { IDeadline } from './deadline';
 import type { DevToolPeer } from './realm';
 import type { Reply } from './reply';
@@ -128,6 +129,30 @@ describe('attachController — every op answers a Reply (R3)', () => {
 		// @ts-expect-error -- every controller op answers a Reply; a plain result type is refused
 		const attached = attachController<PlainOps>({ peer: h.sidebarPeer, createToolChannel: shellProtocol.createToolChannel, createToolOpServer: shellProtocol.createToolOpServer, handlers: {} });
 		attached.dispose();
+	});
+
+	it('refuses, at compile time, `any` params or results and a `never` result (round 3)', () => {
+		interface AnyOps extends ToolOpMap {
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			'x.any': ToolOpSpec<any, any>;
+		}
+		interface NeverOps extends ToolOpMap {
+			'x.never': ToolOpSpec<IDeadline, never>;
+		}
+		const h = createDevToolHarness();
+		// @ts-expect-error -- `any` would let a plain result and a missing deadline through
+		attachController<AnyOps>({ peer: h.sidebarPeer, createToolChannel: shellProtocol.createToolChannel, createToolOpServer: shellProtocol.createToolOpServer, handlers: {} }).dispose();
+		// @ts-expect-error -- a `never` result is not a Reply (an op that never answers is Reply<never>)
+		attachController<NeverOps>({ peer: h.sidebarPeer, createToolChannel: shellProtocol.createToolChannel, createToolOpServer: shellProtocol.createToolOpServer, handlers: {} }).dispose();
+	});
+
+	it('RequiredControllerHandlers makes production wiring name every op (round 3)', () => {
+		const all: RequiredControllerHandlers<TestOps> = { 't.echo': ({ x }) => x, 't.other': () => 'o' };
+		// @ts-expect-error -- 't.other' is missing
+		const some: RequiredControllerHandlers<TestOps> = { 't.echo': ({ x }) => x };
+		const h = createDevToolHarness();
+		attachController<TestOps>({ peer: h.sidebarPeer, createToolChannel: shellProtocol.createToolChannel, createToolOpServer: shellProtocol.createToolOpServer, handlers: all }).dispose();
+		assert.equal(typeof some, 'object');
 	});
 });
 

@@ -30,21 +30,30 @@
 //   controller   publishIdentityState(channel, tracker)   -> { fingerprint }
 //   frame        createFrameIdentityGuard({ channel, docKey, documents, onReset })
 //
-// A frame remembers the FIRST fingerprint it sees. Then:
+// A frame remembers the FIRST fingerprint it sees (`first()`), and keeps
+// following for as long as it is mounted:
 //
 //   a different fingerprint   another user, organization or development team:
-//                             the frame closes its document
-//                             (`documents.close(docKey)`) and resets its caches
-//                             (`onReset('identity')`). A landing frame (docKey
-//                             undefined or '') holds nothing connection-scoped
-//                             and is never closed: it resets and adopts the new
-//                             fingerprint.
+//                             the frame resets its caches (`onReset('identity')`)
+//                             and adopts the new fingerprint; a document frame
+//                             also closes (`documents.close(docKey)`), AT MOST
+//                             ONCE. A landing frame (docKey undefined or '')
+//                             holds nothing connection-scoped and is never
+//                             closed. `closed()` latches only on a close that
+//                             returned: with no `documents`, or a close that
+//                             threw, the next change tries again.
 //   null                      the controller cannot vouch for anyone (signed
 //                             out, disconnected): caches reset
 //                             (`onReset('unknown')`), the document stays; the
 //                             SAME fingerprint coming back changes nothing.
 //   host:connection false     caches reset (`onReset('disconnected')`), once
 //                             per drop.
+//
+// A remounted controller's tracker starts unknown until it reads the account
+// again. `publishIdentityState` therefore publishes nothing until the tracker
+// SETTLES (identity.ts `whenSettled`), or until it knows an identity, so live
+// frames do not reset their caches for a remount that changed nothing. A
+// tracker without `whenSettled` gets IDENTITY_SETTLE_GRACE_MS to know one.
 //
 // Fingerprints are compared, never epochs: a remounted VS Code controller
 // restarts its own counters. Nothing here posts, so a frame may mount it at
@@ -57,6 +66,9 @@ import type { IIdentitySnapshot, IIdentityTracker } from './identity';
 
 /** The retained state topic the controller publishes its identity on. */
 export const IDENTITY_STATE_TOPIC = 'identity';
+
+/** How long publishIdentityState waits for a tracker without `whenSettled` to know an identity before it publishes null. */
+export const IDENTITY_SETTLE_GRACE_MS = 2_000;
 
 /** What crosses: the fingerprint only (never the identity, never a token). */
 export interface IIdentityState {
@@ -83,15 +95,41 @@ export function identityState(snapshot: IIdentitySnapshot): IIdentityState {
  * @param topic - The state topic (default {@link IDENTITY_STATE_TOPIC}).
  * @returns Stop publishing.
  */
-export function publishIdentityState(channel: ToolChannel, tracker: Pick<IIdentityTracker, 'get' | 'subscribe'>, topic: string = IDENTITY_STATE_TOPIC): () => void {
-	let last = identityState(tracker.get()).fingerprint;
-	channel.publishState(topic, { fingerprint: last } satisfies IIdentityState);
-	return tracker.subscribe((snapshot) => {
-		const next = identityState(snapshot).fingerprint;
+export function publishIdentityState(channel: ToolChannel, tracker: Pick<IIdentityTracker, 'get' | 'subscribe'> & Partial<Pick<IIdentityTracker, 'whenSettled'>>, topic: string = IDENTITY_STATE_TOPIC): () => void {
+	/** The fingerprint last published; undefined before the first publish. */
+	let last: string | null | undefined;
+	let stopped = false;
+	const publish = (): void => {
+		if (stopped) return;
+		const next = identityState(tracker.get()).fingerprint;
 		if (next === last) return;
 		last = next;
 		channel.publishState(topic, { fingerprint: next } satisfies IIdentityState);
+	};
+	// Nothing before the first real answer, unless an identity is already known.
+	let started = tracker.get().known;
+	let grace: ReturnType<typeof setTimeout> | null = null;
+	let offSettled: (() => void) | null = null;
+	const start = (): void => {
+		if (grace !== null) clearTimeout(grace);
+		grace = null;
+		started = true;
+		publish();
+	};
+	if (started) publish();
+	else if (typeof tracker.whenSettled === 'function') offSettled = tracker.whenSettled(start);
+	else grace = setTimeout(start, IDENTITY_SETTLE_GRACE_MS);
+	const offChanges = tracker.subscribe((snapshot) => {
+		if (!started && !snapshot.known) return;
+		if (!started) start();
+		else publish();
 	});
+	return () => {
+		stopped = true;
+		if (grace !== null) clearTimeout(grace);
+		offSettled?.();
+		offChanges();
+	};
 }
 
 /** Why a frame reset its caches. */
@@ -137,8 +175,19 @@ export function createFrameIdentityGuard(opts: IFrameIdentityGuardOptions): IFra
 	let connected: boolean | null = null;
 	let disposed = false;
 
+	/** Close the document, at most once; latch only on a close that returned. */
+	const closeOnce = (): void => {
+		if (wasClosed || docKey === null || documents === undefined) return;
+		try {
+			documents.close(docKey);
+			wasClosed = true;
+		} catch {
+			// The host could not close it now; the next change tries again.
+		}
+	};
+
 	const offIdentity = channel.onState(opts.topic ?? IDENTITY_STATE_TOPIC, (snapshot) => {
-		if (disposed || wasClosed) return;
+		if (disposed) return;
 		const value = snapshot !== null && typeof snapshot === 'object' ? (snapshot as { fingerprint?: unknown }).fingerprint : undefined;
 		const fingerprint = typeof value === 'string' && value !== '' ? value : null;
 		if (fingerprint === null) {
@@ -153,10 +202,7 @@ export function createFrameIdentityGuard(opts: IFrameIdentityGuardOptions): IFra
 		}
 		if (fingerprint === first) return;
 		first = fingerprint;
-		if (docKey !== null) {
-			wasClosed = true;
-			documents?.close(docKey);
-		}
+		closeOnce();
 		onReset('identity');
 	});
 

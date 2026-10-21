@@ -29,7 +29,7 @@ import assert from 'node:assert/strict';
 import { createFrameIdentityGuard, IDENTITY_STATE_TOPIC, publishIdentityState } from './frameIdentity';
 import type { FrameResetReason } from './frameIdentity';
 import { createIdentityTracker } from './identity';
-import { account, assertJsonSafe, createDevToolHarness, createFakeClientRealm, settle, shellProtocol } from './testing';
+import { account, assertJsonSafe, createDevToolHarness, createFakeClientRealm, createFakeSocketlessRealm, settle, shellProtocol } from './testing';
 
 /**
  * A controller publishing a client realm's identity, and a frame over the same tool.
@@ -148,3 +148,128 @@ describe('createFrameIdentityGuard — the frame side', () => {
 		r.stop();
 	});
 });
+
+describe('round 3 — the guard keeps following (CE-3)', () => {
+	/**
+	 * A frame guard driven by hand-published identity states.
+	 *
+	 * @param documents - The frame's documents (or none).
+	 * @returns The pieces.
+	 */
+	async function manual(documents?: { close(docKey: string): void }) {
+		const h = createDevToolHarness();
+		const controller = shellProtocol.createToolChannel(h.sidebarPeer);
+		const resets: FrameResetReason[] = [];
+		const guard = createFrameIdentityGuard({ channel: shellProtocol.createToolChannel(h.newFramePeer()), docKey: 'doc-1', documents, onReset: (reason) => resets.push(reason) });
+		const publish = async (fingerprint: string | null) => {
+			controller.publishState(IDENTITY_STATE_TOPIC, { fingerprint });
+			await settle();
+		};
+		return { guard, resets, publish };
+	}
+
+	it('resets on every change after a close, closes at most once, and follows the identity it now vouches for', async () => {
+		const closes: string[] = [];
+		const r = await manual({ close: (key) => closes.push(key) });
+		await r.publish('A');
+		await r.publish('B');
+		await r.publish(null);
+		await r.publish('C');
+		assert.deepEqual(r.resets, ['identity', 'unknown', 'identity']);
+		assert.deepEqual(closes, ['doc-1'], 'closed once');
+		assert.equal(r.guard.closed(), true);
+		assert.equal(r.guard.first(), 'C');
+	});
+
+	it('does not latch closed without documents, or when the close throws (and tries again on the next change)', async () => {
+		const none = await manual(undefined);
+		await none.publish('A');
+		await none.publish('B');
+		assert.equal(none.guard.closed(), false);
+		let attempts = 0;
+		const flaky = await manual({ close: () => { attempts += 1; if (attempts === 1) throw new Error('webview gone'); } });
+		await flaky.publish('A');
+		await flaky.publish('B');
+		assert.equal(flaky.guard.closed(), false);
+		await flaky.publish('C');
+		assert.equal(attempts, 2);
+		assert.equal(flaky.guard.closed(), true);
+		assert.deepEqual(flaky.resets, ['identity', 'identity']);
+	});
+});
+
+describe('round 3 — a controller mount does not reset live frames for nothing (CE-10)', () => {
+	it('a remounted controller publishes nothing until its tracker read settles, so frames see A -> A', async () => {
+		const h = createDevToolHarness();
+		const realm = createFakeSocketlessRealm();
+		realm.root.connect(account('user-a'));
+		await settle();
+		const controller = shellProtocol.createToolChannel(h.sidebarPeer);
+		const resets: FrameResetReason[] = [];
+		const guard = createFrameIdentityGuard({ channel: shellProtocol.createToolChannel(h.newFramePeer()), docKey: 'doc-1', documents: { close: () => undefined }, onReset: (reason) => resets.push(reason) });
+		const first = createIdentityTracker({ cm: realm.cm });
+		const stopFirst = publishIdentityState(controller, first);
+		await settle();
+		assert.equal(guard.first(), 'user-a|org-1|team-1');
+		stopFirst();
+		first.dispose();
+		// The controller remounts: its new tracker starts unknown and reads A from the root.
+		const second = createIdentityTracker({ cm: realm.cm });
+		const seen: unknown[] = [];
+		controller.onState(IDENTITY_STATE_TOPIC, (snapshot) => seen.push(snapshot));
+		const before = seen.length;
+		const stopSecond = publishIdentityState(controller, second);
+		assert.equal(seen.length, before, 'nothing published before the first read settled');
+		await settle();
+		assert.deepEqual(resets, [], 'no reset: the identity never changed');
+		stopSecond();
+		second.dispose();
+		guard.dispose();
+	});
+
+	it('a tracker that settles unknown (signed out at mount) still publishes null', async () => {
+		const h = createDevToolHarness();
+		const realm = createFakeClientRealm();
+		const tracker = createIdentityTracker({ cm: realm.cm });
+		const channel = shellProtocol.createToolChannel(h.sidebarPeer);
+		const seen: unknown[] = [];
+		channel.onState(IDENTITY_STATE_TOPIC, (snapshot) => seen.push(snapshot));
+		const stop = publishIdentityState(channel, tracker);
+		await settle();
+		assert.deepEqual(seen, [{ fingerprint: null }]);
+		stop();
+		tracker.dispose();
+	});
+});
+
+describe('T7, the frame half, over a socketless realm (review finding 3)', () => {
+	it('A, disconnect, reconnect, B after shell:connected: the document closes once and resets [unknown, identity]; a landing frame only resets', async () => {
+		for (const docKey of ['workbench:k1', undefined]) {
+			const h = createDevToolHarness();
+			const realm = createFakeSocketlessRealm();
+			realm.root.connect(account('user-a'));
+			await settle();
+			const tracker = createIdentityTracker({ cm: realm.cm });
+			await settle();
+			const stop = publishIdentityState(shellProtocol.createToolChannel(h.sidebarPeer), tracker);
+			const closed: string[] = [];
+			const resets: FrameResetReason[] = [];
+			const guard = createFrameIdentityGuard({ channel: shellProtocol.createToolChannel(h.newFramePeer()), docKey, documents: { close: (key) => closed.push(key) }, onReset: (reason) => resets.push(reason) });
+			await settle();
+			assert.equal(guard.first(), 'user-a|org-1|team-1');
+			realm.root.disconnect();
+			await settle();
+			realm.root.connect(account('user-b'));
+			await settle();
+			const connectedAt = realm.events.lastIndexOf('shell:connected');
+			assert.ok(realm.events.lastIndexOf('shell:accountUpdate') > connectedAt, 'B arrived after shell:connected');
+			assert.deepEqual(resets, ['unknown', 'identity'], String(docKey));
+			assert.deepEqual(closed, docKey ? ['workbench:k1'] : [], String(docKey));
+			assert.equal(guard.first(), 'user-b|org-1|team-1');
+			guard.dispose();
+			stop();
+			tracker.dispose();
+		}
+	});
+});
+

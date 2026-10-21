@@ -223,6 +223,27 @@ export interface IRecordingBus {
 	violations: IJsonViolation[];
 }
 
+/** The shell envelope's own OPTIONAL fields (toolChannel.ts / toolOps.ts): absent is a legal value. */
+const ENVELOPE_OPTIONAL_FIELDS = ['payload', 'args', 'result', 'error'];
+
+/**
+ * What of a bus payload is the tool's data: a shell envelope
+ * (`{ __rrtool, … }`) without its own optional fields when they are undefined
+ * (a payload-less event, an argument-less call, a void reply). What those
+ * fields hold is judged in full.
+ *
+ * @param payload - The bus payload.
+ * @returns The value to judge.
+ */
+function envelopeData(payload: unknown): unknown {
+	if (payload === null || typeof payload !== 'object' || Array.isArray(payload) || typeof (payload as { __rrtool?: unknown }).__rrtool !== 'string') return payload;
+	const copy: Record<string, unknown> = { ...(payload as Record<string, unknown>) };
+	for (const field of ENVELOPE_OPTIONAL_FIELDS) {
+		if (field in copy && copy[field] === undefined) delete copy[field];
+	}
+	return copy;
+}
+
 /** How the bus carries payloads. */
 export interface IBusOptions {
 	/** Carry the JSON image of every publish and signal payload (VS Code postMessage). */
@@ -244,7 +265,7 @@ export function makeBus(registry: IRetainedRegistry = createRetainedRegistry(), 
 		// undefined is the registry's own "retract" value, never a payload.
 		if (!opts.json || payload === undefined) return payload;
 		try {
-			assertJsonSafe(payload, topic);
+			assertJsonSafe(envelopeData(payload), topic);
 		} catch (error) {
 			violations.push({ topic, message: error instanceof Error ? error.message : String(error) });
 		}
@@ -382,25 +403,59 @@ export function assertSidebarSubscribers(spy: IPeerSpy, label = 'controller moun
 /** The protocol factories every app must import in ONE wiring module. */
 const TOOL_FACTORIES = ['createToolChannel', 'createToolOpServer', 'createToolController'];
 
+/** `createToolChannel|createToolOpServer|createToolController` as a whole word. */
+const FACTORY_NAME = /\b(?:createToolChannel|createToolOpServer|createToolController)\b/;
+
+/** The 'shell' module specifier, in either quote style. */
+const SHELL = `(?:'shell'|"shell")`;
+
 /**
- * The files that import a protocol factory (createToolChannel,
- * createToolOpServer, createToolController) as a VALUE from 'shell'. A lane's
+ * The names a `{ … }` import or export clause brings in (aliases resolved to
+ * the original name; `type` members skipped).
+ *
+ * @param clause - The text between the braces.
+ * @returns The original names.
+ */
+function clauseNames(clause: string): string[] {
+	return clause.split(',')
+		.map((part) => part.trim())
+		.filter((part) => part !== '' && !/^type\s/.test(part))
+		.map((part) => part.split(/\s+as\s+/)[0].trim());
+}
+
+/**
+ * The files that can reach a protocol factory (createToolChannel,
+ * createToolOpServer, createToolController) from 'shell' at RUNTIME. A lane's
  * source-reading test asserts the list is exactly its one wiring module, so
- * no view can build a stray subscriber (see {@link assertSidebarSubscribers}).
+ * no view builds a stray subscriber (see {@link assertSidebarSubscribers}).
+ *
+ * An ACCIDENT GUARD, not a security boundary: it reads text with regular
+ * expressions. It reports a file that
+ *   - imports a factory by name (`import { createToolChannel } from 'shell'`,
+ *     aliased or not, single or double quotes);
+ *   - re-exports one (`export { createToolOpServer } from 'shell'`) or
+ *     re-exports everything (`export * from 'shell'`);
+ *   - imports the module whole (`import * as s`, a default import, or
+ *     `import('shell')`) AND names a factory anywhere in its text.
+ * Type-only imports and exports are ignored.
  *
  * @param files - Each source file's path and text (the test reads them; this module has no fs).
- * @returns The paths that import one, in the order given.
+ * @returns The paths that can reach one, in the order given.
  */
 export function findToolFactoryImports(files: ReadonlyArray<{ path: string; text: string }>): string[] {
-	const valueImport = /import\s+(?!type\b)\{([^}]*)\}\s*from\s*'shell'/g;
+	const named = new RegExp(`\\b(?:import|export)\\s+(?!type\\b)\\{([^}]*)\\}\\s*from\\s*${SHELL}`, 'g');
+	const mixed = new RegExp(`\\bimport\\s+(?!type\\b)[A-Za-z_$][\\w$]*\\s*,\\s*\\{([^}]*)\\}\\s*from\\s*${SHELL}`, 'g');
+	const starExport = new RegExp(`\\bexport\\s+\\*\\s*(?:as\\s+[\\w$]+\\s*)?from\\s*${SHELL}`);
+	const wholeModule = new RegExp(`\\bimport\\s+(?!type\\b)(?:\\*\\s*as\\s+[\\w$]+|[A-Za-z_$][\\w$]*)\\s*(?:,\\s*\\{[^}]*\\}\\s*)?from\\s*${SHELL}|\\bimport\\s*\\(\\s*${SHELL}\\s*\\)`);
 	const found: string[] = [];
 	for (const { path, text } of files) {
-		let match: RegExpExecArray | null;
-		let hit = false;
-		valueImport.lastIndex = 0;
-		while ((match = valueImport.exec(text)) !== null) {
-			const names = match[1].split(',').map((part) => part.trim().replace(/^type\s+/, '').split(/\s+as\s+/)[0].trim());
-			if (names.some((name) => TOOL_FACTORIES.includes(name))) hit = true;
+		let hit = starExport.test(text) || (wholeModule.test(text) && FACTORY_NAME.test(text));
+		for (const pattern of [named, mixed]) {
+			pattern.lastIndex = 0;
+			let match: RegExpExecArray | null;
+			while (!hit && (match = pattern.exec(text)) !== null) {
+				if (clauseNames(match[1]).some((name) => TOOL_FACTORIES.includes(name))) hit = true;
+			}
 		}
 		if (hit) found.push(path);
 	}

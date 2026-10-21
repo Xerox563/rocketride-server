@@ -146,6 +146,15 @@ describe('asReply — what the controller makes of a handler result', () => {
 		assert.deepEqual(asReply(failedProbe), { ok: true, value: failedProbe });
 		assert.deepEqual(asReply({ ok: true }), { ok: true, value: { ok: true } });
 	});
+
+	it('the two reserved shapes, and the escape for a domain value that has one: return replyOk(value)', () => {
+		const domain = { ok: true, value: 5 };
+		assert.deepEqual(asReply(domain), { ok: true, value: 5 }, 'a bare {ok, value} is taken for a Reply (documented)');
+		assert.deepEqual(asReply(replyOk(domain)), { ok: true, value: domain }, 'wrapped explicitly, it arrives whole');
+		const record = { ok: false, error: { kind: 'raised', message: 'syntax error' } };
+		assert.equal(asReply(record).ok, false, 'a bare {ok:false, error} is a failure (documented)');
+		assert.deepEqual(asReply(replyOk(record)), { ok: true, value: record });
+	});
 });
 
 describe('fromReply — the frame side', () => {

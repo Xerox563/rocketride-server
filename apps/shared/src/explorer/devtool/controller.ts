@@ -104,22 +104,51 @@ import type { DevToolPeer, IControllerState } from './realm';
 import { asReply, toReplyError } from './reply';
 import type { Reply, ReplyValue } from './reply';
 
+/** True for `any` (the only type `1 & T` widens to accept `0` for). */
+type IsAny<T> = 0 extends 1 & T ? true : false;
+
 /**
  * The shape every controller op map has: each op takes a deadline and answers
  * a Reply. `attachController<O>` requires `O` to satisfy it, so a lane cannot
  * declare a plain result (or forget the deadline) without a compile error.
+ * An op whose params or result is `any`, or whose result is `never`, maps to
+ * `never` and is refused too (an op that never answers is `Reply<never>`).
  */
-export type DevToolOps<O> = { [K in keyof O]: ToolOpSpec<IDeadline, Reply<unknown>> };
+export type DevToolOps<O> = {
+	[K in keyof O]: O[K] extends ToolOpSpec<infer P, infer R>
+		? IsAny<P> extends true ? never : IsAny<R> extends true ? never : [R] extends [never] ? never : ToolOpSpec<IDeadline, Reply<unknown>>
+		: never;
+};
 
 /**
  * What a handler may produce for an op answering `R` (a Reply): the Reply
- * itself, its plain value, or nothing at all for a void op (`Reply<null>`).
+ * itself (from `toReply`/`replyOk`), its plain value, or nothing at all for a
+ * void op (`Reply<null>`).
+ *
+ * TWO SHAPES ARE RESERVED. A returned object whose keys are exactly `ok` and
+ * `value`, or `ok` (false) and a well-formed `error`, is taken for a Reply
+ * (reply.ts asReply). To answer a domain value that happens to have one of
+ * those shapes, return `replyOk(value)` explicitly.
  */
 export type HandlerResult<R> = R | ReplyValue<R> | (null extends ReplyValue<R> ? void : never);
 
-/** The handlers a controller serves, by op wire name. */
+/** One handler of a controller op map. */
+export type ControllerHandler<O extends ToolOpMap, K extends keyof O & string> =
+	(params: ToolOpParams<O, K>) => HandlerResult<ToolOpResult<O, K>> | Promise<HandlerResult<ToolOpResult<O, K>>>;
+
+/** The handlers a controller serves, by op wire name (each optional; see {@link RequiredControllerHandlers}). */
 export type ControllerHandlers<O extends ToolOpMap> = {
-	[K in keyof O & string]?: (params: ToolOpParams<O, K>) => HandlerResult<ToolOpResult<O, K>> | Promise<HandlerResult<ToolOpResult<O, K>>>;
+	[K in keyof O & string]?: ControllerHandler<O, K>;
+};
+
+/**
+ * Every op of the map, handled: annotate production wiring with it
+ * (`const handlers: RequiredControllerHandlers<SqlOps> = { … }`) so a missing
+ * or misspelt op is a compile error rather than a "No handler serves" at
+ * runtime. Assignable to {@link ControllerHandlers}.
+ */
+export type RequiredControllerHandlers<O extends ToolOpMap> = {
+	[K in keyof O & string]-?: ControllerHandler<O, K>;
 };
 
 /** What {@link attachController} wires. */

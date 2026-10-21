@@ -41,7 +41,7 @@ import { createDevToolHarness, manualNow, settle, shellProtocol, spyPeer } from 
 interface FrameOps extends ToolOpMap {
 	'f.echo': ToolOpSpec<IDeadline & { x: number }, Reply<number>>;
 	'f.read': ToolOpSpec<IDeadline & { q: string }, Reply<{ rows: number[] }>>;
-	'f.hang': ToolOpSpec<IDeadline, never>;
+	'f.hang': ToolOpSpec<IDeadline, Reply<never>>;
 }
 
 /**

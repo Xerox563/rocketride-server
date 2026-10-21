@@ -304,3 +304,27 @@ describe('tracker lifecycle', () => {
 		assert.equal(calls, callsBeforeDispose, 'nothing after dispose');
 	});
 });
+
+describe('tracker settling (the first answer it can vouch for, or not)', () => {
+	it('a client realm settles at once; a socketless realm when its root read answers', async () => {
+		const client = createFakeClientRealm();
+		const t1 = createIdentityTracker({ cm: client.cm });
+		assert.equal(t1.settled(), true);
+		const realm = createFakeSocketlessRealm();
+		realm.root.connect(account('user-a'));
+		await settle();
+		const t2 = createIdentityTracker({ cm: realm.cm });
+		assert.equal(t2.settled(), false);
+		const order: string[] = [];
+		t2.whenSettled(() => order.push(`settled:${t2.get().fingerprint}`));
+		await settle();
+		assert.equal(t2.settled(), true);
+		assert.deepEqual(order, ['settled:user-a|org-1|team-1']);
+		let late = 0;
+		t2.whenSettled(() => { late += 1; });
+		assert.equal(late, 1, 'a late listener hears it at once');
+		t1.dispose();
+		t2.dispose();
+	});
+});
+

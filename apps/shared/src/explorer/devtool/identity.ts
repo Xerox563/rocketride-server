@@ -131,6 +131,14 @@ export interface IIdentityTracker {
 	readonly fingerprint: string | null;
 	/** Be told about every change (fingerprint or permission hints); returns unsubscribe. */
 	subscribe(cb: (snapshot: IIdentitySnapshot) => void): () => void;
+	/**
+	 * Whether the tracker has given its FIRST real answer: at once in a client
+	 * realm, once the root's account topic was read in a socketless one. Before
+	 * that, `known: false` means "not read yet", not "signed out".
+	 */
+	settled(): boolean;
+	/** Be told once, when the tracker settles (at once if it has); returns unsubscribe. */
+	whenSettled(cb: () => void): () => void;
 	/** Stop following the realm (idempotent). */
 	dispose(): void;
 }
@@ -157,6 +165,15 @@ export function createIdentityTracker(opts: { cm: IIdentityBus }): IIdentityTrac
 	let snapshot: IIdentitySnapshot = UNKNOWN;
 	let signature = '';
 	let disposed = false;
+	let isSettled = false;
+	const settleListeners = new Set<() => void>();
+	/** The first real answer is in. */
+	const markSettled = (): void => {
+		if (isSettled) return;
+		isSettled = true;
+		for (const listener of [...settleListeners]) listener();
+		settleListeners.clear();
+	};
 
 	const isConnected = (): boolean => {
 		try {
@@ -221,8 +238,14 @@ export function createIdentityTracker(opts: { cm: IIdentityBus }): IIdentityTrac
 		if (canReadRoot()) {
 			const seq = ++readSeq;
 			(cm.read as (topic: string) => Promise<unknown>)(ACCOUNT_MIRROR_TOPIC).then(
-				(value) => { if (!disposed && seq === readSeq && !awaiting) accept(value); },
-				() => { if (!disposed && seq === readSeq) forget(false); },
+				(value) => {
+					if (!disposed && seq === readSeq && !awaiting) accept(value);
+					markSettled();
+				},
+				() => {
+					if (!disposed && seq === readSeq) forget(false);
+					markSettled();
+				},
 			);
 			return;
 		}
@@ -249,6 +272,7 @@ export function createIdentityTracker(opts: { cm: IIdentityBus }): IIdentityTrac
 			readSeq += 1;
 			if (value) accept(value);
 			else forget(false);
+			markSettled();
 		}));
 	}
 
@@ -257,6 +281,8 @@ export function createIdentityTracker(opts: { cm: IIdentityBus }): IIdentityTrac
 	// its client.
 	if (socketless() && !canReadRoot()) accept(isConnected() ? cm.getAccountInfo() : null);
 	else reread();
+	// Only a socketless realm's root read answers later; everything else answered now.
+	if (!(socketless() && canReadRoot() && isConnected())) markSettled();
 
 	return {
 		get: () => snapshot,
@@ -267,12 +293,22 @@ export function createIdentityTracker(opts: { cm: IIdentityBus }): IIdentityTrac
 			listeners.add(cb);
 			return () => { listeners.delete(cb); };
 		},
+		settled: () => isSettled,
+		whenSettled(cb) {
+			if (isSettled) {
+				cb();
+				return () => undefined;
+			}
+			settleListeners.add(cb);
+			return () => { settleListeners.delete(cb); };
+		},
 		dispose() {
 			if (disposed) return;
 			disposed = true;
 			readSeq += 1;
 			for (const off of offs.splice(0)) off();
 			listeners.clear();
+			settleListeners.clear();
 		},
 	};
 }

@@ -233,3 +233,52 @@ describe('the second-subscriber guard (quirk 1) a lane copies into its own mount
 	});
 });
 
+describe('round 3 — the JSON wire judges payloads, not the envelope (CE-1)', () => {
+	it("a payload-less sendEvent is no violation, and an undefined INSIDE a payload still is", async () => {
+		const h = createDevToolHarness();
+		const sidebar = shellProtocol.createToolChannel(h.sidebarPeer);
+		const frame = shellProtocol.createToolChannel(h.newFramePeer());
+		const got: unknown[] = [];
+		sidebar.onEvent('refresh', (payload) => got.push(payload));
+		await settle();
+		frame.sendEvent('refresh');
+		await settle();
+		assert.deepEqual(got, [undefined, undefined]);
+		assert.equal(h.violations.length, 0, "the envelope's own optional field is not the tool's data");
+		frame.sendEvent('active', { key: 'k', gone: undefined });
+		await settle();
+		assert.equal(h.violations.length, 2, 'the frame event crosses twice: the retained slot and the signal');
+		for (const violation of h.violations) assert.match(violation.message, /payload\.gone/);
+	});
+
+	it('a call without args and a void reply without a result carry no violation either', async () => {
+		const h = createDevToolHarness();
+		interface VoidOps extends ToolOpMap {
+			't.void': ToolOpSpec<undefined, undefined>;
+		}
+		const server = shellProtocol.createToolOpServer<VoidOps>(h.sidebarPeer);
+		server.serve('t.void', () => undefined);
+		const call = shellProtocol.createToolController<VoidOps>(h.newFramePeer());
+		await settle();
+		assert.equal(await call('t.void', undefined, { timeoutMs: 2_000 }), undefined);
+		assert.deepEqual(h.violations, []);
+		server.dispose();
+	});
+});
+
+describe('round 3 — findToolFactoryImports catches every import form (CE-7; an accident guard, not a security boundary)', () => {
+	it('namespace, default, re-export, star re-export, dynamic import and double quotes', () => {
+		const files = [
+			{ path: 'ns.ts', text: "import * as shell from 'shell';\nexport const c = shell.createToolChannel(peer);" },
+			{ path: 'dq.ts', text: 'import { createToolChannel } from "shell";' },
+			{ path: 'reexport.ts', text: "export { createToolOpServer } from 'shell';" },
+			{ path: 'star.ts', text: "export * from 'shell';" },
+			{ path: 'dyn.ts', text: "const m = await import('shell'); m.createToolController(peer);" },
+			{ path: 'default.ts', text: "import shell, { foo } from 'shell'; shell.createToolChannel(peer);" },
+			{ path: 'clean-ns.ts', text: "import * as shell from 'shell';\nshell.useToolState(channel, 'x');" },
+			{ path: 'types-only.ts', text: "import type { ToolChannel } from \"shell\";\nexport type { IToolOpServer } from 'shell';" },
+		];
+		assert.deepEqual(findToolFactoryImports(files), ['ns.ts', 'dq.ts', 'reexport.ts', 'star.ts', 'dyn.ts', 'default.ts']);
+	});
+});
+

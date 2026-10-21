@@ -288,6 +288,13 @@ export function fromReply<T>(reply: Reply<T>, opts: { tool?: string } = {}): T {
  *     as a probe result) is NOT taken for one;
  *   - any other value becomes `replyOk(value)` (undefined: null).
  *
+ * THE TWO RESERVED SHAPES. A plain domain value whose keys are exactly
+ * `{ ok, value }`, or exactly `{ ok: false, error: { kind, message, … } }`,
+ * is indistinguishable from a Reply and is taken for one. A handler that
+ * answers such a value returns `replyOk(value)` explicitly. (An exact marker
+ * would change what hand-built Reply literals, which the handler types
+ * accept, mean at runtime; the shapes are reserved instead.)
+ *
  * @param out - The handler's resolved result.
  * @returns The Reply.
  */
