@@ -570,7 +570,9 @@ these differences:
   change history at the same time each write the file from what they read, so
   the last one to save wins. The drawer's privacy line says which of these
   applies. The sidebar forgets one account's history as soon as you sign out
-  or another account signs in, before the next account's section is read.
+  or another account signs in, before the next account's section is read. A
+  statement run just before the sidebar closes (or the connection drops) is
+  still saved.
 - **Switches are for the session.** **Run and stop asking on this
   connection** turns the pattern check off until the document's window
   closes, not for good (the app keeps it in your workspace preferences). A
@@ -578,7 +580,12 @@ these differences:
 - **The connection is the sidebar's.** When the engine connection drops, run
   and apply are disabled in every document, and a statement that was waiting
   is reported as possibly still running (there is no way to cancel it). An
-  action taken while the connection is down is not sent at all.
+  action taken while the connection is down is not sent at all. A document
+  restored before the SQL Explorer sidebar was opened asks you to open it; a
+  document that is already open stays open, with run and apply disabled,
+  while the sidebar is closed. With several hundred saved connections, the
+  sidebar shares only part of the list with documents, and a document asks
+  the sidebar for its own connection when it is not in that part.
 - **Account changes close documents.** A document opened under one account
   closes itself when another account signs in, and forgets the schema it was
   showing; while nobody can be vouched for (signed out, connection dropped) it
