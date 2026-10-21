@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 # Task subprocesses of a hosted engine get this flag on their command line.
 # Pipeline-supplied args can add flags but not remove this one, so nodes can
 # rely on it (the MCP stdio client refuses to start when it is present).
-# Only this runtime passes it: under docker the container is the boundary.
+# Every runtime passes it: the credit check and the torch rule key on it too.
 CONST_HOSTED_CHILD_FLAG = '--hosted'
 
 # The python shim for VS Code subprocess debugging is copied once per process
