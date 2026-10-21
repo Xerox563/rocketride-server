@@ -89,14 +89,18 @@ export interface KeywordSite {
 
 /** The lexical traits that differ between the dialects the app speaks. */
 interface ScanTraits {
-	/** `#` starts a line comment (MySQL only; ClickHouse has `--` and `/* *\/`). */
+	/** `#` starts a line comment (MySQL; ClickHouse too, see {@link ScanTraits.hashNeedsSpaceOrBang}). */
 	hashComments: boolean;
+	/** `#` is a comment only when a space or `!` follows it (ClickHouse: "--, #! or # "). */
+	hashNeedsSpaceOrBang: boolean;
 	/** `--` only starts a comment when whitespace follows (MySQL only). */
 	dashCommentsNeedSpace: boolean;
 	/** `/* *\/` blocks nest (PostgreSQL only). */
 	nestedBlockComments: boolean;
-	/** `$tag$ ... $tag$` bodies are recognised (PostgreSQL only). */
+	/** `$tag$ ... $tag$` bodies are recognised (PostgreSQL; ClickHouse's heredocs). */
 	dollarQuotes: boolean;
+	/** A dollar quote opens only when its closing tag follows (ClickHouse: an unclosed `$tag$` is not a heredoc). */
+	dollarQuoteNeedsClose: boolean;
 	/** A backslash escapes the next character inside a string literal. */
 	backslashEscapes: boolean;
 	/**
@@ -129,10 +133,12 @@ interface Region {
 /**
  * Resolve the lexical traits of a dialect.
  *
- * ClickHouse takes `--` and block comments but NOT `#`, and it treats a
+ * ClickHouse takes `--` and block comments, and `#` only as `# ` or `#!`
+ * ("SQL-style comments start with --, #! or # "); its heredocs are
+ * `$tag$ ... $tag$` bodies that need their closing tag; and it treats a
  * backslash inside a string literal as an escape. MySQL is the only dialect
- * here that requires whitespace after `--` before it means a comment. PostgreSQL is the only
- * dialect here with nested block comments and dollar-quoted bodies, and the
+ * here that requires whitespace after `--` before it means a comment.
+ * PostgreSQL is the only dialect here with nested block comments, and the
  * only one where a plain `'...'` literal does NOT honour backslash escapes
  * (`standard_conforming_strings`); its `E'...'` form is detected separately.
  *
@@ -141,10 +147,12 @@ interface Region {
  */
 function traitsFor(dialect: SqlDialect): ScanTraits {
 	return {
-		hashComments: dialect === 'mysql',
+		hashComments: dialect === 'mysql' || dialect === 'clickhouse',
+		hashNeedsSpaceOrBang: dialect === 'clickhouse',
 		dashCommentsNeedSpace: dialect === 'mysql',
 		nestedBlockComments: dialect === 'postgres',
-		dollarQuotes: dialect === 'postgres',
+		dollarQuotes: dialect === 'postgres' || dialect === 'clickhouse',
+		dollarQuoteNeedsClose: dialect === 'clickhouse',
 		backslashEscapes: dialect === 'mysql' || dialect === 'clickhouse',
 		executableComments: dialect === 'mysql' || dialect === 'unknown',
 		crEndsLineComment: dialect === 'postgres',
@@ -339,21 +347,24 @@ function skipBlockComment(sql: string, open: number, nested: boolean): number {
 const DOLLAR_TAG = /^\$([A-Za-z_\u0080-\uffff][A-Za-z0-9_\u0080-\uffff]*)?\$/;
 
 /**
- * Skip a PostgreSQL dollar-quoted body. Returns `open` unchanged when the `$`
- * does not open one (a positional parameter such as `$1`, or a stray `$`), so
- * the caller can treat it as ordinary code.
+ * Skip a PostgreSQL dollar-quoted body (or a ClickHouse heredoc). Returns
+ * `open` unchanged when the `$` does not open one (a positional parameter
+ * such as `$1`, a stray `$`, or, where a close is required, a tag nothing
+ * closes), so the caller can treat it as ordinary code.
  *
  * @param sql - The buffer.
  * @param open - Offset of the `$`.
+ * @param needsClose - An unclosed tag opens nothing (ClickHouse); otherwise it runs to the end (PostgreSQL).
  * @returns The offset one past the closing tag, or `open` when this is not a
  *          dollar quote.
  */
-function skipDollarQuoted(sql: string, open: number): number {
+function skipDollarQuoted(sql: string, open: number, needsClose = false): number {
 	const match = DOLLAR_TAG.exec(sql.slice(open, open + 130));
 	if (!match) return open;
 	const tag = match[0];
 	const close = sql.indexOf(tag, open + tag.length);
-	return close < 0 ? sql.length : close + tag.length;
+	if (close < 0) return needsClose ? open : sql.length;
+	return close + tag.length;
 }
 
 /**
@@ -391,7 +402,7 @@ function scanRegions(sql: string, traits: ScanTraits): Region[] {
 		} else if (ch === '-' && sql[i + 1] === '-' && opensDashComment(sql, i, traits)) {
 			end = skipLineComment(sql, i, traits.crEndsLineComment);
 			kind = 'comment';
-		} else if (traits.hashComments && ch === '#') {
+		} else if (traits.hashComments && ch === '#' && (!traits.hashNeedsSpaceOrBang || sql[i + 1] === ' ' || sql[i + 1] === '!')) {
 			end = skipLineComment(sql, i);
 			kind = 'comment';
 		} else if (executable && ch === '*' && sql[i + 1] === '/') {
@@ -410,7 +421,7 @@ function scanRegions(sql: string, traits: ScanTraits): Region[] {
 			}
 			kind = 'comment';
 		} else if (traits.dollarQuotes && ch === '$' && !continuesIdentifier(sql, i)) {
-			const closed = skipDollarQuoted(sql, i);
+			const closed = skipDollarQuoted(sql, i, traits.dollarQuoteNeedsClose);
 			if (closed > i) {
 				end = closed;
 				kind = 'string';

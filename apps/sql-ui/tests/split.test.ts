@@ -172,10 +172,35 @@ const CASES: ISplitCase[] = [
 		expect: ['SELECT 1--2; SELECT 3'],
 	},
 	{
-		name: 'clickhouse has NO # comment — the semicolon splits',
+		// ClickHouse: "SQL-style comments start with --, #! or # ".
+		name: 'clickhouse: # followed by a space is a comment, so its semicolon does not split',
 		sql: 'SELECT 1 # ; x\n; SELECT 2',
 		dialect: 'clickhouse',
-		expect: ['SELECT 1 #', 'x', 'SELECT 2'],
+		expect: ['SELECT 1 # ; x', 'SELECT 2'],
+	},
+	{
+		name: 'clickhouse: #! is a comment too',
+		sql: 'SELECT 1 #!; x\n; SELECT 2',
+		dialect: 'clickhouse',
+		expect: ['SELECT 1 #!; x', 'SELECT 2'],
+	},
+	{
+		name: 'clickhouse: # followed by anything else is not a comment — the semicolon splits',
+		sql: 'SELECT 1 #x; SELECT 2',
+		dialect: 'clickhouse',
+		expect: ['SELECT 1 #x', 'SELECT 2'],
+	},
+	{
+		name: 'clickhouse: a heredoc holds a semicolon',
+		sql: 'SELECT $$a;b$$; SELECT $h$c;d$h$; SELECT 2',
+		dialect: 'clickhouse',
+		expect: ['SELECT $$a;b$$', 'SELECT $h$c;d$h$', 'SELECT 2'],
+	},
+	{
+		name: 'clickhouse: an unclosed heredoc tag opens nothing — the semicolon splits',
+		sql: 'SELECT $$a; SELECT 2',
+		dialect: 'clickhouse',
+		expect: ['SELECT $$a', 'SELECT 2'],
 	},
 	{
 		name: 'clickhouse honours -- comments',
@@ -486,8 +511,10 @@ describe('stripSqlComments', () => {
 		assert.equal(stripSqlComments('SELECT 1 # note\nFROM t', 'mysql'), 'SELECT 1  \nFROM t');
 	});
 
-	it('leaves a # alone for clickhouse', () => {
-		assert.equal(stripSqlComments('SELECT 1 # note', 'clickhouse'), 'SELECT 1 # note');
+	it('clickhouse: strips `# ` and `#!` comments, leaves any other # alone', () => {
+		assert.equal(stripSqlComments('SELECT 1 # note', 'clickhouse'), 'SELECT 1  ');
+		assert.equal(stripSqlComments('SELECT 1 #!note', 'clickhouse'), 'SELECT 1  ');
+		assert.equal(stripSqlComments('SELECT 1 #note', 'clickhouse'), 'SELECT 1 #note');
 	});
 
 	it('strips a nested postgres block comment whole', () => {
