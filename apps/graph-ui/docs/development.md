@@ -48,7 +48,17 @@ live here.
   report through `endpoints`.
 - History changes are ops. The History panel announces a change ("Note
   saved.") only when the controller's Reply confirms it, and says why when it
-  fails.
+  fails. A history store attaches under one identity at a time: on a change
+  the controller forgets the previous owner's entries at once (before the new
+  owner's file has loaded), and when it unmounts it flushes the store's pending
+  batch before the last detach.
+- A disconnect does not keep a document's work. The controller resets its
+  store (the identity is unknown), and both hosts unmount the documents while
+  the server is unreachable (rocket-ui's DevToolMount, VS Code's panel), so the
+  editor text, results and graph are gone; the frame identity guard's
+  "disconnected" reset only clears data caches for the time a frame is still
+  mounted. VS Code also unmounts the controller, which remounts with fresh
+  stores; frames announce themselves to it on its new readiness nonce.
 - Retained state: the base guard keeps each snapshot under 64 KiB and the
   whole republished map under 128 KiB. The controller's `shrink` hook degrades
   `endpoints`, `schemas` and `dataVersions` through the protocol's own cuts

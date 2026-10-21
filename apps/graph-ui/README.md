@@ -287,6 +287,13 @@ What is different there:
   the same way. Refresh always checks every connection again.
 - A result too large to send to a document (over 32 MB) is refused with a
   reason; lower the row limit.
+- When the connection to the server drops, the editors close the tool's
+  documents until it is back (VS Code shows that it is not connected, the
+  RocketRide workspace asks you to connect), so an open document's editor text,
+  results and graph do not survive a disconnect. Its history does: it is in the
+  file. A connection that is only checked again while the server stays
+  connected (a pipeline restart, **Test connection**) keeps them, as in the
+  full app.
 - When the signed-in user, organization or team changes, every open workbench
   and write console closes.
 
