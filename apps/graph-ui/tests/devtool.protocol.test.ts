@@ -22,7 +22,7 @@ import { assertJsonSafe, manualNow } from 'shared/explorer/devtool/testing';
 import type { DevToolPeer } from 'shared/explorer/devtool/realm';
 import { WRITE_REFUSED_TEXT } from '../src/devtool/controller';
 import type { IGraphFrame } from '../src/devtool/frame';
-import { CONTROLLER_LOCAL_OP_MS, ENDPOINTS_STATE_BYTES, EVENT, OP, SCHEMAS_STATE_BYTES, STATE, endpointsSnapshot, schemasSnapshot } from '../src/devtool/protocol';
+import { CONTROLLER_LOCAL_OP_MS, ENDPOINTS_STATE_BYTES, EVENT, OP, SCHEMAS_STATE_BYTES, STATE, endpointsSnapshot, frameTimeoutFor, schemasSnapshot } from '../src/devtool/protocol';
 import { createDataVersions } from '../src/graph/dataVersion';
 import { createSchemaStore } from '../src/graph/schemaStore';
 import { NEO4J_DIALECT, NEO4J_GRAPH, NEO4J_WRITABLE, graphRow, mountController, mountFrame, readOnlyNode, settle, shellProtocol, signInVsCode, until, vscodeRealm } from './support/devtool';
@@ -124,39 +124,53 @@ describe('T3 - every Graph op round-trips JSON-safe, and failures come back as e
 
 describe('T4 - timeouts: the frame always waits longer than the controller\'s own bus request', () => {
 	it('each op passes the frame timeout the protocol names, and the controller\'s client.tool names its own bus timeout', async () => {
-		const sent: Array<{ op: string; timeoutMs: number | undefined }> = [];
-		const engine = vscodeRealm();
+		// A FIXED clock for the frame and the controller: since base round 3 the frame sends what is left of its budget
+		// after the readiness check (deadlineAt - now), so a wall clock that moves between stamping and sending made this
+		// exact test flaky (14999 !== 15000).
+		const clock = manualNow(1_700_000_000_000);
+		const sent: Array<{ op: string; timeoutMs: number | undefined; deadlineAt: number | undefined }> = [];
+		const engine = vscodeRealm(undefined, (call) => (call.tool === 'dialect' ? NEO4J_WRITABLE : readOnlyNode(call)));
 		signInVsCode(engine.realm);
-		const mounted = mountController(engine.cm);
+		const mounted = mountController(engine.cm, { now: clock.now });
 		mounted.h.setHostConnection(true);
 		const spyController = <O extends ToolOpMap>(peer: DevToolPeer) => {
 			const fn = shellProtocol.createToolController<O>(peer);
 			return ((op: string, params: unknown, options?: { timeoutMs?: number }) => {
-				sent.push({ op, timeoutMs: options?.timeoutMs });
+				sent.push({ op, timeoutMs: options?.timeoutMs, deadlineAt: (params as { deadlineAt?: number })?.deadlineAt });
 				return (fn as unknown as (o: string, p: unknown, opts?: unknown) => Promise<unknown>)(op, params, options);
 			}) as unknown as ReturnType<typeof shellProtocol.createToolController<O>>;
 		};
-		const { frame } = mountFrame(mounted.h, undefined, { createToolController: spyController });
+		const { frame } = mountFrame(mounted.h, undefined, { createToolController: spyController, now: clock.now });
 		await until(() => Object.keys(frame.env(true).endpoints.get().probes).length === 1, 'the probe');
 		const endpoint = frame.env(true).endpoints.get().endpoints[0];
 		const session = sessionOf(frame, endpoint);
 		const before = engine.requests.length;
 		await session.invoke('read_query', { cypher: 'MATCH (n) RETURN n', params: {}, limit: 25 });
+		await session.invoke('execute', { query: 'CREATE (n:X)', shape: 'graph' });
 		await session.invoke('get_query', { question: 'q' });
 		await frame.env(true).probe(endpoint.key);
 		await frame.env(true).refresh();
+		await frame.caller.callReply(OP.historyList, { key: endpoint.key }, { timeoutMs: frameTimeoutFor(OP.historyList) });
 
 		const tools = engine.requests.slice(before).filter((r) => r.op === 'client.tool');
 		const busOf = (tool: string): number => tools.find((r) => (r.params as { tool: string }).tool === tool)?.timeoutMs as number;
-		const frameOf = (op: string): number => sent.find((s) => s.op === op)?.timeoutMs as number;
+		const frameOf = (op: string): number => {
+			const call = sent.find((s) => s.op === op);
+			assert.ok(call, `${op} was sent`);
+			assert.equal((call.deadlineAt as number) - clock.now(), call.timeoutMs, `${op}: the stamped deadline is exactly its timeout from now`);
+			return call.timeoutMs as number;
+		};
 		const statementWait = (NEO4J_DIALECT.limits as { statement_timeout_ms: number }).statement_timeout_ms + 10_000;
 		assert.equal(busOf('read_query'), statementWait + SDK_TIMEOUT_SLACK_MS + BUS_TOOL_MARGIN_MS, 'read_query: the node deadline + pad, + SDK slack, + bus margin');
 		assert.equal(frameOf(OP.readQuery), busOf('read_query') + FRAME_OP_MARGIN_MS, 'and the frame waits the bus timeout + its margin');
+		assert.equal(busOf('execute'), statementWait + SDK_TIMEOUT_SLACK_MS + BUS_TOOL_MARGIN_MS, 'execute: the same statement wait');
+		assert.equal(frameOf(OP.execute), busOf('execute') + FRAME_OP_MARGIN_MS);
 		assert.equal(busOf('get_query'), 120_000 + SDK_TIMEOUT_SLACK_MS + BUS_TOOL_MARGIN_MS);
 		assert.equal(frameOf(OP.ask), busOf('get_query') + FRAME_OP_MARGIN_MS);
 		assert.equal(busOf('dialect'), 15_000 + SDK_TIMEOUT_SLACK_MS + BUS_TOOL_MARGIN_MS);
 		assert.equal(frameOf(OP.probe), busOf('dialect') + FRAME_OP_MARGIN_MS);
 		assert.equal(frameOf(OP.refreshEndpoints), CONTROLLER_LOCAL_OP_MS + FRAME_OP_MARGIN_MS, 'refresh STARTS discovery; its results arrive as state');
+		assert.equal(frameOf(OP.historyList), CONTROLLER_LOCAL_OP_MS + FRAME_OP_MARGIN_MS, 'an op answered from memory: 15 s');
 		for (const request of engine.requests) assert.ok(typeof request.timeoutMs === 'number' && request.timeoutMs > 0 && request.timeoutMs !== 120_000, `${request.op} names its own bus timeout, never the 120 s default`);
 		frame.dispose();
 		mounted.controller.dispose();
