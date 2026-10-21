@@ -182,6 +182,9 @@ export const STOP_WAITING_NOTE = 'Stop waiting stops this app from waiting; the 
 /** Shown instead of Graph when the layout could not run and the grid was used. */
 export const GRID_NOTICE = 'The layout worker could not run, so nodes are placed on a grid. The Table lists every returned row.';
 
+/** Shown when copying is blocked (some editor panels, such as VS Code's, do not allow the clipboard): the text is offered to select instead. */
+export const COPY_BLOCKED_NOTE = 'Copying is not allowed in this window. The text is below: select it and copy it with Ctrl+C (Cmd+C on a Mac).';
+
 /** The upgrade message for a node without `read_query`: never a fallback to another tool. */
 export const UPGRADE_READ_QUERY = 'This node does not support read_query yet. Upgrade the node to browse with Graph Explorer; the app never falls back to execute for reads.';
 

@@ -38,6 +38,7 @@ import type { GridCellComponent, GridColumnDefinition } from 'shell';
 import { columnGridTypes, columnKeys, rawView, toGridRows } from '../graph/results';
 import type { ReadQueryResult } from '../graph/types';
 import { describeValue } from '../graph/values';
+import { COPY_BLOCKED_NOTE } from '../graph/wording';
 
 // =============================================================================
 // TABLE
@@ -152,6 +153,20 @@ export async function copyText(text: string): Promise<boolean> {
 	}
 }
 
+/**
+ * What a blocked copy leaves on screen: the note and the text, read-only and selected on focus, so it can be copied by
+ * hand (R11: degrade visibly).
+ *
+ * @param props.text - What could not be copied.
+ * @returns The fallback.
+ */
+export const CopyBlocked: React.FC<{ text: string }> = ({ text }) => (
+	<div style={{ display: 'flex', flexDirection: 'column', gap: 6, margin: '0 0 8px' }}>
+		<div style={{ fontSize: 12, color: 'var(--rr-text-secondary)' }}>{COPY_BLOCKED_NOTE}</div>
+		<textarea readOnly value={text} aria-label="Text to copy" rows={6} onFocus={(event) => event.currentTarget.select()} style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'var(--rr-font-mono, monospace)', fontSize: 12, background: 'var(--rr-bg-paper)', color: 'var(--rr-text-primary)', border: '1px solid var(--rr-border)', borderRadius: 4 }} />
+	</div>
+);
+
 /** Props for the raw view. */
 export interface IRawViewProps {
 	result: ReadQueryResult;
@@ -168,14 +183,18 @@ export interface IRawViewProps {
 export const RawView: React.FC<IRawViewProps> = ({ result, announce }) => {
 	const view = useMemo(() => rawView(result), [result]);
 	const [copied, setCopied] = useState(false);
+	const [blocked, setBlocked] = useState<string | null>(null);
 	const copy = useCallback(async () => {
-		const ok = await copyText(JSON.stringify(result, null, 2));
+		const text = JSON.stringify(result, null, 2);
+		const ok = await copyText(text);
 		setCopied(ok);
+		setBlocked(ok ? null : text);
 		announce(ok ? 'Copied the result as JSON.' : 'Copying was not allowed by the browser.');
 	}, [result, announce]);
 	return (
 		<Card header="Raw result" headerActions={<Button variant="ghost" small onClick={() => void copy()}>{copied ? 'Copied' : 'Copy JSON'}</Button>} noBodyPadding fill>
 			<div style={{ height: '100%', overflow: 'auto', padding: 12 }}>
+				{blocked !== null && <CopyBlocked text={blocked} />}
 				{view.cut && (
 					<div style={{ fontSize: 12, color: 'var(--rr-text-secondary)', marginBottom: 8 }}>
 						Showing the first {RAW_LIMIT_TEXT} characters of {view.length.toLocaleString('en-US')}. Copy JSON copies all of it.

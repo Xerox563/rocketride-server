@@ -260,6 +260,36 @@ connections: past that, the oldest entries anywhere are dropped first, unpinned
 before pinned. When a search or **Pinned only** hides every entry, the panel says
 that nothing matches. Tokens and connection strings are never recorded.
 
+## As a dev tool
+
+Graph Explorer also runs as a dev tool beside the pipeline editor, in VS Code
+and in the RocketRide workspace. There the sidebar lists your graph connections
+and shows the active connection's schema, and each workbench and write console
+opens as its own document. Everything that reaches the engine goes through the
+sidebar, which holds the tool's one connection; the documents hold none.
+
+What is different there:
+
+- History is kept in a file in your user folder on the server
+  (`rocketride.graph.history.json`), not in the workspace file, and the History
+  panel says so. If that file cannot be read, history is kept for the session
+  only and the file is left alone. Two windows writing history at the same time
+  keep the later one's copy.
+- Editor drafts and caption choices last for the session only.
+- A large graph is laid out by a worker. A panel that cannot start it (VS Code
+  loads the app from the engine, a different origin) places the nodes on a
+  grid, and a note says why.
+- Where a panel does not allow the clipboard, Copy JSON shows the text to
+  select and copy by hand.
+- In VS Code the sidebar does not receive the server's error codes, so a
+  statement interrupted by a pipeline restart is reported as failed instead of
+  being retried once, and a stopped pipeline and an unreachable one are reported
+  the same way. Refresh always checks every connection again.
+- A result too large to send to a document (over 32 MB) is refused with a
+  reason; lower the row limit.
+- When the signed-in user, organization or team changes, every open workbench
+  and write console closes.
+
 ## The write console
 
 A connection whose node reports `allow_execute` and supports the graph result

@@ -103,7 +103,9 @@ test('the run surface takes its editor request from the host\'s slot, and the ho
 
 // A write is not counted in `record`, which the shared runner skips once the document is closed: a write that lands
 // after the console closed still marks other graphs out of date.
-// The count lives behind the GraphEnv: the full app's LOCAL env counts in the call (countWrite on its data versions).
+// The count lives behind the GraphEnv: the full app's LOCAL env counts in the call (countWrite on its data versions),
+// and as a dev tool the CONTROLLER counts it in its execute handler, so every frame of the connection sees the
+// version move; a frame never counts a write itself (it would count it twice).
 test('the write console counts a write where it is sent, not in the record step a closed document skips', () => {
 	const surface = code(read('components', 'RunSurface.tsx'));
 	const execute = surface.slice(surface.indexOf('execute: async'), surface.indexOf('settle:'));
@@ -115,6 +117,11 @@ test('the write console counts a write where it is sent, not in the record step 
 
 	const local = code(read('localEnv.ts'));
 	assert.ok(/countWrite: \(key, send\) => countWrite\(stores\.dataVersions, key, send\)/.test(local), 'the LOCAL env counts the write in the call');
+	const controller = code(read('devtool', 'controller.ts'));
+	const handler = controller.slice(controller.indexOf('[OP.execute]: async'), controller.indexOf('[OP.ask]:'));
+	assert.ok(/countWrite\(stores\.dataVersions, key, \(\) => session\.invoke<ReadQueryResult>\(TOOL\.execute, \{ query, shape: 'graph' \}\)\)/.test(handler), 'the controller counts the write in its handler');
+	const frame = code(read('devtool', 'frame.ts'));
+	assert.ok(/countWrite: \(_key, send\) => send\(\)/.test(frame), 'a frame never counts a write itself');
 });
 
 // A run is settled by its mode: the write console's runs are not settled as 'rows' with the read toggle's limit.
