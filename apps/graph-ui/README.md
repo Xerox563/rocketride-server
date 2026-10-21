@@ -110,9 +110,9 @@ result tabs.
   the graph's actions pause, with the reason above the editor, until the node
   answers again.
 - **The editor** highlights Cypher and keeps a draft per connection (text only).
-  It loads the Monaco editor from `cdn.jsdelivr.net`; where that is not
-  reachable, a plain text box is used after ten seconds, with the same run keys,
-  drafts and history, and a notice says so.
+  It is the platform's shared code editor, which comes with the app (nothing is
+  fetched from a CDN). If it has not loaded after ten seconds, a plain text box
+  is used, with the same run keys, drafts and history, and a notice says so.
 - **Browsing is read-only.** A statement the text check takes for a write is
   refused before anything is sent: one that uses `CREATE`, `INSERT`, `MERGE`,
   `SET`, `DELETE`, `DETACH`, `REMOVE`, `DROP`, `FOREACH` or `LOAD CSV` as a
@@ -340,8 +340,11 @@ editor and an **Execute** button, and it always says what it is:
   starts in Safari 14, so Safari 14 is the lowest version the canvas can run in.
   The declared floor has not been changed. The layout worker's cross-origin
   handling differs by browser.
-- The code editor needs `cdn.jsdelivr.net`; without it the plain text box is
-  used.
+- The code editor uses the platform's shared editor theme, so Cypher is shown
+  in Monaco's standard colours. Some of them are below 4.5:1 in the Dark, Gray
+  and RocketRide Light themes, and the line numbers are below it in RocketRide
+  Dark (see
+  [docs/contrast.md](https://github.com/rocketride-org/rocketride-server/blob/develop/apps/graph-ui/docs/contrast.md)).
 
 ## For developers
 
