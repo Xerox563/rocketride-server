@@ -275,11 +275,15 @@ What is different there:
   panel says so. Changes are written about a second after you make them. If
   that file cannot be read, history is kept for the session only and the file
   is left alone. Two windows writing history at the same time keep the later
-  one's copy.
+  one's copy. That holds across a disconnect too: a window whose changes wait
+  for the account to come back writes the history it read before the
+  disconnect plus those changes, so what another window wrote meanwhile is
+  overwritten.
 - History across a disconnect, a sign-out and an account switch:
   - after a disconnect or a sign-out, the last changes (the second before it)
     are kept and written once the same account is back. If the sidebar closes
-    meanwhile, they wait in that window for up to 10 minutes;
+    meanwhile (VS Code closes it on every disconnect), they wait in that window
+    for up to 10 minutes;
   - after a switch to another account they are dropped, never written into
     the other account's file, and that account never sees them;
   - a run recorded in the moment after a switch, while the new account's
