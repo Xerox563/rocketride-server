@@ -26,11 +26,12 @@
 
 /**
  * `runAgent` builds everything one run needs and drives the Wave loop: the
- * workspace view with the guides at `.rocketride/`, the toolkits in mount
- * order, the prompt start (built once, never changed), the model, and the
- * check ledger. It streams each wave's progress as `thinking` chunks and sends
- * the answer as one `content` chunk, with the checks line the code builds from
- * the ledger.
+ * toolkits in mount order (the guides come through read_guide, not the
+ * workspace), the save hook, the prompt start (built once, never changed), the
+ * model, and the record of check results, which is also the loop's finish
+ * rule. It streams each wave's progress as `thinking` chunks and sends the
+ * answer as one `content` chunk, with the checks line the code builds from the
+ * record.
  *
  * Everything that only works in the browser (the model pipeline, the confirm
  * dialog, Monaco's markers) has a default here and comes in through `deps`
@@ -40,23 +41,20 @@
 import { Question } from 'rocketride';
 import type { ChatMessage } from 'shell';
 
-import { appChecker } from './checks/appCheck';
-import { AutoCheckToolkit, monacoMarkerSource } from './checks/appTypes';
-import type { MarkerSource } from './checks/appTypes';
-import { CheckLedger, CheckToolkit, checksLine } from './checks/check';
-import { pipelineChecker } from './checks/pipelineCheck';
-import { FilesystemTools } from './filesystem';
-import { GuideFileSystem } from './guides';
 import type { AgentHost } from './host';
 import { CORE_PROMPT } from './prompts';
-import { AppToolkit, DEPLOY_APP_TIMEOUT_MS } from './rocketride/appTools';
-import { NOT_CONNECTED_MESSAGE, pipelineArg, requireClient, shellConfirm, type ClientGetter, type ConfirmFn } from './rocketride/common';
-import { DeployToolkit } from './rocketride/deployTools';
-import { InventoryToolkit } from './rocketride/inventory';
-import { PipelineToolkit, validatePipeline } from './rocketride/pipelineTools';
-import { RunToolkit } from './rocketride/runTools';
+import { APP_CHECK_TOOL, AppCheckToolkit, monacoMarkerSource, reportPassed, typesNote } from './toolkits/appCheck';
+import type { CheckReport, MarkerSource } from './toolkits/appCheck';
+import { AppToolkit, DEPLOY_APP_TIMEOUT_MS } from './toolkits/appTools';
+import { NOT_CONNECTED_MESSAGE, shellConfirm, type ClientGetter, type ConfirmFn } from './toolkits/common';
+import { FilesystemTools, normalizePath } from './toolkits/filesystem';
+import { GuideToolkit } from './toolkits/guides';
+import { findApp, InventoryToolkit, readApps } from './toolkits/inventory';
+import { PipelineDeployToolkit } from './toolkits/pipelineDeploy';
+import { PipelineDesignToolkit, validateNote, validateSaved, type SaveValidation } from './toolkits/pipelineDesign';
+import { PipelineRunToolkit } from './toolkits/pipelineRun';
 import { composeToolkits } from './tools';
-import { runLoop, TOOL_TIMEOUT_MS, type LoopResult } from './wave/loop';
+import { runLoop, TOOL_TIMEOUT_MS, type FinishRule, type LoopResult, type RanCall } from './wave/loop';
 import { buildPrefix } from './wave/plan';
 import type { AppPrompts, HistoryTurn, ModelCall, QuestionSpec } from './wave/plan';
 
@@ -64,17 +62,26 @@ import type { AppPrompts, HistoryTurn, ModelCall, QuestionSpec } from './wave/pl
 // CONSTANTS
 // =============================================================================
 
-/** The tools whose calls change the work, so a check must pass after them before the run may finish. */
+/** The tools whose calls change the work, so what they touched must be checked before the run may finish. */
 export const CHANGE_TOOLS: ReadonlySet<string> = new Set(['write_file', 'edit_file', 'rename', 'delete_file', 'create_app']);
-
-/** The Pipeline Builder setting the host reads for `recordModelCalls` (declared in apps/rocket-ui/package.json). */
-export const RECORD_MODEL_CALLS_SETTING = 'rocketride.pipeBuilder.agentRecordModelCalls';
 
 /** The longest a save or a check waits for Monaco's marker source to load, in milliseconds. */
 const MARKERS_LOAD_LIMIT_MS = 10_000;
 
 /** What the answer says when work changed and the run ended before a check passed after it. */
 const NOT_CHECKED = 'Not checked: the run stopped before a check passed after the last change.';
+
+/** A path inside an app: the app's folder under `apps/`, then at least one more segment. */
+const APP_PATH = /^apps\/([^/]+)\/./;
+
+/** An app's own folder, and nothing below it. */
+const APP_FOLDER = /^apps\/([^/]+)$/;
+
+/** An app's TypeScript file: the app folder, then the path inside the app. */
+const APP_TYPESCRIPT_FILE = /^apps\/([^/]+)\/(.+\.tsx?)$/;
+
+/** The folder in create_app's result (`Created <id> in apps/<folder>.`). */
+const CREATED_APP = / in apps\/([^/\s]+)\.$/;
 
 /** The start of a line the code owns, once markdown is stripped; any the model writes are dropped (spec §7). Emphasis may close before the colon (`**Checked**:`). */
 const CHECKS_LINE = /^(?:Checked|Not checked)[*_]*:/;
@@ -151,6 +158,243 @@ function guardedMarkerSource(load: () => Promise<MarkerSource>, limitMs = MARKER
 const editorMarkers = guardedMarkerSource(monacoMarkerSource);
 
 // =============================================================================
+// CHECK RECORD — what the run checked, and the rule for when it may finish
+// =============================================================================
+
+/**
+ * Every check result the run saw, and the finish rule the loop asks before it
+ * accepts an answer. Only tool results write to it: check_app's reports, the
+ * validate each pipeline save runs, and the calls each wave ran. The rule is
+ * per target:
+ *
+ * - An app the run changed needs a passing check_app on it in a wave after the
+ *   wave of its last change. A check_app on it that fails or errors, or that
+ *   timed out and ended later (the model never read it), leaves it unchecked
+ *   until a later pass. A step that did not run counts as a pass for now.
+ * - A pipeline the run changed must not have failed validate on its latest
+ *   save. Every save validates, so it needs no call of its own. Deleting a
+ *   pipeline drops it; renaming one carries its latest result to the new path.
+ * - A change to anything else (`nodes/`, other files) needs nothing.
+ *
+ * A change is a call to one of CHANGE_TOOLS, even one that failed, since a
+ * write may land before its error: a path inside `apps/<folder>/` changes that
+ * app, and create_app changes the app its result names. Deleting an app's whole
+ * folder drops the app's record (there is nothing left to check); renaming the
+ * folder moves the record to the new folder, as a change.
+ */
+export class CheckRecord implements FinishRule {
+	readonly checkTool = APP_CHECK_TOOL;
+	/** Whether any call changed the work, even one that failed. */
+	changed = false;
+
+	/** The wave now running. */
+	private wave = -1;
+	/** Each app the run changed or checked, by folder under `apps/`, in the order first seen. */
+	private readonly apps = new Map<string, { changed: number; passed: number; report?: CheckReport }>();
+	/** What validate found on each pipeline's latest save, by path, in the order first saved. */
+	private readonly pipelines = new Map<string, SaveValidation>();
+
+	/**
+	 * @param appFolder - Finds the folder of the app a check_app call names, the
+	 *   way check_app does; resolves null when no app matches.
+	 */
+	constructor(private readonly appFolder: (ref: string) => Promise<string | null>) {}
+
+	/**
+	 * A wave starts; results recorded from here on belong to it.
+	 *
+	 * @param wave - The wave number.
+	 */
+	beginWave(wave: number): void {
+		this.wave = wave;
+	}
+
+	/**
+	 * Records a check_app report (AppCheckToolkit's callback).
+	 *
+	 * @param folder - The checked app's folder.
+	 * @param report - What the check saw.
+	 */
+	appChecked(folder: string, report: CheckReport): void {
+		const app = this.app(folder);
+		app.report = report;
+		app.passed = reportPassed(report) ? this.wave : -1;
+	}
+
+	/**
+	 * Records what validate found on a pipeline save (the save hook).
+	 *
+	 * @param path - The saved pipeline's canonical path.
+	 * @param validation - What validate found.
+	 */
+	pipelineSaved(path: string, validation: SaveValidation): void {
+		this.pipelines.set(path, validation);
+	}
+
+	/**
+	 * Hears a wave's calls: each change marks what it touched, and a check_app
+	 * that errored or ended late voids its app's pass.
+	 *
+	 * @param calls - The calls, as the loop hands them over.
+	 */
+	async endWave(calls: RanCall[]): Promise<void> {
+		for (const call of calls) {
+			if (call.tool === APP_CHECK_TOOL) {
+				if (call.error === undefined && !call.late) continue;
+				const folder = await this.appFolder(String(call.args.app ?? ''));
+				if (folder !== null) this.app(folder).passed = -1;
+			} else if (CHANGE_TOOLS.has(call.tool)) {
+				this.changed = true;
+				this.change(call);
+			}
+		}
+	}
+
+	/**
+	 * What is still unchecked, in Wave's style.
+	 *
+	 * @returns A refusal naming each app with no passing check_app since its last change and each pipeline whose last save failed validate, or null.
+	 */
+	unchecked(): string | null {
+		const apps = [...this.apps].filter(([, app]) => app.changed >= 0 && app.passed <= app.changed).map(([folder]) => folder);
+		const pipes = [...this.pipelines].filter(([, v]) => 'errors' in v && v.errors.length > 0).map(([path]) => path);
+		const parts: string[] = [];
+		if (apps.length > 0) parts.push(`call ${APP_CHECK_TOOL} on ${apps.length > 1 ? 'each of ' : ''}${apps.join(', ')} on its own, after your last change to it, and fix what it reports`);
+		if (pipes.length > 0) parts.push(`${pipes.join(', ')} failed validation on ${pipes.length > 1 ? 'their' : 'its'} last save: fix ${pipes.length > 1 ? 'them' : 'it'} and save again`);
+		return parts.length > 0 ? `Not finished: ${parts.join('; ')} before done=true.` : null;
+	}
+
+	/**
+	 * Builds the checks line from the newest result per target. The model never
+	 * writes or edits it. One target reads "Checked: a · b"; several are labeled
+	 * by target and separated by semicolons. Apps are labeled by their check's
+	 * target, pipelines by path.
+	 *
+	 * @returns The line, or '' when there is nothing to report.
+	 */
+	checksLine(): string {
+		// step: an app says its check's step summaries; a pipeline says what validate found on its latest save
+		const groups: Array<{ target: string; text: string }> = [];
+		for (const { report } of this.apps.values()) {
+			if (!report) continue;
+			const text = report.evidence
+				.map((e) => e.summary)
+				.filter((s) => s.length > 0)
+				.join(' · ');
+			groups.push({ target: report.target, text });
+		}
+		for (const [path, v] of this.pipelines) {
+			const text = 'failed' in v ? 'validate not run' : v.errors.length === 0 ? 'validate OK' : `validate: ${v.errors.length} ${v.errors.length === 1 ? 'error' : 'errors'}`;
+			groups.push({ target: path, text });
+		}
+		const said = groups.filter((g) => g.text.length > 0);
+		if (said.length === 0) return '';
+		// step: a lone group needs no label
+		if (said.length === 1) return `Checked: ${said[0].text}`;
+		return `Checked: ${said.map((g) => `${g.target}: ${g.text}`).join('; ')}`;
+	}
+
+	/** The record of an app, made on first use. */
+	private app(folder: string): { changed: number; passed: number; report?: CheckReport } {
+		let app = this.apps.get(folder);
+		if (!app) {
+			app = { changed: -1, passed: -1 };
+			this.apps.set(folder, app);
+		}
+		return app;
+	}
+
+	/** Marks what one change call touched; deletes and renames that worked also drop or move what they took along. */
+	private change(call: RanCall): void {
+		const ok = call.error === undefined;
+		switch (call.tool) {
+			case 'write_file':
+			case 'edit_file':
+				this.touch(canonical(call.args.path));
+				return;
+			case 'delete_file': {
+				const path = canonical(call.args.path);
+				this.touch(path);
+				if (ok && path !== null) this.drop(path);
+				return;
+			}
+			case 'rename': {
+				const from = canonical(call.args.oldPath);
+				const to = canonical(call.args.newPath);
+				this.touch(from);
+				this.touch(to);
+				if (ok && from !== null && to !== null) this.move(from, to);
+				return;
+			}
+			case 'create_app': {
+				const folder = CREATED_APP.exec(call.result ?? '')?.[1];
+				if (folder) this.app(folder).changed = this.wave;
+				return;
+			}
+		}
+	}
+
+	/** Marks the app a path sits inside as changed now; a path outside every app changes none. */
+	private touch(path: string | null): void {
+		const folder = path === null ? undefined : APP_PATH.exec(path)?.[1];
+		if (folder) this.app(folder).changed = this.wave;
+	}
+
+	/** Forgets every app folder and pipeline at or under a deleted path. */
+	private drop(path: string): void {
+		for (const folder of [...this.apps.keys()]) if (within(`apps/${folder}`, path)) this.apps.delete(folder);
+		for (const pipe of [...this.pipelines.keys()]) if (within(pipe, path)) this.pipelines.delete(pipe);
+	}
+
+	/**
+	 * Moves what a rename took along. An app folder lands changed under its new
+	 * folder (a rename is a change to it), or is dropped when it no longer sits
+	 * directly under `apps/`. A pipeline keeps its latest result at its new
+	 * path, or is dropped when that is no longer a `.pipe` file.
+	 */
+	private move(from: string, to: string): void {
+		for (const [folder, app] of [...this.apps]) {
+			const path = `apps/${folder}`;
+			if (!within(path, from)) continue;
+			this.apps.delete(folder);
+			const moved = APP_FOLDER.exec(to + path.slice(from.length))?.[1];
+			if (moved) this.apps.set(moved, { ...app, changed: this.wave });
+		}
+		for (const [pipe, validation] of [...this.pipelines]) {
+			if (!within(pipe, from)) continue;
+			this.pipelines.delete(pipe);
+			const moved = to + pipe.slice(from.length);
+			if (moved.endsWith('.pipe')) this.pipelines.set(moved, validation);
+		}
+	}
+}
+
+/**
+ * A path argument spelled the way the file tools spell it.
+ *
+ * @param raw - The argument as the call ran with it.
+ * @returns The canonical path, or null for one the file tools refuse (that call touched nothing).
+ */
+function canonical(raw: unknown): string | null {
+	try {
+		return normalizePath(raw);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Whether a path is another path or sits under it.
+ *
+ * @param path - The path to test.
+ * @param root - The path that may hold it.
+ * @returns True for `root` itself and anything under `root/`.
+ */
+function within(path: string, root: string): boolean {
+	return path === root || path.startsWith(`${root}/`);
+}
+
+// =============================================================================
 // HISTORY AND ANSWER
 // =============================================================================
 
@@ -183,22 +427,22 @@ function isChecksLine(line: string): boolean {
 
 /**
  * The text the user reads: the model's answer, then the checks line built from
- * the ledger, then a warning when the run changed the work and stopped before
+ * the record, then a warning when the run changed the work and stopped before
  * finishing. Lines in the answer that start with "Checked:" or "Not checked:",
  * markdown-wrapped or not, are dropped, because only the code writes those.
  *
  * @param result - How the loop ended.
- * @param ledger - Every check the run recorded.
+ * @param checks - Every check result the run recorded.
  * @returns The answer, its checks line and any warning, separated by blank lines.
  */
-function finalText(result: LoopResult, ledger: CheckLedger): string {
+function finalText(result: LoopResult, checks: CheckRecord): string {
 	const answer = result.answer
 		.split('\n')
 		.filter((line) => !isChecksLine(line))
 		.join('\n')
 		.trim();
-	const parts = [answer, checksLine(ledger.latestByTarget())];
-	if (result.changed && result.stopReason !== 'done') parts.push(NOT_CHECKED);
+	const parts = [answer, checks.checksLine()];
+	if (checks.changed && result.stopReason !== 'done') parts.push(NOT_CHECKED);
 	return parts.filter((part) => part.length > 0).join('\n\n');
 }
 
@@ -366,43 +610,52 @@ function toRocketRideQuestion(q: QuestionSpec): Question {
  * Runs the agent once on a request. Progress goes to the callback as
  * `thinking` chunks, one per wave except the wave whose answer is accepted,
  * and the answer goes as one `content` chunk. One summary line is logged.
- * When the host's `recordModelCalls` says yes, each thinking chunk also
- * carries its wave's raw model reply as `detail`, and the accepted answer
- * (and a best-effort one) gets one extra thinking chunk for its own reply.
  *
  * @param request - What the user asked for.
- * @param callback - Receives each chunk as (type, content, detail?).
+ * @param callback - Receives each chunk as (type, content).
  * @param options - The conversation so far, the app's prompts and the model pipeline's token.
  * @param deps - The host, the client getter, and the parts tests replace.
  * @throws The model's error when it fails before the run gathered anything.
  */
-export async function runAgent(request: string, callback: (type: string, content: string, detail?: string) => void, options: AgentRunOptions, deps: AgentDeps): Promise<void> {
+export async function runAgent(request: string, callback: (type: string, content: string) => void, options: AgentRunOptions, deps: AgentDeps): Promise<void> {
 	const { host, client } = deps;
 	const model = deps.model ?? createChatModel({ client, token: options.token, toQuestion: toRocketRideQuestion, onPipelineError: options.onPipelineError });
 	const confirm = deps.confirm ?? shellConfirm();
 	const markers = deps.markers ?? editorMarkers;
-	// step: whether this request records the model's raw replies, read now so a settings change applies to the next message
-	const recordReplies = host.recordModelCalls?.() === true;
 
-	// step: the workspace with the guides; one file toolkit per run, so reads never carry over
-	const vfs = new GuideFileSystem(host.vfs, host.guides);
-	const files = new FilesystemTools(vfs);
-	const ledger = new CheckLedger();
+	// step: the record of check results, which is also the loop's finish rule; it names an app the way check_app does
+	const checks = new CheckRecord(async (ref) => {
+		try {
+			return findApp(await readApps(host.vfs, () => false), ref.trim()).folder;
+		} catch {
+			return null;
+		}
+	});
 
-	// step: mount order matters: auto-check replaces the file tools' write_file and edit_file
+	// step: every save that works returns the types of an app's TypeScript file or the
+	// validate of a pipeline, and the validate is recorded for the finish rule
+	const afterSave = async (path: string): Promise<string> => {
+		const appFile = APP_TYPESCRIPT_FILE.exec(path);
+		if (appFile) return typesNote(host.vfs, markers, appFile[1], appFile[2]);
+		if (!path.endsWith('.pipe')) return '';
+		const validation = await validateSaved(client, host.vfs, path);
+		checks.pipelineSaved(path, validation);
+		return validateNote(validation);
+	};
+
+	// step: the toolkits in mount order; the guide toolkit records the guides read, for the log line
+	const guides = new GuideToolkit(host.guides);
 	const composed = composeToolkits([
-		files,
-		new AutoCheckToolkit(files.tools(), {
-			vfs,
-			markers,
-			validate: (path) => pipelineArg({ path }, vfs).then(({ pipeline }) => validatePipeline(requireClient(client), pipeline)),
-		}),
-		new InventoryToolkit(vfs, (id) => host.devSession(id) !== null),
-		new PipelineToolkit(client, vfs),
-		new RunToolkit(client, vfs),
-		new DeployToolkit(client, vfs, confirm),
+		// one file toolkit per run, so reads never carry over; its saves run the hook above
+		new FilesystemTools(host.vfs, undefined, afterSave),
+		guides,
+		new InventoryToolkit(host.vfs, (id) => host.devSession(id) !== null),
+		new PipelineDesignToolkit(client, host.vfs),
+		new PipelineRunToolkit(client, host.vfs),
+		new PipelineDeployToolkit(client, host.vfs, confirm),
 		new AppToolkit(client, host, confirm),
-		new CheckToolkit([appChecker(host, markers), pipelineChecker(client, vfs)], ledger),
+		// check_app hands each report to the record
+		new AppCheckToolkit(host, markers, (folder, report) => checks.appChecked(folder, report)),
 	]);
 
 	const result = await runLoop({
@@ -411,13 +664,11 @@ export async function runAgent(request: string, callback: (type: string, content
 		prefix: buildPrefix(CORE_PROMPT, options.prompts, composed),
 		tools: composed.tools,
 		model,
-		ledger,
-		isChange: (tool) => CHANGE_TOOLS.has(tool),
-		emit: (type, text, detail) => callback(type, text, detail),
-		recordReplies,
+		finish: checks,
+		emit: (type, text) => callback(type, text),
 		timeoutMs: (tool) => (tool === 'deploy_app' ? DEPLOY_APP_TIMEOUT_MS : TOOL_TIMEOUT_MS),
 	});
 
-	callback('content', finalText(result, ledger));
-	console.log(`[agent] stop=${result.stopReason} waves=${result.waves} modelCalls=${result.modelMs.length} medianMs=${median(result.modelMs)} guides=[${[...vfs.guidesRead].join(',')}]`);
+	callback('content', finalText(result, checks));
+	console.log(`[agent] stop=${result.stopReason} waves=${result.waves} modelCalls=${result.modelMs.length} medianMs=${median(result.modelMs)} guides=[${[...guides.guidesRead].join(',')}]`);
 }

@@ -54,8 +54,8 @@ export { AGENTS_DIR } from './sessions';
 // TRANSPORT
 // =============================================================================
 
-/** Streaming callback: one (type, content) pair per agent output chunk; `detail` is the raw model reply a thinking chunk carries when the host records model calls. */
-export type AgentCallback = (type: string, content: string, detail?: string) => void;
+/** Streaming callback: one (type, content) pair per agent output chunk. */
+export type AgentCallback = (type: string, content: string) => void;
 
 /** What one agent request is run with. Every part has a default. */
 export interface AgentOptions {
@@ -78,7 +78,7 @@ const standin = new StandinPipelines(getClient);
  * answer stream to the callback.
  *
  * @param request - The user's request text.
- * @param callback - Receives each output chunk as (type, content, detail?).
+ * @param callback - Receives each output chunk as (type, content).
  * @param options - The conversation so far, the app's prompts, and the model pipeline.
  */
 export async function agent(request: string, callback: AgentCallback, options: AgentOptions = {}): Promise<void> {
@@ -108,14 +108,14 @@ export async function agent(request: string, callback: AgentCallback, options: A
  * Makes the callback a run streams its chunks to, and the list the chunks
  * that are not sent live collect in.
  *
- * @param onStatus - The chat's live status sink. With it, each `thinking` chunk goes there as it arrives, with its raw-reply detail when it has one, and is not collected; without it, every chunk is collected (the detail needs the sink, and is dropped).
+ * @param onStatus - The chat's live status sink. With it, each `thinking` chunk goes there as it arrives and is not collected; without it, every chunk is collected.
  * @returns The callback to run with, and the collected rows (`content` has an empty key, any other type keeps its own).
  */
 function routeChunks(onStatus?: AgentCallback): { callback: AgentCallback; results: TextResult[] } {
 	const results: TextResult[] = [];
-	const callback: AgentCallback = (type, content, detail) => {
-		// step: a thinking chunk goes straight to the live sink when there is one, with its detail when it has one
-		if (onStatus && type === 'thinking') onStatus(type, content, detail);
+	const callback: AgentCallback = (type, content) => {
+		// step: a thinking chunk goes straight to the live sink when there is one
+		if (onStatus && type === 'thinking') onStatus(type, content);
 		else results.push({ text: content, key: type === 'content' ? '' : type });
 	};
 	return { callback, results };

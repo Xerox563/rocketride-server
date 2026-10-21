@@ -30,8 +30,8 @@
  * itself: each app with its manifest id and name, each node package with its
  * service manifests, each pipeline file. Rod wrote this tool and deleted it on
  * 2026-10-17; this port adds whether each app is open. `readApps` and
- * `findApp` are shared with the app tools and the automatic checks, so every
- * tool resolves "which app?" the same way.
+ * `findApp` are shared with the app tools and check_app, so every tool
+ * resolves "which app?" the same way.
  */
 
 import { AgentTool, AgentToolkit } from '../tools';

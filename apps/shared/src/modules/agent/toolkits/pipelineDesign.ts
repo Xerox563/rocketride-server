@@ -33,8 +33,9 @@
  * stripper. `validate_pipeline` also takes `path`, so the model checks a `.pipe`
  * file it saved without pasting it back.
  *
- * `validatePipeline` is shared: running a pipeline, the pipeline check and the
- * automatic check on save all validate the same way.
+ * `validatePipeline` is shared: running a pipeline and the validate that every
+ * save of a `.pipe` file runs (`validateSaved`, `validateNote`) validate the
+ * same way.
  */
 
 import type { RocketRideClient } from 'rocketride';
@@ -158,11 +159,61 @@ export async function validatePipeline(client: RocketRideClient, pipeline: JsonO
 }
 
 // =============================================================================
+// VALIDATE ON SAVE — the note a save of a `.pipe` file appends
+// =============================================================================
+
+/**
+ * Saving a `.pipe` file returns what validate says, so the model sees the
+ * result of its own edit at once and fixes it without asking. The host's
+ * after-save hook runs `validateSaved`, keeps the result for its finish rule,
+ * and appends `validateNote` (see run.ts). A validate that cannot run says why
+ * and never fails the save.
+ */
+
+/** What a cut error list in a save's note tells the model to do. */
+const SAVE_CLIP_HINT = 'fix the first errors and save again to see the rest';
+
+/** What the validate a save ran found: the errors (none means valid), or why it could not run. */
+export type SaveValidation = { errors: string[] } | { failed: string };
+
+/**
+ * Validates a saved pipeline file the way `validate_pipeline` does. Never throws.
+ *
+ * @param client - The host's client getter.
+ * @param vfs - The workspace view the file was saved to.
+ * @param path - The pipeline file's workspace path.
+ * @returns The errors, or why validate could not run.
+ */
+export async function validateSaved(client: ClientGetter, vfs: IWorkspaceFileSystem, path: string): Promise<SaveValidation> {
+	try {
+		const { pipeline } = await pipelineArg({ path }, vfs);
+		const { errors } = await validatePipeline(requireClient(client), pipeline);
+		return { errors };
+	} catch (err) {
+		return { failed: messageOf(err) };
+	}
+}
+
+/**
+ * The validate note for a saved pipeline file.
+ *
+ * @param validation - What the validate on save found.
+ * @returns The text to append: `validate_pipeline: OK`, the errors as lines, or why validate could not run.
+ */
+export function validateNote(validation: SaveValidation): string {
+	if ('failed' in validation) return `\n\nvalidate_pipeline: could not run (${validation.failed})`;
+	const { errors } = validation;
+	if (errors.length === 0) return '\n\nvalidate_pipeline: OK';
+	const lines = errors.map((e) => `- ${e}`).join('\n');
+	return `\n\nvalidate_pipeline: ${errors.length} ${errors.length === 1 ? 'error' : 'errors'}:\n${clip(lines, SAVE_CLIP_HINT)}`;
+}
+
+// =============================================================================
 // TOOLKIT
 // =============================================================================
 
 /** The pipeline design toolkit: `list_components`, `describe_component` and `validate_pipeline`. */
-export class PipelineToolkit extends AgentToolkit {
+export class PipelineDesignToolkit extends AgentToolkit {
 	readonly name = 'pipeline-design';
 	readonly instructions = "Use list_components to find what exists, describe_component for one component's lanes and config, and validate_pipeline to check a pipeline, because only the engine knows its rules.";
 

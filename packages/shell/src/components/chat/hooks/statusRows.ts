@@ -21,11 +21,10 @@ import type { ChatMessage, ChatStatusSink } from '../types';
  * @param type - The event type, stored as `sseType` (`thinking` rows fold into the Thinking group).
  * @param text - The row's text.
  * @param timestamp - The formatted time string.
- * @param detail - Optional extra text for the row; the row has a `detail` field only when this is given.
  * @returns The status message.
  */
-export function statusRow(id: number, type: string, text: string, timestamp: string, detail?: string): ChatMessage {
-	return { id, text, sender: 'status', sseType: type, timestamp, ...(detail === undefined ? {} : { detail }) };
+export function statusRow(id: number, type: string, text: string, timestamp: string): ChatMessage {
+	return { id, text, sender: 'status', sseType: type, timestamp };
 }
 
 /**
@@ -39,5 +38,5 @@ export function statusRow(id: number, type: string, text: string, timestamp: str
  * @returns The status sink.
  */
 export function makeStatusSink(append: (row: ChatMessage) => void, nextId: () => number, timestamp: () => string): ChatStatusSink {
-	return (type, text, detail) => append(statusRow(nextId(), type, text, timestamp(), detail));
+	return (type, text) => append(statusRow(nextId(), type, text, timestamp()));
 }

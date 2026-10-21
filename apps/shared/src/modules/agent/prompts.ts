@@ -32,9 +32,10 @@
  *
  * "How the loop works" carries Wave's planning mechanics word for word
  * (`nodes/src/nodes/agent_rocketride/planner.py`), with Python's common
- * eight-space indent removed and the check rule's tool set to `check`. The
- * rest is short imperatives, each with its reason; every "don't" says what to
- * do instead, and MUST appears only for checking, secrets and confirming.
+ * eight-space indent removed and the check rule's tool set to `check_app`, for
+ * apps (every save of a pipeline validates it). The rest is short imperatives,
+ * each with its reason; every "don't" says what to do instead, and MUST
+ * appears only for checking, secrets and confirming.
  * Add a line only when a task fails without it, and note which failure the
  * line fixes.
  */
@@ -125,12 +126,12 @@ Fields:
   referenced with {{memory.ref:key:format}} or {{memory.ref:key:format:path}} —
   the system will fetch, extract, and format it before delivering the answer.`;
 
-/** The loop rules: Wave's "Rules" instruction (planner.py:373-389) with its check rule (_CHECK_RULE) for the `check` tool. */
+/** The loop rules: Wave's "Rules" instruction (planner.py:373-389) with its check rule (_CHECK_RULE) for the `check_app` tool. */
 const WAVE_RULES = `- Think things through thoroughly. Plan accordingly. Prefer the simplest
 approach that answers the question — do not over-analyze.
-- After you change anything, call check on its own, in a later step than the change,
-and fix every problem it reports before you set done=true. Its result is the proof
-that the work is finished: never report success it has not confirmed.
+- After you change an app, call check_app on it on its own, in a later step than the
+change, and fix every problem it reports before you set done=true. Its result is the
+proof that the work is finished: never report success it has not confirmed.
 - Once all the information needed to complete the goal is available in scratch or
 previous results, write the answer now and set done=true. Presenting the answer is
 not a future plan step — it happens in the same response where you recognize the
@@ -168,18 +169,21 @@ Rules:
 ${WAVE_RULES}`;
 
 /** 4. How to approach a task. */
-const DOING_THE_TASK = `- Get oriented first: call list_workspace, then read the guide the Guides section names for the task (guides are read-only, under .rocketride/), because they hold rules you would otherwise guess. Skip this for a question you can already answer.
+const DOING_THE_TASK = `- Get oriented first: call list_workspace, then open the guide the Guides section names for the task with read_guide, because the guides hold rules you would otherwise guess. Skip this for a question you can already answer.
 - Plan, then make small changes, so each one is easy to check and fix.
-- Stay in scope: do what was asked, and mention other problems instead of fixing them, except what check reports, because the run can't finish until check passes. Finish the whole task, though, because a half-done change leaves the user's app or pipeline broken.
+- Stay in scope: do what was asked, and mention other problems instead of fixing them, except what check_app or a pipeline's validate reports, because the run can't finish until they pass. Finish the whole task, though, because a half-done change leaves the user's app or pipeline broken.
 - The guides describe a command line and the SDK; do the same things with your tools.`;
 
 /** 5. How work is proven done. */
-const CHECKING = `- After your last change, you MUST call check on each app or pipeline you changed, because only a passing check lets the run finish.
-- Only tool results count as evidence. A file you write, such as a test log, proves nothing, so call check instead.
-- When check fails, fix the cause and check again; don't stop at the first failure.
-- If check names a step it could not run, say plainly what was not checked.
-- You MUST NOT claim something works unless a check result shows it.
-- Check once after the last change, not after each edit, because saving already reports errors. If you changed nothing, skip it.`;
+const CHECKING = `- After your last change to an app, you MUST call check_app on each app you changed, because the run can't finish until each one passes.
+- Saving a pipeline validates it, and the result comes back with the save. Fix what it reports and save again, because the run can't finish while a pipeline you changed fails validation.
+- Test a pipeline by running it yourself: validate_pipeline, then run_pipeline (and send_data or monitor), then read the log with the log_* tools, as the running-pipelines skill describes, because only a run shows the pipeline does its job.
+- Only tool results count as evidence. A file you write, such as a test log, proves nothing, so call check_app or run the pipeline instead.
+- When check_app fails, fix the cause and call it again; keep going past the first failure.
+- If check_app names a step it could not run, say plainly what was not checked.
+- Claim something works only when a tool result shows it, and say plainly what you could not confirm.
+- Call check_app once after your last change to an app, not after each edit, because saving already reports type errors. If you changed no app, skip it.
+- Leave the "Checked:" line to the system, because it is built from the check results.`;
 
 /** 6. Outward actions, deletes and secrets. */
 const ACTING_WITH_CARE = `- Publishing, pointing a team at a version, schedules, and enabling, disabling or removing a deployment reach beyond the workspace, so their tools ask the user in a confirm dialog. Call them without asking in chat first, because the dialog is the question.
@@ -229,7 +233,7 @@ export const CORE_PROMPT: CorePrompt = {
  * (the CLI and Python API docs, and the README, whose task router this
  * replaces).
  *
- * Every path is a path the agent can read: `.rocketride/docs/<file>` is
+ * Every path is one read_guide opens: `.rocketride/docs/<file>` is
  * `docs/agents/context/<file>` and `.rocketride/skills/<path>` is
  * `docs/agents/skills/<path>`. Each line stays within 200 characters and the
  * whole router within 3,000, so the prompt's start stays small and cacheable.
@@ -260,7 +264,7 @@ const ROUTER_ENTRIES: Array<{ when: string; paths: string[] }> = [
 // =============================================================================
 
 /** The instruction that opens the router: read first, then act. */
-const OPENING = 'Before acting, you must read the guide that matches the task.';
+const OPENING = 'Before acting, you must open the guide that matches the task with read_guide.';
 
 /** Closing note: the guides were written for local agents, so say what replaces their commands (wrapped to keep each line short). */
 const CLOSING = ['These guides were written for local agents. Where one says to run a `rocketride` command, read `.rocketride/schema/` or `services-catalog.json`,', 'or run a Python script, use the matching tool instead (list_components, describe_component, validate_pipeline, run_pipeline, …).'].join('\n');
@@ -281,7 +285,7 @@ const ROUTER = [OPENING, '', ...ROUTER_ENTRIES.map((e) => `- ${e.when}: ${e.path
  * environment. The core already carries secrets and checking, so they are not
  * repeated.
  */
-const WORKSPACE_MAP = `The workspace has three top-level directories and nothing else. The guides under .rocketride/ are read-only reference outside it: read them, don't edit them.
+const WORKSPACE_MAP = `The workspace has three top-level directories and nothing else. The guides are not part of it: open them with read_guide.
 
 apps/       - platform apps. Each apps/<folder>/ is a React + TypeScript project.
               package.json carries the control-plane "appManifest" block: id

@@ -43,7 +43,7 @@ import type { LogStreamRef, PipelineConfig, RocketRideClient, TASK_STATUS } from
 import type { IWorkspaceFileSystem } from '../../vfs/vfsTypes';
 import { AgentTool, AgentToolkit } from '../tools';
 import { firstText, messageOf, numberArg, pipelineArg, requireClient, sleep, sourceIdOf, textArg, toolText, type ClientGetter } from './common';
-import { validatePipeline } from './pipelineTools';
+import { validatePipeline } from './pipelineDesign';
 
 // =============================================================================
 // CONSTANTS
@@ -455,7 +455,7 @@ async function chapterEnd(client: RocketRideClient, stream: LogStreamRef, chapte
 // =============================================================================
 
 /** The pipeline run toolkit: run, send, monitor, terminate, list and the four run-log tools. */
-export class RunToolkit extends AgentToolkit {
+export class PipelineRunToolkit extends AgentToolkit {
 	readonly name = 'pipeline-run';
 	readonly instructions = 'Run a pipeline with run_pipeline, which validates first. Watch it with monitor until terminal is true, and read its console and traces with log_read and log_traces, because a run counts as passed only when a tool result shows it.';
 

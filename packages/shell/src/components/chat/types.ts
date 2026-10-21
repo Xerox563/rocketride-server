@@ -31,8 +31,6 @@ export interface ChatMessage {
 	meta?: string;
 	/** When true, the message renders as an in-thread error Banner instead of a bubble. */
 	isError?: boolean;
-	/** Extra text behind a status row (e.g. the model's raw reply): shown in a small disclosure under the row, and saved with it. Absent on rows without any. */
-	detail?: string;
 }
 
 // =============================================================================
@@ -89,9 +87,8 @@ export interface UseChatMessagesOptions {
  *
  * @param type - The row's event type (stored as `sseType`).
  * @param text - The row's text; line breaks are kept.
- * @param detail - Optional extra text for the row (stored as `detail`); it shows in a disclosure under the row.
  */
-export type ChatStatusSink = (type: string, text: string, detail?: string) => void;
+export type ChatStatusSink = (type: string, text: string) => void;
 
 // =============================================================================
 // PIPELINE RESULT (from rocketride SDK)

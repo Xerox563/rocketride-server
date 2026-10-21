@@ -48,9 +48,9 @@
  * results are JSON.
  */
 
-import { sha256Hex } from '../vfs/hash';
-import type { IWorkspaceFileSystem } from '../vfs/vfsTypes';
-import { AgentTool, AgentToolkit } from './tools';
+import { sha256Hex } from '../../vfs/hash';
+import type { IWorkspaceFileSystem } from '../../vfs/vfsTypes';
+import { AgentTool, AgentToolkit } from '../tools';
 
 // =============================================================================
 // CONSTANTS — caps and hygiene
@@ -124,7 +124,7 @@ const FILESYSTEM_INSTRUCTIONS = `File tools operate on the workspace virtual fil
  * @param allowRoot - Whether '' (the tree root) is acceptable.
  * @returns The canonical path ('' only when allowRoot).
  */
-function normalizePath(raw: unknown, allowRoot = false): string {
+export function normalizePath(raw: unknown, allowRoot = false): string {
 	// step: normalize separators and trim the edges
 	const cleaned = String(raw ?? '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
 	if (!cleaned) {
@@ -161,6 +161,9 @@ export class FilesystemTools extends AgentToolkit {
 	/** SHA-256 of each file's full content as this run last read or wrote it, by path. */
 	private readonly readHashes = new Map<string, string>();
 
+	/** The host's after-save hook, if any. */
+	private readonly afterSave?: (path: string) => Promise<string>;
+
 	/**
 	 * Builds the toolkit for one agent.
 	 *
@@ -170,10 +173,15 @@ export class FilesystemTools extends AgentToolkit {
 	 * @param instructions - Host guidance for the LLM: what the tree
 	 *   contains, layout conventions, entity anatomy. Appended to the
 	 *   generic file-tool doctrine.
+	 * @param afterSave - Optional host hook, called with the canonical path
+	 *   after each write_file or edit_file save that worked; the text it
+	 *   returns is appended to the tool result. What it does with the path is
+	 *   the host's business: this toolkit stays layout-agnostic.
 	 */
-	constructor(vfs: IWorkspaceFileSystem, instructions = '') {
+	constructor(vfs: IWorkspaceFileSystem, instructions = '', afterSave?: (path: string) => Promise<string>) {
 		super();
 		this.vfs = vfs;
+		this.afterSave = afterSave;
 		// step: mechanics first, then the host's map of its own tree
 		this.instructions = instructions.trim().length > 0
 			? `${FILESYSTEM_INSTRUCTIONS}\n\n${instructions.trim()}`
@@ -229,6 +237,22 @@ export class FilesystemTools extends AgentToolkit {
 		// the backend when the cached inventory can't; entryType() alone only
 		// reads the cache, which scoped/staged views don't promise to fill
 		return this.vfs.stat(path);
+	}
+
+	/**
+	 * The host's note for a save that worked. A hook that throws adds
+	 * nothing: the save already happened, so it must never fail the save.
+	 *
+	 * @param path - Canonical path of the saved file.
+	 * @returns The text to append to the save's result ('' without a hook).
+	 */
+	private async noteAfterSave(path: string): Promise<string> {
+		if (!this.afterSave) return '';
+		try {
+			return await this.afterSave(path);
+		} catch {
+			return '';
+		}
 	}
 
 	/**
@@ -312,7 +336,7 @@ export class FilesystemTools extends AgentToolkit {
 		if ((await this.entryType(path)) === 'file') await this.guardRead(path, 'write_file', String(await this.vfs.read(path)));
 		await this.vfs.write(path, content, AGENT_ORIGIN);
 		this.readHashes.set(path, await sha256Hex(content));
-		return `Wrote ${size} bytes to ${path}.`;
+		return `Wrote ${size} bytes to ${path}.${await this.noteAfterSave(path)}`;
 	}
 
 	/**
@@ -352,7 +376,7 @@ export class FilesystemTools extends AgentToolkit {
 		}
 		await this.vfs.write(path, updated, AGENT_ORIGIN);
 		this.readHashes.set(path, await sha256Hex(updated));
-		return `Replaced ${occurrences} occurrence(s) in ${path}.`;
+		return `Replaced ${occurrences} occurrence(s) in ${path}.${await this.noteAfterSave(path)}`;
 	}
 
 	/**

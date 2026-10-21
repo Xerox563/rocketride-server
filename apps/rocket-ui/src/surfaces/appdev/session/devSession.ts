@@ -153,6 +153,35 @@ function releaseTsSetup(): void {
 }
 
 // =============================================================================
+// OPEN SESSIONS — the open apps' dev sessions, found by app id
+// =============================================================================
+
+// Every session joins this set when it is created and leaves it when it is
+// disposed, so code outside the App Builder document (the agent) can reach
+// the running session for an app. Split panels of one app each hold a
+// session; lookups prefer the one with a preview attached, since only that
+// one builds into a live preview.
+
+/** The open sessions, in creation order. */
+const sessions = new Set<WebDevSession>();
+
+/**
+ * The open session for an app, preferring one with a preview attached.
+ *
+ * @param appId - The app to look up.
+ * @returns The session, or null when no session for the app is open.
+ */
+export function findDevSession(appId: string): WebDevSession | null {
+	let first: WebDevSession | null = null;
+	for (const session of sessions) {
+		if (session.appId !== appId) continue;
+		if (session.previewAttached) return session;
+		first ??= session;
+	}
+	return first;
+}
+
+// =============================================================================
 // SESSION
 // =============================================================================
 
@@ -226,7 +255,7 @@ export class WebDevSession {
 	}
 
 	private readonly client: RocketRideClient;
-	/** The app this session serves (the dev-session registry looks sessions up by it). */
+	/** The app this session serves (findDevSession looks sessions up by it). */
 	public readonly appId: string;
 	private readonly folder: string;
 	private readonly appName: string;
@@ -289,6 +318,8 @@ export class WebDevSession {
 		// step: a prefix lens over the ONE shared staged workspace view —
 		// editor overlays, staged state, and agent writes all converge there
 		this.vfs = scopedFileSystem(getWorkspaceVfs(), `apps/${folder}`);
+		// step: join the open sessions (findDevSession); dispose() leaves
+		sessions.add(this);
 	}
 
 	// =========================================================================
@@ -411,6 +442,7 @@ export class WebDevSession {
 	/** Tears the session down (models, overlays, blobs, type libs, feeds). */
 	dispose(): void {
 		this.disposed = true;
+		sessions.delete(this);
 		this.unsubscribeNotify?.();
 		this.unsubscribeNotify = null;
 		if (this.lastLink) revokeLink(this.lastLink.blobUrls);

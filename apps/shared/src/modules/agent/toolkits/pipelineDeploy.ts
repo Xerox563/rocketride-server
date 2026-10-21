@@ -306,8 +306,8 @@ async function engineCall<T>(what: string, advice: string, call: () => Promise<T
 // =============================================================================
 
 /** The deploy toolkit: free reads and new versions, and the actions that ask the user first. */
-export class DeployToolkit extends AgentToolkit {
-	readonly name = 'deploy';
+export class PipelineDeployToolkit extends AgentToolkit {
+	readonly name = 'pipeline-deploy';
 	readonly instructions = INSTRUCTIONS;
 
 	/** Returns the connected client, or null. */

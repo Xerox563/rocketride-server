@@ -30,11 +30,12 @@
  * run ends when the model's answer is accepted, on a reply that stays unusable,
  * or when the model cannot be reached; there is no wave limit.
  *
- * An answer is accepted only when a check has passed in a wave after the last
- * change, so the model cannot skip checking. A reply that cannot be used is
- * sent back once, saying why. When the run ends without an accepted answer,
- * the loop asks for a best-effort answer from what was gathered, and failing
- * that writes one itself.
+ * An answer is accepted only when the host's finish rule (`FinishRule`) finds
+ * nothing left unchecked, so the model cannot skip checking. The loop knows
+ * nothing of what is checked or how: it tells the rule what each wave ran and
+ * asks it. A reply that cannot be used is sent back once, saying why. When the
+ * run ends without an accepted answer, the loop asks for a best-effort answer
+ * from what was gathered, and failing that writes one itself.
  *
  * This is a port of Wave's driver (`nodes/src/nodes/agent_rocketride/
  * rocketride_agent.py`) and the result bookkeeping of its executor
@@ -44,7 +45,6 @@
  * instructions, so the cached start stays identical on every call.
  */
 
-import type { CheckLedger } from '../checks/check';
 import type { AgentTool } from '../tools';
 import { MEMORY_PEEK_TOOL, peek, resolveAnswerRefs, resolveArgRefs, resultKey, RunMemory } from './memory';
 import { buildWaveQuestion, parseReply, type PromptPrefix } from './plan';
@@ -55,6 +55,49 @@ import { previewArgs, summarize, withCommas } from './summary';
 // OPTIONS AND RESULT
 // =============================================================================
 
+/** One call as the finish rule hears it: what ran, with what, and how it ended. */
+export interface RanCall {
+	/** The tool. */
+	tool: string;
+	/** The arguments it ran with (references filled in), or as written when they could not be filled in. */
+	args: Record<string, unknown>;
+	/** The result text, when the call worked. */
+	result?: string;
+	/** Why the call failed or did not run; a timed-out call says so here. */
+	error?: string;
+	/** True for a call that timed out in an earlier wave and has since ended; `result` or `error` is how it ended, which the model never read. */
+	late?: true;
+}
+
+/**
+ * What decides whether the work is checked. The host supplies it; the loop
+ * tells it what each wave ran and asks it before accepting a done=true. The
+ * loop itself still refuses while a timed-out call runs, and in the wave the
+ * check tool is called (the model has not read its result yet).
+ */
+export interface FinishRule {
+	/** The tool that checks the work: done=true waits a wave after a call to it, and calling it again is never a repeat. */
+	readonly checkTool: string;
+	/**
+	 * A wave starts.
+	 *
+	 * @param wave - The wave number, from 0.
+	 */
+	beginWave(wave: number): void;
+	/**
+	 * A wave's calls have ended.
+	 *
+	 * @param calls - Every call the wave ran, in call order (memory.peek and calls skipped for missing arguments are left out), then each timed-out call that has ended since the last wave.
+	 */
+	endWave(calls: RanCall[]): Promise<void>;
+	/**
+	 * Why the run may not finish yet.
+	 *
+	 * @returns A refusal naming what is still unchecked, in Wave's style ("Not finished: … before done=true."), or null when nothing is.
+	 */
+	unchecked(): string | null;
+}
+
 /** What a run needs. */
 export interface LoopOptions {
 	/** What the user asked for. */
@@ -63,18 +106,14 @@ export interface LoopOptions {
 	history: HistoryTurn[];
 	/** The fixed start of every wave question (see buildPrefix). */
 	prefix: PromptPrefix;
-	/** The tools the model may call; the check tool among them is named `check`. */
+	/** The tools the model may call, the finish rule's check tool among them. */
 	tools: AgentTool[];
 	/** Asks the model one question. */
 	model: ModelCall;
-	/** Where the check tool records its reports; the loop reads it after each wave. */
-	ledger: CheckLedger;
-	/** Whether a call to this tool changes the work, so a check must follow it. */
-	isChange: (tool: string) => boolean;
-	/** Sends one chunk of progress text to the user; `detail` is the raw model reply the chunk carries, sent only when recording. */
-	emit: (type: 'thinking', text: string, detail?: string) => void;
-	/** Whether each thinking chunk carries the raw reply of the model call behind it (default false). */
-	recordReplies?: boolean;
+	/** Decides when the work is checked; the loop asks it before accepting a done=true. */
+	finish: FinishRule;
+	/** Sends one chunk of progress text to the user. */
+	emit: (type: 'thinking', text: string) => void;
 	/** The time limit for a tool's calls, in milliseconds; anything but a positive number means TOOL_TIMEOUT_MS. */
 	timeoutMs?: (tool: string) => number;
 }
@@ -87,8 +126,6 @@ export interface LoopResult {
 	stopReason: StopReason;
 	/** How many waves ran, counting the one the run stopped in. */
 	waves: number;
-	/** Whether any call changed the work (even one that failed). */
-	changed: boolean;
 	/** How long each model call took, in milliseconds, in call order. */
 	modelMs: number[];
 }
@@ -100,14 +137,13 @@ export const TOOL_TIMEOUT_MS = 300_000;
 // TEXTS — Wave's words, which its prompt teaches the model to read
 // =============================================================================
 
-/** The tool whose passing result lets the run finish. */
-const CHECK_TOOL = 'check';
-
 /** The tool the loop runs itself. */
 const PEEK_TOOL = MEMORY_PEEK_TOOL.name;
 
 /** Why a done with a check in the same reply is sent back: the model has not read the check's result yet. */
-const READ_THE_CHECK = `Not finished: read the result of ${CHECK_TOOL} before done=true.`;
+function readTheCheck(checkTool: string): string {
+	return `Not finished: read the result of ${checkTool} before done=true.`;
+}
 
 /** The role of the best-effort question: a plain answer, not a plan. */
 const FALLBACK_ROLE = 'You are a helpful assistant.';
@@ -117,15 +153,6 @@ const FALLBACK_QUESTION = 'Based on the above, provide a complete and accurate f
 
 /** Most characters of a peek's data the best-effort question shows. */
 const FALLBACK_PREVIEW_CHARS = 2000;
-
-/** The text of the extra row that carries the accepted answer's raw reply. */
-const FINAL_REPLY_ROW = 'Final answer reply';
-
-/** The text of the extra row that carries the best-effort answer's raw reply. */
-const BEST_EFFORT_ROW = 'Best-effort answer reply';
-
-/** The text of a wave's row when the wave has nothing else to say but its raw reply is recorded. */
-const BARE_REPLY_ROW = 'Model reply';
 
 /** Most characters of a call's error a thinking line shows. */
 const THINKING_ERROR_CHARS = 200;
@@ -192,8 +219,16 @@ type Prepared = { call: ToolCall; args: Record<string, unknown> } | { call: Tool
 interface Acted {
 	/** One entry per call. */
 	entries: Entry[];
-	/** Per call, whether it was left out for missing required arguments, so it neither changed the work nor checked it. */
-	skipped: boolean[];
+	/** The calls the finish rule hears about: all but memory.peek and those left out for missing required arguments, which neither changed the work nor checked it. */
+	ran: RanCall[];
+}
+
+/** A call that timed out: what it was, and how it ended once it did. */
+interface LateCall {
+	/** The call as it ran. */
+	call: ToolCall;
+	/** How it ended; unset while it runs. */
+	ended?: { result: string } | { error: string };
 }
 
 /** A canonical text of a value, keys sorted, so two equal calls give the same text. */
@@ -278,8 +313,9 @@ function partialReport(cause: string, lines: string[], scratch: string): string 
  *
  * Each call also has a time limit, set per tool. A call over its limit is
  * reported as timed out and the wave moves on; the tool itself cannot be
- * cancelled, so its promise goes into `late` until it settles. The loop checks
- * `late.size` to know whether a timed-out call may still be changing things.
+ * cancelled, so its promise goes into `late` until it settles, beside a record
+ * of the call that also keeps how it ended. The loop checks `late.size` to know
+ * whether a timed-out call may still be changing things.
  */
 
 // =============================================================================
@@ -295,7 +331,7 @@ export type CallOutcome = { ok: true; result: string; ms: number } | { ok: false
 
 /**
  * Spells a path argument the way the file tools do, so two spellings of one file compare equal.
- * This mirrors the first steps of `normalizePath` in `../filesystem.ts`: the argument becomes text
+ * This mirrors the first steps of `normalizePath` in `../toolkits/filesystem.ts`: the argument becomes text
  * (`path: 7` is the file `7`), `\` becomes `/`, and empty segments go (`apps//x/` is `apps/x`).
  * It does not refuse `.` or `..`; the tool does that when it runs. A path that is empty after
  * this gives no path.
@@ -349,18 +385,27 @@ function overlaps(a: string[], b: string[]): boolean {
  * Runs one call and settles with its outcome; never rejects. A limit that is
  * not a positive finite number means no limit.
  */
-function runOne(call: ToolCall, exec: (call: ToolCall) => Promise<string>, limitMs: number, late: Set<Promise<unknown>>): Promise<CallOutcome> {
+function runOne(call: ToolCall, exec: (call: ToolCall) => Promise<string>, limitMs: number, late: Map<Promise<unknown>, LateCall>): Promise<CallOutcome> {
 	const began = performance.now();
 	const elapsed = (): number => Math.round(performance.now() - began);
 
 	return new Promise<CallOutcome>((resolve) => {
 		let over = false;
 		const running = new Promise<string>((done) => done(exec(call)));
+		const lateCall: LateCall = { call };
 
 		// Tracks the call after the wave stops waiting for it. It never rejects, so a
-		// late failure is not an unhandled rejection, and it leaves `late` once settled.
+		// late failure is not an unhandled rejection; it notes how the call ended, then
+		// leaves `late`.
 		const tracked: Promise<void> = running
-			.catch(() => undefined)
+			.then(
+				(result) => {
+					lateCall.ended = { result };
+				},
+				(error: unknown) => {
+					lateCall.ended = { error: messageOf(error) };
+				}
+			)
 			.then(() => {
 				late.delete(tracked);
 			});
@@ -369,7 +414,7 @@ function runOne(call: ToolCall, exec: (call: ToolCall) => Promise<string>, limit
 			Number.isFinite(limitMs) && limitMs > 0
 				? setTimeout(() => {
 						over = true;
-						late.add(tracked);
+						late.set(tracked, lateCall);
 						resolve({ ok: false, error: `TimeoutError: no result after ${limitMs / 1000} s`, ms: elapsed(), timedOut: true });
 					}, limitMs)
 				: undefined;
@@ -405,9 +450,9 @@ function runOne(call: ToolCall, exec: (call: ToolCall) => Promise<string>, limit
  * @param calls - The wave's tool calls, in the order the model planned them.
  * @param exec - Runs one call and resolves with its result text; a throw becomes an `ok: false` outcome.
  * @param opts.timeoutMs - The time limit in milliseconds for a tool; zero or infinity means none.
- * @param opts.late - Collects the promises of timed-out calls that are still running.
+ * @param opts.late - Collects the promises of timed-out calls that are still running, each with its call.
  */
-async function runWave(calls: ToolCall[], exec: (call: ToolCall) => Promise<string>, opts: { timeoutMs: (tool: string) => number; late: Set<Promise<unknown>> }): Promise<CallOutcome[]> {
+async function runWave(calls: ToolCall[], exec: (call: ToolCall) => Promise<string>, opts: { timeoutMs: (tool: string) => number; late: Map<Promise<unknown>, LateCall> }): Promise<CallOutcome[]> {
 	const held = calls.map(writePaths);
 	const outcomes: Promise<CallOutcome>[] = [];
 
@@ -422,60 +467,10 @@ async function runWave(calls: ToolCall[], exec: (call: ToolCall) => Promise<stri
 }
 
 // =============================================================================
-// RAW REPLIES — a model reply as the Thinking group shows it
-// =============================================================================
-
-/**
- * When a run records its model calls, each thinking row carries the raw text
- * the model replied with, so a reader can see what the model actually wrote
- * and not only what the loop made of it. The text is never parsed or
- * re-formatted here; it is only capped, so one runaway reply cannot bloat the
- * chat or the saved session.
- */
-
-/** Most characters of one raw reply a row carries. */
-const REPLY_CAP = 50_000;
-
-/**
- * Cuts a raw reply at the cap.
- *
- * @param raw - A reply as the model returned it.
- * @returns The reply itself, or its first REPLY_CAP characters followed by a line saying how many more there were.
- */
-function capReply(raw: string): string {
-	if (raw.length <= REPLY_CAP) return raw;
-	return `${raw.slice(0, REPLY_CAP)}\n[truncated ${raw.length - REPLY_CAP} more characters]`;
-}
-
-/**
- * The detail of a wave whose first reply was unusable and whose retry never
- * answered (the call threw): the first reply, labelled, with nothing after it.
- *
- * @param first - The wave's first raw reply.
- * @returns The capped reply under a `first reply:` label.
- */
-function firstReplyOnly(first: string): string {
-	return `first reply:\n${capReply(first)}`;
-}
-
-/**
- * The detail of one wave's thinking row: its raw reply, or both replies when
- * the first was unusable and was sent back once. Each reply is capped on its own.
- *
- * @param first - The wave's first raw reply.
- * @param retry - The raw reply to the retry, when there was one.
- * @returns The first reply alone, or both labelled `first reply` and `retry`.
- */
-function joinReplies(first: string, retry?: string): string {
-	if (retry === undefined) return capReply(first);
-	return `${firstReplyOnly(first)}\n\nretry:\n${capReply(retry)}`;
-}
-
-// =============================================================================
 // RUN — the state of one run, and its steps
 // =============================================================================
 
-/** One run's memory, results and check state. */
+/** One run's memory, results and timed-out calls. */
 class WaveRun {
 	/** Every stored tool result. */
 	readonly memory = new RunMemory();
@@ -483,18 +478,12 @@ class WaveRun {
 	readonly modelMs: number[] = [];
 	/** The model's working notes, carried from wave to wave. */
 	scratch = '';
-	/** The last wave with a change (even a failed one), or -1. */
-	lastChange = -1;
-	/** The last wave whose checks all passed, or -1. */
-	lastCheck = -1;
 	/** What every earlier call left behind, oldest first; what the next question shows. */
 	private results: Entry[] = [];
-	/** The raw replies of the wave being planned, first reply first: one, or two when the first was sent back. Kept only when recording. */
-	private waveReplies: string[] = [];
-	/** The calls that timed out and are still running. */
-	private readonly late = new Set<Promise<unknown>>();
+	/** The calls that timed out and are still running, by the promise that settles when each ends. */
+	private readonly late = new Map<Promise<unknown>, LateCall>();
 	/** The timed-out calls seen running at the last look, so a return is noticed. */
-	private readonly watched = new Set<Promise<unknown>>();
+	private readonly watched = new Map<Promise<unknown>, LateCall>();
 	/** Each call (tool and arguments as written) by the key of its first result. */
 	private readonly seenCalls = new Map<string, string>();
 	/** Each stored result's text by the key that first held it. */
@@ -528,26 +517,20 @@ class WaveRun {
 	 * Asks for this wave's plan. A reply with nothing to run and no answer is
 	 * sent back once, its problems in a note at the end of the context. The
 	 * retry was asked only to fix its shape, so the first reply's notes stand
-	 * unless the retry writes new ones. When recording and the retry call
-	 * throws, the first reply still gets its row before the error goes on.
+	 * unless the retry writes new ones.
 	 */
 	async plan(): Promise<PlanReply> {
 		const state = { request: this.o.request, scratch: this.scratch, results: this.results, notes: [] };
-		this.waveReplies = [];
 		const firstText = await this.ask(buildWaveQuestion(this.o.prefix, this.o.history, state));
-		if (this.o.recordReplies) this.waveReplies.push(firstText);
 		let reply = parseReply(firstText);
 		if (!reply.toolCalls.length && !reply.done) {
 			const first = reply.scratch;
 			try {
 				const retryText = await this.ask(buildWaveQuestion(this.o.prefix, this.o.history, { ...state, notes: [retryNote(reply.problems)] }));
-				if (this.o.recordReplies) this.waveReplies.push(retryText);
 				reply = parseReply(retryText);
 			} catch (error) {
 				// The first reply's notes are all this wave produced; keep them for the best-effort answer.
 				if (first.trim()) this.scratch = first;
-				// Recording: the first reply is the wave's only reply, and an unusable one is the one most worth reading.
-				if (this.o.recordReplies) this.o.emit('thinking', reply.thought.trim() ? reply.thought : BARE_REPLY_ROW, firstReplyOnly(firstText));
 				throw error;
 			}
 			if (first && !reply.scratch.trim()) reply = { ...reply, scratch: first };
@@ -563,7 +546,8 @@ class WaveRun {
 	 * where arguments go. Arguments are resolved next, and a call whose
 	 * reference names nothing does not run. memory.peek reads memory here,
 	 * before this wave's results are stored; every other call goes through the
-	 * scheduler.
+	 * scheduler. Every call but memory.peek and the skipped ones is also handed
+	 * back as the finish rule hears it.
 	 */
 	async act(wave: number, calls: ToolCall[]): Promise<Acted> {
 		const prepared = calls.map((call, i): Prepared => {
@@ -583,13 +567,18 @@ class WaveRun {
 		const outcomes = await runWave(runnable, (call) => this.exec(call), { timeoutMs: (tool) => this.limit(tool), late: this.late });
 
 		let next = 0;
+		const ran: RanCall[] = [];
 		const entries = prepared.map((p, i) => {
-			if ('entry' in p) return this.withCall(p.entry, p.call);
+			if ('entry' in p) {
+				if (!('skipped' in p) && p.call.tool !== PEEK_TOOL) ran.push({ tool: p.call.tool, args: p.call.args, error: p.entry.error });
+				return this.withCall(p.entry, p.call);
+			}
 			const key = resultKey(wave, i);
 			const outcome = outcomes[next++];
+			ran.push(outcome.ok ? { tool: p.call.tool, args: p.args, result: outcome.result } : { tool: p.call.tool, args: p.args, error: outcome.error });
 			return this.withCall(outcome.ok ? this.store(p.call.tool, key, outcome.result) : { tool: p.call.tool, key, error: outcome.error }, p.call);
 		});
-		return { entries, skipped: prepared.map((p) => 'skipped' in p) };
+		return { entries, ran };
 	}
 
 	/**
@@ -636,7 +625,7 @@ class WaveRun {
 	private store(tool: string, key: string, result: string): Entry {
 		this.memory.put(key, result);
 		const entry: Entry = { tool, key, summary: summarize(result) };
-		if (tool === CHECK_TOOL) return entry;
+		if (tool === this.o.finish.checkTool) return entry;
 		const prior = setDefault(this.seenResults, result, key);
 		if (prior === key) return entry;
 		entry.deduplicated = true;
@@ -655,7 +644,7 @@ class WaveRun {
 		const shown: Entry = { tool, key };
 		if (Object.keys(call.args).length) shown.args = previewArgs(call.args);
 		Object.assign(shown, rest);
-		if (call.tool === CHECK_TOOL) return shown;
+		if (call.tool === this.o.finish.checkTool) return shown;
 		const first = setDefault(this.seenCalls, canonical({ tool: call.tool, args: call.args }), key);
 		if (first !== key && this.removed.has(first)) {
 			// Read, remove, read again: the model dropped data it still needed.
@@ -697,64 +686,45 @@ class WaveRun {
 	}
 
 	/**
-	 * Counts a timed-out call that has returned since the last look as a change
-	 * in this wave: what it did may have landed after a check read the work.
+	 * The timed-out calls that have ended since the last look, as the finish
+	 * rule hears them: what they did may have landed after a check read the
+	 * work, and the model never read how they ended.
 	 */
-	noteLateReturns(wave: number): void {
-		let returned = false;
-		for (const running of this.watched) {
+	lateReturns(): RanCall[] {
+		const returned: RanCall[] = [];
+		for (const [running, { call, ended }] of this.watched) {
 			if (this.late.has(running)) continue;
 			this.watched.delete(running);
-			returned = true;
+			returned.push({ tool: call.tool, args: call.args, ...ended, late: true });
 		}
-		for (const running of this.late) this.watched.add(running);
-		if (returned) this.lastChange = wave;
+		for (const [running, lateCall] of this.late) this.watched.set(running, lateCall);
+		return returned;
 	}
 
 	/**
 	 * Why the run may not finish yet, or null if it may. A timed-out call still
 	 * running may still change the work, so no check covers it. Otherwise the
-	 * last change must be followed by a passing check in a later wave: a check
-	 * in the same wave ran alongside the change and may have read the work
-	 * before the change landed.
+	 * finish rule decides.
 	 */
-	notChecked(): string | null {
+	unfinished(): string | null {
 		if (this.late.size) {
-			return `Not finished: ${this.late.size} call(s) that timed out are still running and may still change the work. A check cannot cover them yet; call ${CHECK_TOOL} again after they end.`;
+			return `Not finished: ${this.late.size} call(s) that timed out are still running and may still change the work. A check cannot cover them yet; call ${this.o.finish.checkTool} again after they end.`;
 		}
-		if (this.lastChange >= 0 && this.lastCheck <= this.lastChange) {
-			return `Not finished: call ${CHECK_TOOL} on its own, after your last change, and fix what it reports before done=true.`;
-		}
-		return null;
-	}
-
-	/** The planned wave's raw replies as one detail text, or undefined when not recording or no reply arrived. */
-	private waveDetail(): string | undefined {
-		const [first, retry] = this.waveReplies;
-		return first === undefined ? undefined : joinReplies(first, retry);
+		return this.o.finish.unchecked();
 	}
 
 	/**
 	 * Sends a wave's thinking chunk: its thought, then a line per call; nothing
-	 * when both are empty. When recording, the chunk carries the wave's raw
-	 * replies, and goes out even with nothing else to say (as `Model reply`),
-	 * as an unusable reply is the one most worth reading.
+	 * when both are empty.
 	 */
 	think(thought: string, lines: string[]): void {
 		const text = [...(thought.trim() ? [thought] : []), ...lines].join('\n');
-		const detail = this.waveDetail();
-		if (text || detail !== undefined) this.o.emit('thinking', text || BARE_REPLY_ROW, detail);
-	}
-
-	/** When recording, sends the accepted wave's raw replies as their own row, ahead of the answer. */
-	thinkFinal(): void {
-		const detail = this.waveDetail();
-		if (detail !== undefined) this.o.emit('thinking', FINAL_REPLY_ROW, detail);
+		if (text) this.o.emit('thinking', text);
 	}
 
 	/** The run's result. */
 	finish(stopReason: StopReason, answer: string, waves: number): LoopResult {
-		return { answer, stopReason, waves, changed: this.lastChange >= 0, modelMs: this.modelMs };
+		return { answer, stopReason, waves, modelMs: this.modelMs };
 	}
 
 	/**
@@ -785,7 +755,6 @@ class WaveRun {
 			const name = error instanceof Error ? error.name : 'Error';
 			return partialReport(`the model call failed (${name}: ${messageOf(error)})`, lines, this.scratch);
 		}
-		if (this.o.recordReplies) this.o.emit('thinking', BEST_EFFORT_ROW, capReply(answer));
 		if (!answer.trim()) return partialReport('the model returned no text', lines, this.scratch);
 		return answer;
 	}
@@ -798,13 +767,12 @@ class WaveRun {
 /**
  * Runs waves until the model's answer is accepted, a reply stays unusable
  * after one retry (`empty_plan`), or the model cannot be reached (`error`).
- * Each wave plans, runs its calls, and records their entries for the next
- * question. A done=true is sent back, with the reason in an entry, until a
- * check has passed in a wave after the last change. Every wave sends one
- * thinking chunk except the one whose answer is accepted, which goes out as
- * the answer instead. With `recordReplies`, each chunk also carries its raw
- * model reply, the accepted wave's reply goes out as one extra chunk before
- * the answer, and so does the best-effort answer's.
+ * Each wave plans, runs its calls, tells the finish rule what ran, and records
+ * their entries for the next question. A done=true is sent back, with the
+ * reason in an entry, while a timed-out call still runs, in the wave the check
+ * tool is called, and while the finish rule finds something unchecked. Every
+ * wave sends one thinking chunk except the one whose answer is accepted, which
+ * goes out as the answer instead.
  *
  * @param o - The run's request, prompt start, tools, model and hooks.
  * @returns The answer and how the run ended.
@@ -813,7 +781,7 @@ class WaveRun {
 export async function runLoop(o: LoopOptions): Promise<LoopResult> {
 	const run = new WaveRun(o);
 	for (let wave = 0; ; wave++) {
-		o.ledger.beginWave(wave);
+		o.finish.beginWave(wave);
 		let reply: PlanReply;
 		try {
 			reply = await run.plan();
@@ -826,10 +794,9 @@ export async function runLoop(o: LoopOptions): Promise<LoopResult> {
 
 		// step: done with nothing to run — the answer stands unless the work is unchecked
 		if (reply.done && !toolCalls.length) {
-			run.noteLateReturns(wave);
-			const refused = run.notChecked();
+			await o.finish.endWave(run.lateReturns());
+			const refused = run.unfinished();
 			if (!refused) {
-				run.thinkFinal();
 				return run.finish('done', resolveAnswerRefs(reply.answer, run.memory), wave + 1);
 			}
 			// Its remove list is not applied: the answer it sends again may still need those keys.
@@ -850,32 +817,25 @@ export async function runLoop(o: LoopOptions): Promise<LoopResult> {
 		const earlier = run.earlierKeys();
 		const removing = reply.askedDone ? [] : reply.remove.filter((key) => earlier.has(key));
 		run.forget(removing);
-		const { entries, skipped } = await run.act(wave, toolCalls);
+		const { entries, ran } = await run.act(wave, toolCalls);
 		const lines = toolCalls.map((call, i) => thinkingLine(call, entries[i]));
 		entries.push(...problemEntries(wave, reply.problems));
 
-		// step: track change and check. A change counts even when it failed: a
-		// write may have landed before its error. The newest check decides: a
-		// check that failed, or any check call that errored (it threw, timed out,
-		// or never ran), leaves the work unchecked, whatever passed before. A
-		// timed-out check may still record a pass, but the model never saw it.
-		// A call skipped for missing arguments never touched the work or the
-		// check, so it counts as neither.
-		if (toolCalls.some((call, i) => !skipped[i] && call.tool !== PEEK_TOOL && o.isChange(call.tool))) run.lastChange = wave;
-		const checked = o.ledger.endWave();
-		const checkErred = toolCalls.some((call, i) => !skipped[i] && call.tool === CHECK_TOOL && entries[i].error !== undefined);
-		if (checked === 'fail' || checkErred) run.lastCheck = -1;
-		else if (checked === 'pass') run.lastCheck = wave;
-		run.noteLateReturns(wave);
+		// step: tell the finish rule what ran this wave, failed calls included (a
+		// write may have landed before its error), then any timed-out call that has
+		// ended since: what it did may have landed after a check read the work. A
+		// call skipped for missing arguments never touched the work or a check, so
+		// the rule never hears of it.
+		await o.finish.endWave([...ran, ...run.lateReturns()]);
 
 		// step: done with calls — the answer stands only if every call worked, the
 		// model has read any check it ran, and the work is checked
 		let finished = reply.done && !entries.some((entry) => entry.error !== undefined);
-		if (finished && toolCalls.some((call) => call.tool === CHECK_TOOL)) {
+		if (finished && toolCalls.some((call) => call.tool === o.finish.checkTool)) {
 			finished = false;
-			entries.push(refusal(wave, READ_THE_CHECK));
+			entries.push(refusal(wave, readTheCheck(o.finish.checkTool)));
 		} else if (finished) {
-			const refused = run.notChecked();
+			const refused = run.unfinished();
 			if (refused) {
 				finished = false;
 				entries.push(refusal(wave, refused));
@@ -883,7 +843,6 @@ export async function runLoop(o: LoopOptions): Promise<LoopResult> {
 		}
 		run.record(entries);
 		if (finished) {
-			run.thinkFinal();
 			return run.finish('done', resolveAnswerRefs(reply.answer, run.memory), wave + 1);
 		}
 

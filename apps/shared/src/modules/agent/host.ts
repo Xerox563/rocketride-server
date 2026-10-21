@@ -38,10 +38,10 @@ import type { IWorkspaceFileSystem } from '../vfs/vfsTypes';
 // THE SEAM
 // =============================================================================
 
-/** Read-only access to the RocketRide guides, by path relative to '.rocketride/'. */
+/** Read-only access to the guides the agent opens with read_guide, by guide path. */
 export interface GuideSource {
 	/**
-	 * Every guide path, relative to '.rocketride/' (e.g. 'docs/ROCKETRIDE_APPS.md').
+	 * Every guide path (e.g. 'docs/ROCKETRIDE_APPS.md'); read_guide shows each one under '.rocketride/'.
 	 *
 	 * @returns The guide paths.
 	 */
@@ -116,14 +116,6 @@ export interface AgentHost {
 	 * @returns The session, or null when none is running.
 	 */
 	devSession(appId: string): AgentDevSession | null;
-	/**
-	 * Whether a run attaches each model call's raw reply to its row in the
-	 * Thinking group (and so saves it with the session). Read at the start of
-	 * every request, so a change applies to the next message. Absent means no.
-	 *
-	 * @returns True to record the raw replies.
-	 */
-	recordModelCalls?(): boolean;
 }
 
 // =============================================================================

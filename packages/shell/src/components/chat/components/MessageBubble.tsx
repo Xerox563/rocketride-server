@@ -9,8 +9,7 @@
  * Four shapes, all coloured from --rr-* tokens so they track every theme:
  *   - error   → an in-thread error Banner (isError messages)
  *   - user    → a filled brand bubble, right-aligned
- *   - status  → a compact dotted "thinking" row (line breaks in its text show;
- *               a row with a `detail` has a small "Raw reply" disclosure under it)
+ *   - status  → a compact dotted "thinking" row (line breaks in its text show)
  *   - bot/sys → a bordered assistant bubble with sanitized markdown, left-aligned
  *               (chart-bearing answers break out of the bubble to full width)
  */
@@ -18,7 +17,6 @@
 import React, { type CSSProperties } from 'react';
 import type { ChatMessage } from '../types';
 import { MarkdownRenderer } from './MarkdownRenderer';
-import { RawReply } from './RawReply';
 import { Banner } from '../../banner/Banner';
 
 // =============================================================================
@@ -146,18 +144,6 @@ const styles = {
 		whiteSpace: 'pre-wrap',
 	} as CSSProperties,
 
-	// A row with a detail: the text and its disclosure stack in one column
-	// beside the dot. minWidth 0 lets the disclosure's block scroll instead of
-	// stretching the row.
-	statusBody: {
-		display: 'flex',
-		flexDirection: 'column',
-		alignItems: 'flex-start',
-		gap: 2,
-		minWidth: 0,
-		flex: 1,
-	} as CSSProperties,
-
 	resultKey: {
 		fontSize: 10,
 		color: 'var(--rr-text-caption)',
@@ -191,24 +177,13 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message }) => {
 	}
 
 	// Status / thinking messages render as a compact dotted row. A row whose
-	// text has line breaks keeps them (pre-wrap). A row with a detail adds a
-	// "Raw reply" disclosure under its text.
+	// text has line breaks keeps them (pre-wrap).
 	if (message.sender === 'status') {
 		const multi = message.text.includes('\n');
-		const { detail } = message;
-		const stacked = multi || detail !== undefined;
-		const text = <span style={multi ? { ...styles.statusText, ...styles.statusTextMulti } : styles.statusText}>{message.text}</span>;
 		return (
-			<div style={stacked ? { ...styles.statusRow, ...styles.statusRowMulti } : styles.statusRow}>
-				<span style={stacked ? { ...styles.statusDot, ...styles.statusDotMulti } : styles.statusDot} />
-				{detail !== undefined ? (
-					<div style={styles.statusBody}>
-						{text}
-						<RawReply detail={detail} />
-					</div>
-				) : (
-					text
-				)}
+			<div style={multi ? { ...styles.statusRow, ...styles.statusRowMulti } : styles.statusRow}>
+				<span style={multi ? { ...styles.statusDot, ...styles.statusDotMulti } : styles.statusDot} />
+				<span style={multi ? { ...styles.statusText, ...styles.statusTextMulti } : styles.statusText}>{message.text}</span>
 			</div>
 		);
 	}

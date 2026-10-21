@@ -404,7 +404,7 @@ export function messageOf(err: unknown): string {
 /**
  * Spells a workspace path the one way the workspace stores it, so `./pipelines/x.pipe`,
  * `/pipelines/x.pipe` and `pipelines\x.pipe` all name `pipelines/x.pipe`. Unlike the
- * file tools' `normalizePath` (`../filesystem.ts`), which refuses a `.` segment,
+ * file tools' `normalizePath` (`./filesystem.ts`), which refuses a `.` segment,
  * this drops it, because a leading `./` is how people write a relative path.
  *
  * @param raw - The path as the model passed it.

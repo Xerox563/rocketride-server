@@ -40,7 +40,7 @@
  * resume never leaves a frozen view behind.
  */
 
-import { AgentTool, AgentToolkit } from './tools';
+import { AgentTool, AgentToolkit } from '../tools';
 
 // =============================================================================
 // TYPES
@@ -100,7 +100,7 @@ Use it:
 
 Don't use it:
 - for deploy, publish or schedule: they switch no view, so say in your answer what you did;
-- for reading files or running checks: the user does not need to watch those, so call the read or check tools directly;
+- for reading files or running checks: the user does not need to watch those, so call the read tools or check_app directly;
 - to ask the user something: put the question in your answer.
 
 kind is app_preview, node_preview or pipeline_canvas. name is the app, node or pipeline you mean, as it appears in the workspace.

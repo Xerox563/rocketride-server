@@ -40,7 +40,7 @@
 
 import type { PipelineConfig } from 'rocketride';
 
-import { requireClient, type ClientGetter } from './rocketride/common';
+import { requireClient, type ClientGetter } from './toolkits/common';
 
 // =============================================================================
 // PIPELINE

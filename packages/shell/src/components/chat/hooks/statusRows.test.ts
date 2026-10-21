@@ -23,13 +23,13 @@ test('the sink appends a row per call, in order, with fresh ids', () => {
 		() => '12:00'
 	);
 
-	sink('thinking', 'first', 'raw reply');
+	sink('thinking', 'first');
 	assert.equal(rows.length, 1, 'the row lands at once, while the request is still pending');
 	sink('note', 'second');
 
-	// the type is the transport's, and a detail is kept only when the call has one
+	// the type is the transport's
 	assert.deepEqual(rows, [
-		{ id: 1, text: 'first', sender: 'status', sseType: 'thinking', timestamp: '12:00', detail: 'raw reply' },
+		{ id: 1, text: 'first', sender: 'status', sseType: 'thinking', timestamp: '12:00' },
 		{ id: 2, text: 'second', sender: 'status', sseType: 'note', timestamp: '12:00' },
 	]);
 });

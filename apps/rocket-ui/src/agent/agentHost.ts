@@ -35,8 +35,7 @@ import type { RocketRideClient } from 'shell';
 import type { AgentDevSession, AgentHost } from 'shared/modules/agent/host';
 import type { FrameOptions } from 'shared/tools/appdev';
 import { scaffoldApp } from '../surfaces/appdev/session/appStore';
-import type { WebDevSession } from '../surfaces/appdev/session/devSession';
-import { findDevSession } from '../surfaces/appdev/session/devSessionRegistry';
+import { findDevSession, type WebDevSession } from '../surfaces/appdev/session/devSession';
 import { packAppSource } from '../surfaces/appdev/session/pack';
 import { getWorkspaceVfs } from '../surfaces/workspace/vfs/workspace';
 import { createRocketGuideSource } from './agentGuides';
@@ -80,10 +79,9 @@ function agentDevSession(session: WebDevSession): AgentDevSession {
  * createWorkspace() settles, since the host captures the workspace view.
  *
  * @param client - The connected client; it supplies the publisher and packs deploys.
- * @param recordModelCalls - Reads the latest value of the record-model-calls setting; called at the start of each agent request.
  * @returns The host to install with setAgentHost().
  */
-export function createRocketAgentHost(client: RocketRideClient, recordModelCalls?: () => boolean): AgentHost {
+export function createRocketAgentHost(client: RocketRideClient): AgentHost {
 	return {
 		vfs: getWorkspaceVfs(),
 		guides: createRocketGuideSource(),
@@ -101,6 +99,5 @@ export function createRocketAgentHost(client: RocketRideClient, recordModelCalls
 			const session = findDevSession(appId);
 			return session ? agentDevSession(session) : null;
 		},
-		recordModelCalls,
 	};
 }

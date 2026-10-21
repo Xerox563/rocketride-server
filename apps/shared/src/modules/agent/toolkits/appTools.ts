@@ -113,7 +113,7 @@ const NO_DEVELOPER_MESSAGE = "Deploy refused: this organization hasn't claimed a
 const INSTRUCTIONS = `## Apps
 
 - Make a new app with create_app, not by writing its files, because the scaffold sets up the manifest and the build.
-- Deploy with deploy_app after your check passes, because the server builds the app again and a broken build serves nothing.
+- Deploy with deploy_app after check_app passes, because the server builds the app again and a broken build serves nothing.
 - Publish only when the user asks you to, because it puts the app in front of other people. publish_app asks the user first; if they say no, don't retry, ask what they want instead.
 - If deploy_app says the organization has no developer name, tell the user an org admin must claim one, because you can't.`;
 
@@ -121,7 +121,7 @@ const INSTRUCTIONS = `## Apps
 const DEPLOY_DESCRIPTION = `Upload the app as its next version and wait for the server build, then say whether the build is OK or return its errors.
 
 Use it:
-- when the app works and the user wants it shipped, after check passes;
+- when the app works and the user wants it shipped, after check_app passes;
 - to put a fix in front of the server build, which type-checks the app again.
 
 Don't use it:
@@ -471,7 +471,7 @@ export class AppToolkit extends AgentToolkit {
 		return [
 			new AgentTool({
 				name: 'create_app',
-				description: ['Create a new app from a template, in apps/<appName>-ui.', '- appName is a short lowercase name that starts with a letter, such as daybook; the folder is named after it, and a name already taken is refused.', '- template is Blank (the default) or Dashboard.', "- It returns the new app's id. Edit the app with the file tools, then check it."].join('\n'),
+				description: ['Create a new app from a template, in apps/<appName>-ui.', '- appName is a short lowercase name that starts with a letter, such as daybook; the folder is named after it, and a name already taken is refused.', '- template is Blank (the default) or Dashboard.', "- It returns the new app's id. Edit the app with the file tools, then run check_app on it."].join('\n'),
 				parameters: {
 					type: 'object',
 					properties: {
