@@ -53,7 +53,7 @@ import { createRemoteHistory } from '../src/history/remoteHistory';
 import { SQL_OP_TIMEOUT_MS } from '../src/sqlTimeouts';
 import { taskRow } from './support';
 import { SAVED_PATH, engineScript, scriptedSocketlessRealm, until } from './realm';
-import { PIPELINE, postgres } from './devtoolRig';
+import { PIPELINE, postgres, rig } from './devtoolRig';
 
 const SRC = path.resolve(__dirname, '..', 'src');
 const USER_A = account('uA', 'org-1', 'team-1');
@@ -362,7 +362,7 @@ describe('T7 — a run recorded just before the account goes away is written for
 	const record = (r: Awaited<ReturnType<typeof vscodeRig>>, id: string, owner: string) => r.frame.caller.callReply('sql.historyRecord', { connId: 'c-pipe', entry: entry(id, 'SELECT 7', 70), owner }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.historyRecord'] });
 	const historyChecked = (r: Awaited<ReturnType<typeof vscodeRig>>) => until(() => r.engine.requests.some((q) => q.op === 'client.fsStat' && historyFileRequest(q.params)), 'the history file check');
 
-	it('(a) record, the root disconnects, the host flips, the controller unmounts, the same account comes back: written', async () => {
+	it('(a) record, the root disconnects, the controller unmounts while nobody is known: nothing is written over the dead connection, and the run is lost (documented)', async () => {
 		const files: Record<string, unknown> = {};
 		const r = await vscodeRig(postgres, files);
 		try {
@@ -378,14 +378,91 @@ describe('T7 — a run recorded just before the account goes away is written for
 			r.h.setHostConnection(false);
 			await settle();
 			r.controller.dispose();
-			await until(() => written(files, FP_A, 'late'), 'the late run to be written', 3_000);
-			// The same account back: the remounted controller reads it.
+			await new Promise((resolve) => setTimeout(resolve, 1_300));
+			const carrying = r.engine.requests.filter((q) => q.op === 'client.fsWriteJson' && JSON.stringify(q.params).includes('late'));
+			assert.deepEqual(carrying, [], 'no write is even attempted while nobody is vouched for');
+			// The same account back: the remounted controller reads the file, which never got the run.
 			r.remount();
 			r.engine.realm.root.connect(USER_A);
 			r.h.setHostConnection(true);
-			await until(() => r.controller.history.getHistory(KEY).some((e) => e.id === 'late'), 'the remounted controller to read it');
+			await until(() => r.engine.requests.filter((q) => q.op === 'client.fsStat' && historyFileRequest(q.params)).length >= 2, 'the remounted controller to read the file');
+			await settle();
+			assert.equal(written(files, FP_A, 'late'), false, 'lost: the sidebar closed while nobody was known');
 		} finally {
 			r.dispose();
+		}
+	});
+
+	it('(d) after a drop, a connected status with no account yet writes nothing; the same account then gets the run, another account never does', async () => {
+		for (const next of [USER_A, USER_B]) {
+			const files: Record<string, unknown> = {};
+			const r = await vscodeRig(postgres, files);
+			try {
+				r.engine.realm.root.connect(USER_A);
+				r.h.setHostConnection(true);
+				await until(() => r.frame.owner() === FP_A, 'account A');
+				await historyChecked(r);
+				await settle();
+				await record(r, 'late', FP_A);
+				r.engine.realm.root.disconnect();
+				await until(() => !r.controller.core.identity.get().known, 'the drop');
+				// The transport is back (status first, as busHost.ts mirrors it); no account yet.
+				r.engine.realm.root.connect(null);
+				await settle();
+				assert.equal(r.controller.core.identity.get().known, false);
+				await new Promise((resolve) => setTimeout(resolve, 2_500));
+				const carrying = (): number => r.engine.requests.filter((q) => q.op === 'client.fsWriteJson' && JSON.stringify(q.params).includes('late')).length;
+				assert.equal(carrying(), 0, 'nothing is written while the session is nobody\'s');
+				r.engine.realm.root.accountChanged(next);
+				if (next === USER_A) {
+					await until(() => written(files, FP_A, 'late'), 'the run, once A is known again', 3_000);
+				} else {
+					await until(() => r.controller.core.identity.get().fingerprint === FP_B, 'B');
+					await new Promise((resolve) => setTimeout(resolve, 1_500));
+					assert.equal(carrying(), 0, 'A\'s run is never written once B is known');
+				}
+			} finally {
+				r.dispose();
+			}
+		}
+	});
+
+	it('(f) the transport is back as B before its account is read, the controller kept or remounted: A\'s run is never written (DA r2 reproduction)', async () => {
+		for (const remount of [false, true]) {
+			const files: Record<string, unknown> = {};
+			const r = await vscodeRig(postgres, files);
+			const attempts: Array<{ known: boolean; carriesA: boolean }> = [];
+			const write = r.engine.script['client.fsWriteJson']!;
+			r.engine.script['client.fsWriteJson'] = (params) => {
+				if (historyFileRequest(params)) attempts.push({ known: r.controller.core.identity.get().known, carriesA: JSON.stringify(params).includes('a-late') });
+				return write(params);
+			};
+			try {
+				r.engine.realm.root.connect(USER_A);
+				r.h.setHostConnection(true);
+				await until(() => r.frame.owner() === FP_A, 'account A');
+				await historyChecked(r);
+				await settle();
+				await record(r, 'a-late', FP_A);
+				r.engine.realm.root.disconnect();
+				await until(() => !r.controller.core.identity.get().known, 'the drop');
+				r.h.setHostConnection(false);
+				await settle();
+				if (remount) r.controller.dispose();
+				await new Promise((resolve) => setTimeout(resolve, 1_300));
+				if (remount) r.remount();
+				r.engine.realm.root.connect(null);
+				r.h.setHostConnection(true);
+				await settle();
+				await new Promise((resolve) => setTimeout(resolve, 2_500));
+				r.engine.realm.root.accountChanged(USER_B);
+				await until(() => r.controller.core.identity.get().fingerprint === FP_B, 'B');
+				await new Promise((resolve) => setTimeout(resolve, 1_500));
+				assert.deepEqual(attempts.filter((a) => a.carriesA), [], `no write carries A's run (${remount ? 'remounted' : 'kept mounted'})`);
+				assert.equal(JSON.stringify(files).includes('a-late'), false);
+			} finally {
+				r.dispose();
+			}
 		}
 	});
 
@@ -444,6 +521,38 @@ describe('T7 — a run recorded just before the account goes away is written for
 			} finally {
 				r.dispose();
 			}
+		}
+	});
+});
+
+describe('T7 — an org switch (rocket-ui) holds the last run until an account is known, and only its owner\'s file gets it', () => {
+	it('after orgChanged nothing is written while nobody is known; once the new fingerprint is known, only its own runs are written', async () => {
+		const files: Record<string, unknown> = {};
+		const r = await rig({ files });
+		try {
+			await until(() => r.engine.requests.some((q) => q.op === 'client.fsStat' && historyFileRequest(q.params)), 'the history file check');
+			await settle();
+			const before = r.frame.owner()!;
+			await r.frame.caller.callReply('sql.historyRecord', { connId: 'c-pipe', entry: entry('org1-last', 'SELECT 1', 10), owner: before }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.historyRecord'] });
+			r.engine.realm.orgChanged('org-2');
+			await until(() => !r.mount.core.identity.get().known, 'unknown after the org switch');
+			await new Promise((resolve) => setTimeout(resolve, 1_600));
+			const carrying = (id: string): number => r.engine.requests.filter((q) => q.op === 'client.fsWriteJson' && JSON.stringify(q.params).includes(id)).length;
+			assert.equal(carrying('org1-last'), 0, 'nothing while nobody is vouched for');
+			// The new organization's account is known: a different fingerprint.
+			r.engine.realm.accountUpdate(account('u1', 'org-2', 'team-2'));
+			await until(() => r.mount.core.identity.get().known && r.mount.core.identity.get().fingerprint !== before, 'the new fingerprint');
+			const after = r.mount.core.identity.get().fingerprint!;
+			await until(() => r.frame.owner() === after, 'the frame to follow');
+			await until(() => r.engine.requests.filter((q) => q.op === 'client.fsStat' && historyFileRequest(q.params)).length >= 2, 'the new account\'s file check');
+			await settle();
+			await r.frame.caller.callReply('sql.historyRecord', { connId: 'c-pipe', entry: entry('org2-run', 'SELECT 2', 20), owner: after }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.historyRecord'] });
+			await until(() => carrying('org2-run') > 0, 'the new account\'s run to be written', 3_000);
+			assert.equal(carrying('org1-last'), 0, 'the previous organization\'s run is never written');
+			const file = files[HISTORY_PATH] as { owners: Record<string, unknown> };
+			assert.deepEqual(Object.keys(file.owners), [after], 'only the matching owner\'s bag');
+		} finally {
+			r.dispose();
 		}
 	});
 });

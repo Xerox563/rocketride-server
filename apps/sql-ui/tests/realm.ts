@@ -79,6 +79,9 @@ function scripted<R>(realm: R, cm: object, script: BusScript): IScriptedRealm<R>
 		...cm,
 		request: async (op: string, params: unknown, opts?: { timeoutMs?: number }): Promise<unknown> => {
 			requests.push({ op, params, timeoutMs: opts?.timeoutMs });
+			// As the real host does: nothing is answered while the realm is down.
+			const live = (cm as { isConnected?: () => boolean }).isConnected;
+			if (typeof live === 'function' && !live()) throw new Error('Not connected to server');
 			const answer = script[op];
 			if (!answer) throw new Error(`No scripted answer for ${op}`);
 			return answer(params);

@@ -581,14 +581,14 @@ these differences:
   applies. The sidebar forgets one account's history as soon as you sign out
   or another account signs in, before the next account's section is read.
   What survives a change:
-  - **Sign-out, or the connection drops:** a statement run just before is
-    kept, and written as soon as the server takes the write, at the latest
-    when the same account is signed in again, as long as the sidebar stays
-    open. If the sidebar closes first (in VS Code it closes when the
-    connection drops), the write is tried once more as it closes and is lost
-    if the server cannot be reached then.
-  - **Another account signs in:** the previous account's last unsaved
-    statements are dropped, never written into the new account's file.
+  - **Sign-out, the connection drops, or the organization changes:** the
+    last unsaved statements are held, and nothing is written while nobody is
+    signed in. They are written when the same account is known again while
+    the sidebar is open. They are dropped if the sidebar closes while nobody
+    is signed in (in VS Code it closes when the connection drops).
+  - **Another account signs in** (or the organization or team changes): the
+    previous account's last unsaved statements are dropped. They are never
+    written into another account's file.
   - **A statement run while the history file is still being read** (just
     after the sidebar opens or an account signs in) is saved once the read
     ends; if the account changes or the sidebar closes before that, it is

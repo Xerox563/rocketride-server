@@ -338,9 +338,11 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 	let prefs: IFsPrefs | null = null;
 	/**
 	 * The previous account's accessor, kept while nobody is vouched for (a
-	 * disconnect, a logout): its pending write still lands if the same
-	 * account comes back, or at the final close. Disposed (its pending write
-	 * dropped) once a DIFFERENT account is known.
+	 * disconnect, a logout, an org switch): its pending write is held, and
+	 * lands if the same account is known again while the sidebar is open.
+	 * Disposed (its pending write dropped) once a DIFFERENT account is known,
+	 * and closed at the final teardown, where a write still held because
+	 * nobody is known is dropped.
 	 */
 	let parked: IFsPrefs | null = null;
 	let detachHistory: (() => void) | null = null;
@@ -360,14 +362,16 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 			cm: opts.cm,
 			path: historyPrefsPath('sql'),
 			owner,
-			// Who its writes are for: while nobody is vouched for, still this
-			// account (its pending write is kept, and retried while the
-			// connection is down); the moment a DIFFERENT account is known, that
-			// one, so the library drops the write and nothing of this account's
-			// lands in the next account's file.
+			// Who is signed in now: the live fingerprint, or null while nobody is
+			// vouched for. The library HOLDS a write while it is null (a
+			// reconnected transport may already be another account's before its
+			// account is read, and an org switch passes through unknown), lands
+			// it once this same account is known again, and drops it once a
+			// different one is: nothing of this account's is ever written over a
+			// session nobody vouched for, or into another account's file.
 			ownerNow: () => {
 				const now = core.identity.get();
-				return now.known ? now.fingerprint : owner;
+				return now.known ? now.fingerprint : null;
 			},
 			onError: (_error, phase) => {
 				if (phase !== 'load' || prefs !== accessor) return;
@@ -618,10 +622,11 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 			offIdentity();
 			offHistory();
 			offHistoryOwner();
-			// Unmounting (a VS Code disconnect unmounts the controller): write the
-			// batch still in the store's debounce FIRST (the last detach drops
-			// it), then let each accessor write what it holds, and stop. A write
-			// that cannot reach the server now (the connection is gone) is lost.
+			// Unmounting: write the batch still in the store's debounce FIRST (the
+			// last detach drops it), then let each accessor write what it holds,
+			// and stop. A write held because nobody is vouched for (a VS Code
+			// disconnect unmounts the controller after the account is gone), or
+			// one the server cannot take now, is dropped.
 			offAttachWhenActive?.();
 			history.flush();
 			detachHistory?.();

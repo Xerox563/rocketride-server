@@ -89,7 +89,10 @@ describe('README claims', () => {
 		assert.match(prose, /waited for up to 24 hours/);
 		assert.equal(MAX_WATCHED_HISTORY_KEYS, 128);
 		assert.match(prose, /More than 128 history views open at once/);
-		assert.match(prose, /Another account signs in:\*\* the previous account's last unsaved\s+statements are dropped/);
+		assert.match(prose, /Another account signs in\*\* \(or the organization or team changes\): the previous account's last unsaved statements are dropped\. They are never written into another account's file\./);
+		assert.match(prose, /nothing is written while nobody is signed in\. They are written when the same account is known again while the sidebar is open\. They are dropped if the sidebar closes while nobody is signed in/);
+		const controller = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'sqlController.ts'), 'utf8');
+		assert.match(controller, /return now\.known \? now\.fingerprint : null;/, 'writes hold while nobody is vouched for');
 	});
 
 	it('links only to sections that exist', () => {
