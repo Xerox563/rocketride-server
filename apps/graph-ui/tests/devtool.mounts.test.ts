@@ -16,8 +16,12 @@ import { describe, it } from 'node:test';
 import { fakeWorld } from 'shared/explorer/connect/testing';
 import { findToolFactoryImports } from 'shared/explorer/devtool/testing';
 import { makeGraphEndpointStore, makeGraphHistory } from '../src/adapters/explorer';
+import { remoteSession } from '../src/devtool/frame';
 import type { IGraphFrameOptions } from '../src/devtool/frame';
-import { docKeyFor, routeDocKey } from '../src/devtool/protocol';
+import { CONTROLLER_NOT_READY_TEXT, controllerNotReadyError, frameFailureText, isNotSent, missingConnectionText } from '../src/devtool/frameText';
+import { askQuestion } from '../src/graph/ask';
+import { describeFailureOf } from '../src/graph/failures';
+import { OP, docKeyFor, routeDocKey } from '../src/devtool/protocol';
 import { APP_HISTORY_PRIVACY_NOTE, DEVTOOL_HISTORY_PRIVACY_NOTE, memoryPrefs } from '../src/env';
 import type { DocTarget } from '../src/env';
 import { createDataVersions } from '../src/graph/dataVersion';
@@ -26,7 +30,6 @@ import { createSchemaStore } from '../src/graph/schemaStore';
 import { COPY_BLOCKED_NOTE, GRID_NOTICE } from '../src/graph/wording';
 import { chooseWorkerStrategy } from '../src/layout/workerStrategy';
 import { ExplorerToolError } from 'shared/explorer';
-import { CONTROLLER_NOT_READY_TEXT, frameFailureText, missingConnectionText } from '../src/devtool/frameText';
 import { createRegionClaims } from '../src/realmRegion';
 import { createLocalGraphEnv } from '../src/localEnv';
 import { graphRow, mountController, mountFrame, readOnlyNode, signInVsCode, until, vscodeRealm } from './support/devtool';
@@ -296,6 +299,42 @@ describe('what a frame says when it cannot reach the controller', () => {
 		assert.doesNotMatch(CONTROLLER_NOT_READY_TEXT, /graph\./);
 		assert.equal(frameFailureText(new ExplorerToolError({ kind: 'stale', tool: 'x', message: 'dropped' }), true), null);
 		assert.equal(frameFailureText(new ExplorerToolError({ kind: 'unavailable', tool: 'x', message: 'Not signed in.' }), true), 'Not signed in.');
+	});
+
+	it('the base caller\'s REAL "was not sent" failure (no controller became ready) reads as "open the sidebar" for Run and Ask too; a call that was sent keeps its own failure', async () => {
+		const engine = vscodeRealm();
+		signInVsCode(engine.realm);
+		const mounted = mountController(engine.cm);
+		mounted.controller.dispose();
+		mounted.h.setHostConnection(true);
+		const { frame } = mountFrame(mounted.h, undefined);
+		await until(() => frame.connected.get(), 'the host connection reached the frame');
+		const notSent = await frame.caller.callReply(OP.historyList, { key: 'k1|x' }, { timeoutMs: 30 }).then(() => null, (error: unknown) => error);
+		assert.ok(isNotSent(notSent), `the premise: the base's own failure for a call no controller took (${String((notSent as Error)?.message)})`);
+		assert.equal(frameFailureText(notSent, false), CONTROLLER_NOT_READY_TEXT);
+		const endpoint = { key: 'k1|x', nodeName: 'People graph' } as never;
+		const noController = remoteSession({ callReply: () => Promise.reject(notSent), controllerReady: () => false } as never, endpoint, () => null);
+		for (const [tool, input] of [['read_query', { cypher: 'MATCH (n) RETURN n', params: {}, limit: 5 }], ['execute', { query: 'CREATE (n)', shape: 'graph' }], ['get_query', { question: 'q' }]] as const) {
+			await assert.rejects(noController.invoke(tool, input), (error: unknown) => error instanceof ExplorerToolError && error.kind === 'unavailable' && error.message === CONTROLLER_NOT_READY_TEXT && error.tool === tool, `${tool}: not sent, so it cannot have run`);
+		}
+		const lost = new ExplorerToolError({ kind: 'timeout', tool: 'graph.readQuery', message: "Lost the connection while 'graph.readQuery' was running. It may still have run; there is no way to cancel it from here." });
+		const sent = remoteSession({ callReply: () => Promise.reject(lost), controllerReady: () => false } as never, endpoint, () => null);
+		await assert.rejects(sent.invoke('read_query', { cypher: 'x', params: {}, limit: 5 }), (error: unknown) => error === lost, 'a call that was sent keeps "may still have run"');
+		const ready = remoteSession({ callReply: () => Promise.reject(notSent), controllerReady: () => true } as never, endpoint, () => null);
+		await assert.rejects(ready.invoke('read_query', { cypher: 'x', params: {}, limit: 5 }), (error: unknown) => error === notSent, 'with a controller up the failure is its own');
+		frame.dispose();
+	});
+
+	it('Run and Ask describe a call no controller took as "open the sidebar", with no pipeline hint under it', async () => {
+		const notice = describeFailureOf(CONTROLLER_NOT_READY_TEXT, controllerNotReadyError('read_query'), false);
+		assert.equal(notice.headline, CONTROLLER_NOT_READY_TEXT);
+		assert.equal(notice.hint, null, 'not "Start the pipeline": the pipeline is not the problem');
+		const asked = await askQuestion('who?', () => Promise.reject(controllerNotReadyError('get_query')), 'no model');
+		assert.ok(asked.kind === 'failed' && asked.headline === CONTROLLER_NOT_READY_TEXT && asked.hint === null, 'Ask says the same, not "unavailable for this pipeline"');
+	});
+
+	it('the frame mount keeps its styles in `styles` (no inline style objects)', () => {
+		assert.doesNotMatch(code(read('GraphDevToolFrame.tsx')), /style=\{\{/);
 	});
 
 	it('a connection a document cannot find says why: no sidebar yet, still looking, left out of a capped list, or not listed', () => {

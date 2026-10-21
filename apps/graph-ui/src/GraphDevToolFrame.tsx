@@ -55,6 +55,7 @@ import WriteConsoleView from './views/WriteConsoleView';
 const styles = {
 	root: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, overflow: 'hidden' } as CSSProperties,
 	center: { display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center' } as CSSProperties,
+	notice: { padding: '8px 24px 0' } as CSSProperties,
 };
 
 /** Said by a frame whose docKey names no Graph Explorer document. */
@@ -69,13 +70,16 @@ export const UNKNOWN_DOCUMENT_TITLE = 'This Graph Explorer document was not foun
 export const GraphDevTool: React.FC<DevToolProps> = ({ peer, channel, documents, docKey }) => {
 	const [frame, setFrame] = useState<IGraphFrame | null>(null);
 	useEffect(() => {
+		// The frame this effect builds, for its own error reporter (which runs only later, after the frame exists).
+		const mount: { frame: IGraphFrame | null } = { frame: null };
 		// A failure nobody awaits (a history record, a refresh a person asked for): said in words a person can act on
 		// ("open the sidebar" when no controller is up), never an internal op name; a dropped call says nothing.
 		const onError = (error: unknown): void => {
-			const text = frameFailureText(error, created.controllerReady.get());
+			const text = frameFailureText(error, mount.frame?.controllerReady.get() ?? false);
 			if (text !== null) announcer.announce(text);
 		};
 		const created: IGraphFrame = createGraphFrame({ peer, ...(channel ? { channel } : {}), ...(documents ? { documents } : {}), docKey: docKey ?? null, ...FRAME_PROTOCOL, onError });
+		mount.frame = created;
 		setFrame(created);
 		return () => {
 			created.dispose();
@@ -96,7 +100,7 @@ const FrameRoot: React.FC<{ frame: IGraphFrame }> = ({ frame }) => {
 			<div style={styles.root}>
 				<RealmLiveRegion />
 				{ready && !controllerReady && (
-					<div style={{ padding: '8px 24px 0' }}>
+					<div style={styles.notice}>
 						<Banner variant="info">{CONTROLLER_NOT_READY_TEXT}</Banner>
 					</div>
 				)}

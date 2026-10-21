@@ -32,9 +32,32 @@
 
 import { ExplorerToolError, readErrorMessage } from 'shared/explorer';
 import type { EndpointStatus } from 'shared/explorer';
+import { CONTROLLER_NOT_READY_TEXT } from '../graph/wording';
 
-/** Said when no controller is up to carry a frame's calls. */
-export const CONTROLLER_NOT_READY_TEXT = 'Open the Graph Explorer sidebar to connect: this document reaches the server through it.';
+export { CONTROLLER_NOT_READY_TEXT };
+
+/**
+ * Whether a failure is the base frame caller's "never sent": it waited for a controller to become ready and none did
+ * (kind `timeout`, worded "… was not sent: the tool's controller did not become ready …"; a test pins it against the
+ * real caller). Not to be confused with a call that WAS sent and timed out, which may still have run.
+ *
+ * @param error - The failure.
+ * @returns True for the never-sent failure.
+ */
+export function isNotSent(error: unknown): boolean {
+	return error instanceof ExplorerToolError && error.kind === 'timeout' && / was not sent: /.test(error.message);
+}
+
+/**
+ * The failure a Run or an Ask reports when no controller ever took its call: `unavailable` (it was not sent, so it
+ * cannot have run), in words a person can act on.
+ *
+ * @param tool - The tool it was for.
+ * @returns The error.
+ */
+export function controllerNotReadyError(tool: string): ExplorerToolError {
+	return new ExplorerToolError({ kind: 'unavailable', tool, message: CONTROLLER_NOT_READY_TEXT });
+}
 
 /**
  * What to announce for a failure nobody awaits.
@@ -45,7 +68,7 @@ export const CONTROLLER_NOT_READY_TEXT = 'Open the Graph Explorer sidebar to con
  */
 export function frameFailureText(error: unknown, controllerReady: boolean): string | null {
 	if (error instanceof ExplorerToolError && error.kind === 'stale') return null;
-	if (!controllerReady && error instanceof ExplorerToolError && error.kind === 'timeout') return CONTROLLER_NOT_READY_TEXT;
+	if (!controllerReady && isNotSent(error)) return CONTROLLER_NOT_READY_TEXT;
 	return readErrorMessage(error);
 }
 

@@ -58,6 +58,7 @@ import { TOOL } from '../adapters/explorer';
 import { DEVTOOL_HISTORY_PRIVACY_NOTE, memoryPrefs } from '../env';
 import type { DocTarget, IGraphEnv, IGraphHistory, IKeyed, IReadable } from '../env';
 import { asPreview } from '../graph/previews';
+import { controllerNotReadyError, isNotSent } from './frameText';
 import type { IGraphPreview } from '../graph/previews';
 import { EVENT, NO_ENDPOINTS, OP, STATE, docKeyFor, field, frameTimeoutFor, routeDocKey, toWire } from './protocol';
 import type { DocRoute, GraphOps, HistoryEdit, IActiveEvent, IFrameSchema, IGraphEndpointsState, IGraphHistoryView } from './protocol';
@@ -162,6 +163,9 @@ export function remoteSession(caller: IFrameCaller<GraphOps>, endpoint: IExplore
 			},
 			(error: unknown) => {
 				if (ticket !== undefined && !ticket.isCurrent()) throw stale();
+				// Never sent because no controller became ready (no sidebar yet): say so, not the base's op-naming text,
+				// and as `unavailable`, since it cannot have run (the write console then never says "may have applied").
+				if (isNotSent(error) && !caller.controllerReady()) throw controllerNotReadyError(tool);
 				throw error;
 			},
 		);
