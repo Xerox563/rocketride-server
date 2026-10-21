@@ -374,7 +374,7 @@ controller budget.
 [`frame.ts`](../../../apps/shared/src/explorer/devtool/frame.ts)).
 
 - **Failures are data.** The op lane carries a handler's failure as its message
-  only. So every engine-facing op returns `Reply<T>`: `{ ok: true, value }` or
+  only. So every op returns `Reply<T>`: `{ ok: true, value }` or
   `{ ok: false, error: { kind, code?, message, tool?, detail?, retryAfterS? } }`.
   - On the controller, `toReply(fn)` builds it. The lanes' own timeout texts
     ("did not answer within", "timed out after") become kind `timeout`, and
@@ -383,13 +383,26 @@ controller budget.
   - On the frame, `fromReply` (or `callReply`) rebuilds an `ExplorerToolError`
     equal to the original, so `failures.ts` and the `code` switches work
     unchanged.
+- **Void ops answer `Reply<null>`.** JSON has no `undefined`: in VS Code,
+  `{ ok: true, value: undefined }` arrives as `{ ok: true }`. So `replyOk` and
+  `toReply` turn an undefined value into `null`, and a success whose value was
+  dropped still reads as a Reply with value `null`.
 - **Deadlines.** Every call carries `deadlineAt` (the frame's now plus its
   `timeoutMs`). The controller refuses a call that has no deadline, or that
   arrives after it, without running it.
-- **The frame caller.** `createFrameCaller` needs an explicit `timeoutMs` on
-  every call and builds one controller function and one channel per frame
-  peer. It rejects every pending call as soon as `host:connection` turns false,
-  with kind `timeout`: the call may still have run.
+- **The frame caller.** `createFrameCaller` builds one controller function and
+  one channel per frame peer.
+  - Every call needs an explicit `timeoutMs`. A missing or unusable one is a
+    programming error: `call` and `callReply` **throw** a RangeError
+    synchronously, so a `.catch` on the returned promise never sees it.
+  - It rejects every pending call as soon as `host:connection` turns false,
+    with kind `timeout`: the call may still have run.
+  - A call made while `host:connection` is already false is rejected at once,
+    before anything is posted, with kind `unavailable`: it was not sent, so it
+    cannot have run. Before the host publishes the topic at all, calls pass.
+  - The controller's refusal of a call that arrived after its deadline (timers
+    throttled in a hidden webview) reaches a still-waiting frame as kind
+    `timeout`.
 
 **Controller wiring** ([`controller.ts`](../../../apps/shared/src/explorer/devtool/controller.ts)).
 `attachController({ peer, channel, createToolChannel, createToolOpServer, handlers })`
@@ -397,6 +410,29 @@ uses the host's channel, or builds one per peer, **before** it creates exactly
 one op server, and serves every handler through the deadline guard. Call it in a
 `useEffect` and return its `dispose` as the cleanup; never build the op server
 in `useMemo`, because StrictMode mounts twice.
+
+- **Every op answers a Reply.** The op map must declare a `Reply<T>` result and
+  an `IDeadline` in the params of every op, or `attachController<Ops>` does not
+  compile. Each handler is wrapped, so a lane cannot lose a failure's kind or
+  code by forgetting `toReply`:
+  - a returned Reply passes through;
+  - a plain value becomes `replyOk(value)`, and nothing at all becomes
+    `Reply<null>`;
+  - a tool failure that escapes becomes Reply data with its kind and code;
+  - programming errors still throw.
+
+  A returned object counts as a Reply only when its keys are exactly `ok` and
+  `value` (or `ok` and a valid `error`). So a plain result that has an `ok`
+  field, such as a probe result, is wrapped as data.
+- **The op server sees calls only.** It subscribes through a shim that drops
+  every other envelope, so a channel event that shares an op's name can never
+  run a handler. The controller's channel still hears every event.
+- **Held calls.** Calls the peer held while no controller was subscribed reach
+  the handlers once they are all registered, and the deadline decides whether
+  each one runs.
+- **Without a host channel** (a test-only path: both real hosts pass a sidebar
+  channel), the fallback channel's first subscription hands any held calls
+  over to the op server instead of swallowing them.
 
 **Identity** ([`identity.ts`](../../../apps/shared/src/explorer/devtool/identity.ts)).
 `createIdentityTracker({ cm })` reports `{ known, identity, fingerprint }` and
@@ -412,6 +448,12 @@ fails closed:
   manager ignores the `null` that topic carries after a sign-out.
 - A reconnect never brings back the account from before the drop. Account A,
   then a disconnect, then a reconnect as B reads A, unknown, B.
+- A topic delivery is newer than any root read still in flight, so a late read
+  never overrides it.
+- An anonymous or public attach never yields an identity. The SDK sets no
+  account for it, and the shell emits `shell:connected` only for an
+  authenticated client. The tracker also requires a client realm's client to
+  report `isAuthenticated()`.
 
 **Activation** ([`activation.ts`](../../../apps/shared/src/explorer/devtool/activation.ts)).
 rocket-ui mounts every pinned controller at boot, so the first discovery waits
@@ -429,20 +471,70 @@ realm (connected, `getClient()` null) counts the mount itself.
 **Discovery** ([`watch.ts`](../../../apps/shared/src/explorer/devtool/watch.ts)).
 `createDevToolDiscovery({ cm, client, identity, activation })` gives the store's
 watch. It allows discovery only while the identity is known **and** the tool is
-activated. It forwards identity changes (unknown resets the store), registers
-the task monitor only once discovery is allowed, and refreshes once whenever
-discovery becomes allowed.
+activated. It forwards identity changes (unknown resets the store), and
+registers the task monitor only once discovery is allowed. It refreshes once
+whenever discovery becomes allowed, and again when the identity switches
+between two known fingerprints. A change in permission hints alone refreshes
+nothing.
+
+**Frame identity** ([`frameIdentity.ts`](../../../apps/shared/src/explorer/devtool/frameIdentity.ts)).
+The controller publishes `{ fingerprint }` on the `identity` state topic with
+`publishIdentityState(channel, tracker)`. In each frame,
+`createFrameIdentityGuard({ channel, docKey, documents, onReset })` remembers
+the first fingerprint it sees:
+
+- a different one closes the document (`documents.close(docKey)`) and calls
+  `onReset('identity')`, so the frame clears its caches; a landing frame
+  (`docKey` undefined or `''`) is reset but never closed;
+- `null` calls `onReset('unknown')`;
+- `host:connection` turning false calls `onReset('disconnected')`.
+
+**Retained state stays small** ([`state.ts`](../../../apps/shared/src/explorer/devtool/state.ts)).
+The sidebar peer republishes the whole state map on every publish, and every
+frame replays it. So one snapshot may hold at most `MAX_RETAINED_STATE_BYTES`
+(64 KiB of JSON, measured by `jsonByteLength`). `guardRetainedState(channel)`
+refuses a bigger one, and `assertRetainedStateSize` lets a test pin the largest
+snapshots. Bulk data (rows, samples) travels as op results.
+
+**History in dev-tool mounts** ([`prefs.ts`](../../../apps/shared/src/explorer/devtool/prefs.ts)).
+Store tools get no workspace preferences, so the controller passes the history
+store `createFsPrefs({ cm, path: historyPrefsPath('<tool>'), owner: fingerprint, ownerNow })`.
+That is a file at `@/User/.workspace/rocketride.<tool>.history.json`, attached
+with `attachWhenLoaded(prefs, (api, owner) => store.attachPrefs(api, owner))`.
+
+- **Load first.** `client.fsStat` then `client.fsReadJson` run before the
+  attach, so the store never starts empty and its first write never clobbers
+  the file.
+- **First run vs unreadable file.** A missing file is a first run. A file that
+  exists but cannot be read, or is in an unknown or newer format, is never
+  written; history stays in memory for that session.
+- **One bag per identity fingerprint.** At most 8 bags are kept. An identity
+  change drops a pending write.
+- **Writes.** They are debounced and serialised, and the first one runs
+  `client.fsMkdir` on the folder. The file is capped at twice the 256 KB
+  history bag. Every fs request has an explicit timeout.
+- **Last writer wins across windows** (a known limitation). Drafts and
+  captions stay session-only.
 
 **Rules a controller must follow** (they come from the shell's `busPeer.ts`
 and `toolOps.ts`):
 
 - The sidebar peer has **one** live subscriber, whichever subscribed last.
   Nothing may subscribe after the op server, and the controller never calls
-  `peer.subscribe` itself.
+  `peer.subscribe` itself. Nothing at runtime can catch a stray subscriber, so
+  each app keeps two guards:
+  - **One wiring module.** `createToolChannel`, `createToolOpServer` and
+    `createToolController` are imported in ONE wiring module per app. A
+    source-reading test pins this with `findToolFactoryImports` from
+    `testing.ts`.
+  - **A mount test.** The lane's mount test ends with
+    `assertSidebarSubscribers(spy)`, which requires exactly two live
+    subscriptions: the channel, then the op server.
 - The live subscriber hears every frame event twice, and a remount replays the
-  last one. Events are idempotent hints only. Every mutation is an op, and
-  event names never match op names: the op server runs an event that matches
-  an op (the deadline guard refuses it).
+  last one. Events are idempotent hints only and every mutation is an op. Rod's
+  op server would run an event that shares an op's name, so
+  `attachController`'s shim drops events before the op server sees them. Even
+  so, keep event and op names disjoint.
 - Calls made while no controller is subscribed are held and handed to the next
   subscriber. `attachController` passes them to the handlers, so the deadline
   decides whether each one runs.
@@ -456,9 +548,16 @@ there, and no code is ever rebuilt from message text. There are no brokered
 
 **Testing** ([`testing.ts`](../../../apps/shared/src/explorer/devtool/testing.ts)).
 The harness runs the shell's **real** `busPeer`, `toolOps`, `toolChannel` and
-retained registry, imported from source by relative path. It adds
-`assertJsonSafe`, `settle()` and fake VS Code and rocket-ui realms whose rules
-cite `connection.ts`.
+retained registry, imported from source by relative path.
+
+- **The JSON wire.** By default `createDevToolHarness` carries every bus
+  payload as its JSON image, as VS Code's postMessage does, and records each
+  payload that JSON would change in `h.violations`. A test that asserts
+  `h.violations` is empty proves R4 end to end. `{ json: false }` models
+  rocket-ui's in-process realm.
+- **Helpers.** It adds `assertJsonSafe`, `settle()`, `spyPeer`, the two quirk-1
+  guards above, and fake VS Code and rocket-ui realms whose rules cite
+  `connection.ts`.
 
 ## Known limits
 
