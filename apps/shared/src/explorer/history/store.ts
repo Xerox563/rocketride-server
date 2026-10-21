@@ -172,6 +172,14 @@ export interface IHistoryStore<F extends string> {
 	setRecording(key: string, on: boolean): void;
 	/** The run bus: emitting here records (unless recording is off for that connection). */
 	runs: IRunEvents<F>;
+	/**
+	 * Write the batch still waiting in the debounce NOW, through the attached
+	 * accessor. Call it before the last detach when the mount is going away
+	 * under the same owner (an unmount, a disconnect): the last detach drops a
+	 * pending batch, so a run recorded in the final `persistDelayMs` would never
+	 * be written. A no-op when nothing is pending or nothing is attached.
+	 */
+	flush(): void;
 	/** The bounds this store enforces. */
 	limits: IHistoryLimits;
 }
@@ -682,5 +690,8 @@ export function createHistoryStore<F extends string>(options: IHistoryStoreOptio
 		setRecording,
 		runs,
 		limits,
+		flush: () => {
+			if (prefs !== null && persistTimer !== null) persistNow();
+		},
 	};
 }

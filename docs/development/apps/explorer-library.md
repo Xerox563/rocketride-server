@@ -256,7 +256,13 @@ the owner read with the shell's `useAuthUser`) and attaches again when it
 changes. An attach under a different owner, a sign-out included, first forgets
 every entry, switch, queued run and pending write held in memory, so one
 account's history is never shown to, merged into or written for the next one
-that signs in on the same page. Per-connection booleans use
+that signs in on the same page. Writes are batched (`persistDelayMs`, 300 ms
+by default) and the LAST detach drops a batch still waiting, so a mount that is
+going away under the same owner (an unmount, a disconnect) calls `flush()`
+first: it writes the pending batch at once through the attached accessor, and
+does nothing when nothing is pending or nothing is attached. Code outside React
+reads the store with `getHistory(key)`, `getRecording(key)` and
+`subscribe(listener)`. Per-connection booleans use
 `createConnectionFlags` ([`history/flags.ts`](../../../apps/shared/src/explorer/history/flags.ts)).
 
 **Legacy keys.** When `legacyKeyOf` maps a connection to its pre-v1 key (SQL
