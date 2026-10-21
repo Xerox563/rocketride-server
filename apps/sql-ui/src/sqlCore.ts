@@ -179,8 +179,17 @@ export interface SqlCore {
 	 * when none answers (or the answer is not one the app models).
 	 */
 	withSession<T>(connId: string, fn: (session: SqlSession, ctx: SessionContext) => Promise<T>, tool?: string): Promise<T>;
-	/** Stop a direct connection's temp pipeline, best effort (a no-op for a pipeline connection). */
-	release(connId: string): Promise<void>;
+	/**
+	 * Stop a direct connection's temp pipeline, best effort (a no-op for a
+	 * pipeline connection).
+	 *
+	 * @param connId - The connection.
+	 * @param key - The endpoint key the caller opened. When the connection's
+	 *   key is no longer this one (it was edited: another provider), its
+	 *   pipeline was replaced by the one the edit started, under the same
+	 *   project id: nothing is stopped (the idle TTL reaps any orphan).
+	 */
+	release(connId: string, key?: string): Promise<void>;
 	/** The New Connection picker's list: discovered endpoints a pipeline connection can be saved for. */
 	pickable(): Promise<SqlEndpoint[]>;
 	/** One service definition (the direct path's config schema). */
@@ -529,11 +538,14 @@ export function createSqlCore(opts: SqlCoreOptions): SqlCore {
 		keyOf: async (connId) => endpointKeyForConnection(await recordOf(connId, 'history')),
 		sessionFor,
 		withSession: (connId, fn, tool) => withSession(connId, fn, tool),
-		async release(connId) {
+		async release(connId, key) {
 			// Read before the first await: a delete that follows a release in the
 			// same turn must not hide the record from it.
 			const record = getSavedConnection(connId);
 			if (record?.mode !== 'direct' || !identity.get().known) return;
+			// Released by the key the caller opened: after an edit the project's
+			// pipeline is the edited connection's, and must not be stopped.
+			if (key !== undefined && key !== endpointKeyForConnection(record)) return;
 			const projectId = directProjectId(record);
 			try {
 				const token = await busRequest(cm, 'client.getTaskToken', { projectId, source: TOOLS_SOURCE_ID }, RELEASE_STEP_TIMEOUT_MS);

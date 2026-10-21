@@ -152,7 +152,7 @@ const SqlConnectionDocument: React.FC<{ connId: string; sidebarClosed: boolean; 
 	const releaseKey = directReleaseKey(endpoint);
 	useEffect(() => {
 		if (releaseKey === null) return undefined;
-		return () => { envRef.current.releaseEndpoint(connId); };
+		return () => { envRef.current.releaseEndpoint(connId, releaseKey); };
 	}, [releaseKey, connId]);
 
 	let body: React.ReactNode;

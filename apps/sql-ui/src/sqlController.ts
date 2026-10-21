@@ -449,7 +449,10 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 
 	const handlers: RequiredControllerHandlers<SqlOps> = {
 		'sql.resolveEndpoint': ({ connId }) => core.resolve(connId),
-		'sql.releaseEndpoint': async ({ connId }) => { await core.release(connId); },
+		'sql.releaseEndpoint': async ({ connId, key }) => {
+			if (key !== undefined && typeof key !== 'string') throw invalidInput('release', 'The endpoint key must be text.');
+			await core.release(connId, key);
+		},
 		'sql.discoverEndpoints': () => core.pickable(),
 		'sql.execute': ({ connId, sql, params, idempotent }) => {
 			checkExecuteInput({ sql, params, idempotent });

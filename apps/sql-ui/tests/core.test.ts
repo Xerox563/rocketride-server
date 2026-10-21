@@ -124,6 +124,39 @@ describe('resolution: a saved connection names one running endpoint', () => {
 		}
 	});
 
+	it('a document opened before its direct connection was edited releases by its OLD key: the pipeline the edit started is not stopped (DA CE-R2-4)', async () => {
+		const rows: IFakeTaskRow[] = [];
+		const forProvider = (provider: string): IFakeTaskRow => taskRow('sqlconn-c-direct', {
+			name: 'SQL: Scratch', source: 'tools_1', token: `tk_direct_${provider}`,
+			pipeline: { project_id: 'sqlconn-c-direct', name: 'SQL: Scratch', components: [{ id: 'tools_1', provider: 'tools' }, { id: `${provider}_1`, provider }] },
+		});
+		const { engine, core } = await rig([DIRECT], rows, (params) => (params.tool === 'execute' ? { rows: [], affected_rows: 0 } : { dialect: 'mysql' }));
+		engine.script['client.use'] = (params) => {
+			const provider = (params as { pipeline: { components: Array<{ provider: string }> } }).pipeline.components[1]!.provider;
+			rows.splice(0, rows.length, forProvider(provider));
+			return {};
+		};
+		engine.script['client.getTaskToken'] = () => rows[0]?.token ?? '';
+		engine.script['client.terminate'] = () => ({});
+		const terminated = (): string[] => engine.requests.filter((q) => q.op === 'client.terminate').map((q) => (q.params as { token: string }).token);
+		try {
+			const before = await core.resolve('c-direct');
+			await core.saveConnection({ ...DIRECT, provider: 'db_postgres' });
+			const after = await core.resolve('c-direct');
+			assert.notEqual(before.key, after.key, 'the edit changed the key');
+			// The document opened before the edit goes away: it releases by its key.
+			await core.release('c-direct', before.key);
+			assert.deepEqual(terminated(), [], 'the edited connection\'s pipeline keeps running');
+			// Its own document (and a delete, which names no key) do stop it.
+			await core.release('c-direct', after.key);
+			assert.deepEqual(terminated(), ['tk_direct_db_postgres']);
+			await core.release('c-direct');
+			assert.deepEqual(terminated(), ['tk_direct_db_postgres', 'tk_direct_db_postgres']);
+		} finally {
+			core.dispose();
+		}
+	});
+
 	it('starts a direct connection\'s temp pipeline with client.use (explicit timeout), then finds it by discovery', async () => {
 		const rows: IFakeTaskRow[] = [];
 		const { engine, core } = await rig([DIRECT], rows);

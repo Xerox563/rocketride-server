@@ -70,8 +70,8 @@ export function createLocalSqlEnv(core: SqlCore, isConnected: boolean, serviceTi
 		ready: isConnected,
 		getSession: (endpoint) => core.sessionFor(endpoint),
 		resolveEndpoint: (conn) => core.resolve(conn.id),
-		releaseEndpoint: (connId) => {
-			void core.release(connId).catch(() => undefined);
+		releaseEndpoint: (connId, key) => {
+			void core.release(connId, key).catch(() => undefined);
 		},
 		discoverEndpoints: () => core.pickable(),
 		getService: (provider) => core.getService(provider),

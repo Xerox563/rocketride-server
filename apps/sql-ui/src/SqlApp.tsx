@@ -251,7 +251,7 @@ const SqlAppReady: React.FC<{ docs: Documents; bridge: SqlSidebarBridge }> = ({ 
 		}
 		for (const key of openDirectKeysRef.current) {
 			const connId = connIdFromDirectKey(key);
-			if (!open.has(key) && connId !== null) env.releaseEndpoint(connId);
+			if (!open.has(key) && connId !== null) env.releaseEndpoint(connId, key);
 		}
 		openDirectKeysRef.current = open;
 	}, [state, env]);

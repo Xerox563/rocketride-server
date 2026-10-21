@@ -79,7 +79,7 @@ export interface SqlOps extends ToolOpMap {
 	'sql.resolveEndpoint': ToolOpSpec<IDeadline & { connId: string }, Reply<SqlEndpoint>>;
 	/** Stop a direct connection's temp pipeline, best effort (no-op for a
 	 *  pipeline connection). Fire-and-forget callers may ignore the result. */
-	'sql.releaseEndpoint': ToolOpSpec<IDeadline & { connId: string }, Reply<null>>;
+	'sql.releaseEndpoint': ToolOpSpec<IDeadline & { connId: string; key?: string }, Reply<null>>;
 	/** The New Connection picker's list: discovered endpoints a pipeline
 	 *  connection can be saved for (the caller's own development runs). */
 	'sql.discoverEndpoints': ToolOpSpec<IDeadline, Reply<SqlEndpoint[]>>;

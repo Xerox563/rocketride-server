@@ -813,7 +813,7 @@ describe('a direct connection\'s temp pipeline is released when its document goe
 	it('the document\'s release effect depends on that key and the connection id only, never on env or the endpoint object', () => {
 		const devTool = source('SqlDevTool.tsx');
 		const doc = devTool.slice(devTool.indexOf('const SqlConnectionDocument'), devTool.indexOf('/** A document that cannot open yet'));
-		assert.match(doc, /const releaseKey = directReleaseKey\(endpoint\);\s*useEffect\(\(\) => \{\s*if \(releaseKey === null\) return undefined;\s*return \(\) => \{ envRef\.current\.releaseEndpoint\(connId\); \};\s*\}, \[releaseKey, connId\]\);/);
+		assert.match(doc, /const releaseKey = directReleaseKey\(endpoint\);\s*useEffect\(\(\) => \{\s*if \(releaseKey === null\) return undefined;\s*return \(\) => \{ envRef\.current\.releaseEndpoint\(connId, releaseKey\); \};\s*\}, \[releaseKey, connId\]\);/);
 		assert.equal((doc.match(/releaseEndpoint\(/g) ?? []).length, 1, 'one release site');
 		assert.doesNotMatch(doc, /\}, \[endpoint, env, connId\]\);/);
 	});

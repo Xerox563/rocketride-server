@@ -73,8 +73,10 @@ export interface SqlEnv {
 	resolveEndpoint(conn: SavedSqlConnection): Promise<SqlEndpoint>;
 	/** Stop a direct connection's temp pipeline, fire-and-forget (best
 	 *  effort — the idle TTL is the backstop). A no-op for a pipeline
-	 *  connection. Named by the saved connection's id. */
-	releaseEndpoint(connId: string): void;
+	 *  connection. Named by the saved connection's id, and the endpoint key
+	 *  the caller opened: nothing is stopped once the connection's key is
+	 *  another (an edit started a new pipeline under the same project). */
+	releaseEndpoint(connId: string, key?: string): void;
 	/** The New Connection picker's list: endpoints a pipeline connection can be saved for. */
 	discoverEndpoints(): Promise<SqlEndpoint[]>;
 	/** One service definition (the direct path's config schema). */
@@ -222,9 +224,9 @@ export function createRemoteSqlEnv(caller: IFrameCaller<SqlOps>, ready: boolean,
 		ready,
 		getSession: (endpoint) => remoteSession(caller, endpoint),
 		resolveEndpoint: (conn) => caller.callReply('sql.resolveEndpoint', { connId: conn.id }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.resolveEndpoint'] }),
-		releaseEndpoint: (connId) => {
+		releaseEndpoint: (connId, key) => {
 			// Fire-and-forget: a late or lost reply is fine — the TTL reaps.
-			void caller.callReply('sql.releaseEndpoint', { connId }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.releaseEndpoint'] }).catch(() => undefined);
+			void caller.callReply('sql.releaseEndpoint', { connId, ...(key !== undefined ? { key } : {}) }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.releaseEndpoint'] }).catch(() => undefined);
 		},
 		discoverEndpoints: () => caller.callReply('sql.discoverEndpoints', {}, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.discoverEndpoints'] }),
 		getService: (provider) => caller.callReply('sql.getService', { provider }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.getService'] }),
