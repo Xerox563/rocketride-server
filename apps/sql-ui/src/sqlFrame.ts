@@ -222,6 +222,24 @@ function wireSqlDocumentHost(channel: TypedToolChannel<SqlStateMap, SqlEventMap>
 // ONE FRAME MOUNT
 // =============================================================================
 
+/**
+ * Follow whether the controller vouches for a signed-in account: its retained
+ * `identity` state carries a fingerprint. A frame calls nothing on its own
+ * (a first schema read, opening its connection) until it does: before that,
+ * the controller would only answer "not signed in", and the frame would show
+ * and announce a refusal the next snapshot makes moot.
+ *
+ * @param channel - The frame's channel.
+ * @param onChange - Told on every snapshot (the retained one at once).
+ * @returns Stop following.
+ */
+export function followVouched(channel: ToolChannel, onChange: (vouched: boolean) => void): () => void {
+	return sqlChannel(channel).onState('identity', (snapshot: unknown) => {
+		const value = snapshot !== null && typeof snapshot === 'object' ? (snapshot as { fingerprint?: unknown }).fingerprint : undefined;
+		onChange(typeof value === 'string' && value !== '');
+	});
+}
+
 /** What {@link attachSqlFrame} needs (DevToolProps plus the injected factories). */
 export interface SqlFrameOptions {
 	/** The frame's peer. */

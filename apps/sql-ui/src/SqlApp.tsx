@@ -261,7 +261,7 @@ const SqlAppReady: React.FC<{ docs: Documents; bridge: SqlSidebarBridge }> = ({ 
 
 	return (
 		<div style={styles.container}>
-			{/* One polite live region for the whole app; announce() writes to it. */}
+			{/* The realm's one polite live region (shared with any dev-tool frames); announce() writes to it. */}
 			<LiveRegion />
 
 			{/* The history store only writes while a bridge is mounted. This one

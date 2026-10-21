@@ -47,7 +47,7 @@ import type { HistoryEntry } from '../src/history/types';
 import { refreshSchema, schemaSnapshot } from '../src/schema/schemaStore';
 import { attachSqlController } from '../src/sqlController';
 import type { SqlControllerMount } from '../src/sqlController';
-import { attachSqlFrame, sqlChannel } from '../src/sqlFrame';
+import { attachSqlFrame, followVouched, sqlChannel } from '../src/sqlFrame';
 import { createRemoteSqlEnv } from '../src/sqlEnv';
 import { createRemoteHistory } from '../src/history/remoteHistory';
 import { SQL_OP_TIMEOUT_MS } from '../src/sqlTimeouts';
@@ -346,6 +346,40 @@ describe('T7 — an account change in a mounted controller: nothing of the previ
 	});
 });
 
+describe('T7 — a frame calls nothing on its own until the controller vouches for an account', () => {
+	it('follows the controller\'s retained identity: unknown, then signed in, then signed out', async () => {
+		const r = await vscodeRig();
+		const seen: boolean[] = [];
+		const off = followVouched(r.frame.channel, (vouched) => { seen.push(vouched); });
+		try {
+			r.h.setHostConnection(true);
+			await settle();
+			assert.equal(seen.at(-1) ?? false, false, 'nobody yet');
+			r.engine.realm.root.connect(USER_A);
+			await until(() => seen.at(-1) === true, 'account A');
+			r.engine.realm.root.accountChanged(null);
+			await until(() => seen.at(-1) === false, 'the sign-out');
+		} finally {
+			off();
+			r.dispose();
+		}
+	});
+
+	it('a frame is ready (opening its connection, the first schema read, run and apply) only with the host connection AND a vouched account', () => {
+		const devTool = fs.readFileSync(path.join(SRC, 'SqlDevTool.tsx'), 'utf8');
+		assert.match(devTool, /const vouched = useVouched\(toolChannel\);/);
+		assert.match(devTool, /const ready = engineReady && vouched;/);
+		assert.match(devTool, /createRemoteSqlEnv\(mount\.frame\.caller, ready,/);
+		// The automatic calls are the ones gated on env.ready.
+		const doc = devTool.slice(devTool.indexOf('const SqlConnectionDocument'));
+		assert.match(doc, /if \(!env\.ready \|\| !conn\) return;/);
+		const view = fs.readFileSync(path.join(SRC, 'views', 'ConnectionView.tsx'), 'utf8');
+		assert.match(view, /if \(env\.ready && snapshot\.status === 'idle'\)/);
+		const diagram = fs.readFileSync(path.join(SRC, 'views', 'DiagramView.tsx'), 'utf8');
+		assert.match(diagram, /if \(!env\.ready \|\| engineeredRef\.current\) return;/);
+	});
+});
+
 describe('T8 — with host:connection false, frames disable run/apply and reject pending calls; the sidebar uses isConnected', () => {
 	it('a pending call is rejected the moment the host connection drops (it may still have run), and a new one is not sent', async () => {
 		let release: () => void = () => undefined;
@@ -374,7 +408,8 @@ describe('T8 — with host:connection false, frames disable run/apply and reject
 	it('run and apply follow the host connection in frames, and the sidebar follows the shell\'s isConnected', () => {
 		const devTool = fs.readFileSync(path.join(SRC, 'SqlDevTool.tsx'), 'utf8');
 		assert.match(devTool, /const engineReady = useConnectionReady\(toolChannel\);/);
-		assert.match(devTool, /createRemoteSqlEnv\(mount\.frame\.caller, engineReady,/);
+		assert.match(devTool, /const ready = engineReady && vouched;/);
+		assert.match(devTool, /createRemoteSqlEnv\(mount\.frame\.caller, ready,/);
 		const query = fs.readFileSync(path.join(SRC, 'views', 'QueryView.tsx'), 'utf8');
 		assert.match(query, /const canRun = env\.ready && /);
 		const design = fs.readFileSync(path.join(SRC, 'views', 'TableDesignView.tsx'), 'utf8');

@@ -582,7 +582,8 @@ these differences:
 - **Account changes close documents.** A document opened under one account
   closes itself when another account signs in, and forgets the schema it was
   showing; while nobody can be vouched for (signed out, connection dropped) it
-  only forgets the schema.
+  only forgets the schema, and it opens or reads nothing on its own until an
+  account is signed in again.
 - **Engine error codes.** In VS Code the engine's error codes do not reach
   the tool, so a statement refused while its pipeline restarts is not sent
   again (see [Each statement commits on its own](#each-statement-commits-on-its-own));

@@ -41,13 +41,13 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
-import type { DevToolProps } from 'shell';
+import type { DevToolProps, ToolChannel } from 'shell';
 import { EmptyState, useConnectionReady } from 'shell';
 import { isDirectEndpointKey, useSavedConnections, useSavedConnectionsStatus } from './connect';
 import type { SqlEndpoint } from './connect';
 import { setActiveConnection } from './navigation';
 import { SQL_TOOL_PROTOCOL, frameChannel } from './sqlBridge';
-import { attachSqlFrame, connectionDocState, routeDocKey, sqlChannel } from './sqlFrame';
+import { attachSqlFrame, connectionDocState, followVouched, routeDocKey, sqlChannel } from './sqlFrame';
 import type { SqlFrameMount } from './sqlFrame';
 import { createRemoteHistory } from './history/remoteHistory';
 import type { RemoteHistory } from './history/remoteHistory';
@@ -170,13 +170,24 @@ const SqlConnectionDocument: React.FC<{ connId: string; onOpenError: (message: s
 
 	return (
 		<div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0, height: '100%' }}>
-			<LiveRegion />
 			{body}
 			{/* Sidebar-requested dialogs — one host per realm (see the claim). */}
 			<OverlayHost />
 		</div>
 	);
 };
+
+/**
+ * Whether the controller vouches for a signed-in account (see followVouched).
+ *
+ * @param channel - The frame's channel.
+ * @returns True once its retained identity carries a fingerprint.
+ */
+function useVouched(channel: ToolChannel): boolean {
+	const [vouched, setVouched] = useState(false);
+	useEffect(() => followVouched(channel, setVouched), [channel]);
+	return vouched;
+}
 
 /**
  * Dev-tool FRAME. With a `docKey` (a saved connection id, opened through
@@ -220,8 +231,13 @@ export const SqlDevTool: React.FC<DevToolProps> = ({ peer, channel, docKey, docu
 
 	// FRAMES HOLD NO ROCKETRIDE CLIENT: run/apply enablement is the host's
 	// `host:connection` snapshot, and every call is a controller op.
+	// ...and on a signed-in account the controller vouches for: until then a
+	// frame's own first calls (opening its connection, the first schema read)
+	// would only be refused as "not signed in", and announced.
 	const engineReady = useConnectionReady(toolChannel);
-	const env = useMemo(() => (mount ? createRemoteSqlEnv(mount.frame.caller, engineReady, mount.frame.owner, mount.history) : null), [mount, engineReady]);
+	const vouched = useVouched(toolChannel);
+	const ready = engineReady && vouched;
+	const env = useMemo(() => (mount ? createRemoteSqlEnv(mount.frame.caller, ready, mount.frame.owner, mount.history) : null), [mount, ready]);
 	const onOpenError = useCallback((message: string) => sqlChannel(toolChannel).sendEvent('openError', message), [toolChannel]);
 
 	if (!env) return null;
@@ -247,7 +263,13 @@ export const SqlDevTool: React.FC<DevToolProps> = ({ peer, channel, docKey, docu
 			</div>
 		);
 	}
-	return <SqlEnvProvider value={env}>{body}</SqlEnvProvider>;
+	return (
+		<SqlEnvProvider value={env}>
+			{/* The realm's one live region (the first alive mount renders it). */}
+			<LiveRegion />
+			{body}
+		</SqlEnvProvider>
+	);
 };
 
 export default SqlDevTool;
