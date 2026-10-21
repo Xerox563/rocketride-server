@@ -196,16 +196,25 @@ describe('identity and activation gate discovery', () => {
 		}
 	});
 
-	it('a dev-tool controller reads the saved list once signed in, but discovers only after it is activated', async () => {
+	it('a dev-tool controller signed in reads nothing, the saved list included, until it is activated (R7); then it reads and discovers', async () => {
 		const engine = scriptedClientRealm(engineScript([PIPELINE], [devRow()]));
 		const core = createSqlCore({ cm: engine.cm, appId: SQL_APP_ID, mode: 'devtool', focusTarget: null });
 		try {
 			engine.realm.login(USER);
-			await until(() => engine.ops().includes('client.fsReadJson'), 'the saved list to be read');
 			await new Promise<void>((resolve) => { setTimeout(resolve, 400); });
-			assert.equal(engine.ops().includes('client.getTasks'), false, 'no discovery before activation');
+			assert.deepEqual(engine.ops(), [], 'no engine request before activation');
 			engine.realm.activate(SQL_APP_ID);
+			await until(() => engine.ops().includes('client.fsReadJson'), 'the saved list to be read');
 			await until(() => engine.ops().includes('client.getTasks'), 'the first discovery');
+		} finally {
+			core.dispose();
+		}
+	});
+
+	it('the full app reads its saved list as soon as it is signed in (its gate is open from the start)', async () => {
+		const { engine, core } = await rig([PIPELINE], [devRow()]);
+		try {
+			await until(() => engine.ops().includes('client.fsReadJson'), 'the saved list to be read');
 		} finally {
 			core.dispose();
 		}

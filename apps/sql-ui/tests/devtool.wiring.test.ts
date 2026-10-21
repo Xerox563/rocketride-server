@@ -43,7 +43,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ExplorerToolError } from 'shared/explorer/errors';
-import { assertJsonSafe, assertSidebarSubscribers, findToolFactoryImports, manualNow, settle } from 'shared/explorer/devtool/testing';
+import { assertJsonSafe, assertSidebarSubscribers, createDevToolHarness, findToolFactoryImports, manualNow, settle, shellProtocol, spyPeer } from 'shared/explorer/devtool/testing';
 import { BUS_TOOL_MARGIN_MS, FRAME_OP_MARGIN_MS, SDK_TIMEOUT_SLACK_MS, UNBOUNDED_TOOL_TIMEOUT_MS } from 'shared/explorer/devtool/timeouts';
 import { MAX_RETAINED_STATE_BYTES, MAX_RETAINED_TOTAL_BYTES, jsonByteLength } from 'shared/explorer/devtool/state';
 import { CONTROLLER_STATE_TOPIC, RESERVED_STATE_PREFIX } from 'shared/explorer/devtool/realm';
@@ -51,12 +51,13 @@ import { SQL_APP_ID } from '../src/appId';
 import { applyReplicaConnections, deleteSavedConnection, endpointForConnection, endpointKeyForConnection, getSavedConnections, getSavedConnectionsPartial, getSavedConnectionsStatus, ownSavedConnections, resetSavedConnections } from '../src/connect';
 import type { PipelineBoundConnection, SavedSqlConnection } from '../src/connect';
 import { lookupConnection } from '../src/connectionRecord';
-import { MAX_WATCHED_HISTORY_KEYS, checkExecuteInput, checkSchemaInput } from '../src/sqlController';
+import { MAX_WATCHED_HISTORY_KEYS, attachSqlController, checkExecuteInput, checkSchemaInput } from '../src/sqlController';
 import type { ConnectionsState, HistoryState } from '../src/ops';
 import { connectionDocState, directReleaseKey, routeDocKey, sqlChannel } from '../src/sqlFrame';
 import { RESOLVE_BUDGET_MS, SQL_OP_TIMEOUT_MS } from '../src/sqlTimeouts';
 import { DIALECT_WAIT_MS, GET_SCHEMA_WAIT_MS, REFRESH_SCHEMA_WAIT_MS } from '../src/connect/tools';
-import { USER, until } from './realm';
+import { USER, engineScript, scriptedClientRealm, until } from './realm';
+import { taskRow } from './support';
 import { DIRECT, PIPELINE, postgres, rig, toolRequests } from './devtoolRig';
 
 const SRC = path.resolve(__dirname, '..', 'src');
@@ -380,27 +381,47 @@ describe('T5 — mount -> dispose -> mount leaves one live op server; ops answer
 // =============================================================================
 
 describe('T6 — the sidebar mount posts nothing but retained state, opens no document, and discovers only once activated', () => {
-	it('zero events or calls and zero documents.open at mount; the first discovery waits for activation, then the first op opens it', async () => {
-		const r = await rig({ docKey: '' });
+	it('zero events or calls and zero documents.open at mount, and no engine request at all until activation; then the first op opens it', async () => {
+		const r = await rig({ docKey: '', activate: false });
 		try {
-			await until(() => r.engine.ops().includes('client.fsReadJson'), 'the saved list');
 			await new Promise<void>((resolve) => { setTimeout(resolve, 400); });
 			const posted = r.spy.posts.map((post) => (post as { __rrtool?: string }).__rrtool);
 			assert.ok(posted.length > 0, 'retained state was published');
 			assert.deepEqual(posted.filter((kind) => kind !== 'state'), [], 'only state publishes at mount');
 			assert.deepEqual(r.docs.opened, []);
-			assert.equal(r.engine.ops().includes('client.getTasks'), false, 'no discovery before activation');
+			assert.deepEqual(r.engine.ops(), [], 'no engine request before activation: no discovery, no saved list, no history file');
 			// The first op from a frame activates the controller.
 			await r.env.discoverEndpoints();
 			assert.equal(r.mount.core.activation.reason(), 'op');
 			assert.ok(r.engine.ops().includes('client.getTasks'));
+			await until(() => r.engine.ops().includes('client.fsReadJson') && r.engine.ops().includes('client.fsStat'), 'the saved list and the history file, once active');
 		} finally {
 			r.dispose();
 		}
 	});
 
+	it('a boot with the account already known (rocket-ui mounts every pinned sidebar) makes no engine request until the tool is activated (DA CE-6)', async () => {
+		resetSavedConnections({ force: true });
+		const h = createDevToolHarness(SQL_APP_ID, { json: true });
+		const engine = scriptedClientRealm(engineScript([PIPELINE], [taskRow('p1')], postgres, {}));
+		engine.realm.login(USER);
+		h.setHostConnection(true);
+		const spy = spyPeer(h.sidebarPeer);
+		const mount = attachSqlController({ peer: spy.peer, channel: shellProtocol.createToolChannel(spy.peer), cm: engine.cm, protocol: shellProtocol, focusTarget: null });
+		try {
+			await settle();
+			await new Promise<void>((resolve) => { setTimeout(resolve, 100); });
+			assert.deepEqual(engine.ops(), [], 'nothing before activation');
+			engine.realm.activate(SQL_APP_ID);
+			await until(() => getSavedConnectionsStatus() === 'ready', 'the saved list once activated');
+			await until(() => engine.ops().includes('client.fsStat') && engine.ops().includes('client.getTasks'), 'the history file and the first discovery');
+		} finally {
+			mount.dispose();
+		}
+	});
+
 	it('documents open on user actions only, and each one activates', async () => {
-		const r = await rig({ docKey: '' });
+		const r = await rig({ docKey: '', activate: false });
 		try {
 			r.mount.bridge.openConnection(PIPELINE);
 			assert.deepEqual(r.docs.opened, [['c-pipe', 'Orders']]);

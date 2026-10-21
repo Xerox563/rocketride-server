@@ -305,6 +305,8 @@ function applyHistoryEdit(store: SqlHistoryStore, key: string, edit: HistoryEdit
  * @returns The mount.
  */
 export function attachSqlController(opts: SqlControllerOptions): SqlControllerMount {
+	/** Set by dispose (declared first: callbacks below may run during the mount). */
+	let disposed = false;
 	const core = createSqlCore({
 		cm: opts.cm,
 		appId: SQL_APP_ID,
@@ -342,6 +344,7 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 	 */
 	let parked: IFsPrefs | null = null;
 	let detachHistory: (() => void) | null = null;
+	let offAttachWhenActive: (() => void) | null = null;
 	/** Keys frames have read, with the snapshot last seen and its revision. */
 	const watched = new Map<string, { entries: unknown; rev: number; recording: boolean }>();
 	let publishHistory: () => void = () => undefined;
@@ -404,7 +407,24 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 		// previous account's statements. A sign-out (owner null) forgets too.
 		history.attachPrefs(memoryPrefs(), owner)();
 		storage = owner === null ? 'none' : 'file';
+		offAttachWhenActive?.();
+		offAttachWhenActive = null;
 		if (owner !== null) {
+			// The file is read only once the tool is activated (R7).
+			offAttachWhenActive = core.activation.subscribe(() => {
+				if (historyOwner === owner && !disposed) attachFile(owner);
+			});
+		}
+		publishHistory();
+	};
+
+	/**
+	 * Attach the history store to an account's file (once the tool is active).
+	 *
+	 * @param owner - The account.
+	 */
+	const attachFile = (owner: string): void => {
+		{
 			let accessor: IFsPrefs;
 			if (parked !== null && parked.owner === owner) {
 				// The same account is back: its accessor carries on, and what it
@@ -421,7 +441,6 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 			// Load FIRST, then attach (the store reads its preferences at attach).
 			detachHistory = attachWhenLoaded(accessor, (api, fingerprint) => history.attachPrefs(api, fingerprint));
 		}
-		publishHistory();
 	};
 
 	const handlers: RequiredControllerHandlers<SqlOps> = {
@@ -585,7 +604,6 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 		},
 	};
 
-	let disposed = false;
 	return {
 		bridge,
 		core,
@@ -604,6 +622,7 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 			// batch still in the store's debounce FIRST (the last detach drops
 			// it), then let each accessor write what it holds, and stop. A write
 			// that cannot reach the server now (the connection is gone) is lost.
+			offAttachWhenActive?.();
 			history.flush();
 			detachHistory?.();
 			void prefs?.close();

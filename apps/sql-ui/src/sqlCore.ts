@@ -340,13 +340,22 @@ export function createSqlCore(opts: SqlCoreOptions): SqlCore {
 	// (a frame in the same realm) never overwrites it.
 	const releaseList = ownSavedConnections();
 	let listOwner: string | null = null;
+	let offLoadWhenActive: (() => void) | null = null;
 	const followIdentity = (snapshot: IIdentitySnapshot): void => {
 		const owner = snapshot.known ? snapshot.fingerprint : null;
 		if (owner === listOwner) return;
 		listOwner = owner;
 		// The list is per user: a new identity (or none) must not see the last one's.
 		resetSavedConnections({ force: true });
-		if (owner !== null) void loadSavedConnections(fs);
+		offLoadWhenActive?.();
+		offLoadWhenActive = null;
+		if (owner === null) return;
+		// Read only once the tool is activated (R7): rocket-ui mounts every
+		// pinned sidebar at boot, and none may reach the engine for that alone.
+		// The full app opens its gate at once.
+		offLoadWhenActive = activation.subscribe(() => {
+			if (!disposed && listOwner === owner) void loadSavedConnections(fs);
+		});
 	};
 	followIdentity(identity.get());
 	const offIdentity = identity.subscribe(followIdentity);
@@ -561,6 +570,7 @@ export function createSqlCore(opts: SqlCoreOptions): SqlCore {
 			if (disposed) return;
 			disposed = true;
 			offIdentity();
+			offLoadWhenActive?.();
 			releaseList();
 			detachStore();
 			discovery.dispose();

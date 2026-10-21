@@ -94,7 +94,7 @@ export interface IRig {
  * @param opts - The engine's saved list, tasks and tool answers; whether to sign in.
  * @returns The rig.
  */
-export async function rig(opts: { saved?: SavedSqlConnection[]; rows?: IFakeTaskRow[]; tool?: (params: { tool: string; input?: Record<string, unknown> }) => unknown; login?: boolean; now?: () => number; docKey?: string; files?: Record<string, unknown> } = {}): Promise<IRig> {
+export async function rig(opts: { saved?: SavedSqlConnection[]; rows?: IFakeTaskRow[]; tool?: (params: { tool: string; input?: Record<string, unknown> }) => unknown; login?: boolean; activate?: boolean; now?: () => number; docKey?: string; files?: Record<string, unknown> } = {}): Promise<IRig> {
 	resetSavedConnections({ force: true });
 	const h = createDevToolHarness(SQL_APP_ID, { json: true });
 	const engine = scriptedClientRealm(engineScript(opts.saved ?? [PIPELINE, DIRECT], opts.rows ?? [taskRow('p1')], opts.tool ?? postgres, opts.files ?? {}));
@@ -122,6 +122,9 @@ export async function rig(opts: { saved?: SavedSqlConnection[]; rows?: IFakeTask
 	const controllerOpts = { peer: spy.peer, channel: hostChannel, documents, cm: engine.cm, protocol, focusTarget: null, ...(opts.now ? { now: opts.now } : {}) };
 	let mount = attachSqlController(controllerOpts);
 	if (opts.login !== false) engine.realm.login(USER);
+	// The user selected the tool's sidebar (rocket-ui's shell:toolSidebarActivated):
+	// before that the controller reads nothing from the engine (R7).
+	if (opts.activate !== false) engine.realm.activate(SQL_APP_ID);
 	h.setHostConnection(true);
 	const frame = attachSqlFrame({ peer: h.newFramePeer(), docKey: opts.docKey ?? 'c-pipe', documents, protocol, ...(opts.now ? { now: opts.now } : {}) });
 	const history = createRemoteHistory({ caller: frame.caller, channel: sqlChannel(frame.channel), owner: frame.owner });
