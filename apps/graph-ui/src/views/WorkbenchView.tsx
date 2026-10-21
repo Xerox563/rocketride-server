@@ -28,18 +28,22 @@
 // `read_query`, Ask only previews, a label or type click in the sidebar runs the
 // generated 25-row preview, and the graph's expand/connect/path actions are reads.
 // Changing data is the write console's job, and exists only where the node allows it.
+//
+// A sidebar click is a preview REQUEST (graph/previews.ts): this workbench takes it
+// by its nonce, once, whenever it mounts, so the click that summoned a cold dev-tool
+// webview is not lost. A request waits while this connection has not answered its
+// check yet, instead of being dropped.
 // =============================================================================
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Button, ContentHeader, EmptyState, useShellConnection } from 'shell';
+import { Button, ContentHeader, EmptyState } from 'shell';
 import type { IExplorerEndpoint } from 'shared/explorer';
-import { announcer, graphEndpoints } from '../adapters/explorer';
-import { useGraphEndpoints, useWorkbenchRequest } from '../adapters/react';
+import { announcer } from '../adapters/explorer';
 import { typePreview, labelPreview, isRefusal } from '../cypher/recipes';
-import { CONNECTIONS_URI, writeUri } from '../graph/addresses';
+import { useGraphEndpoints, useGraphEnv, usePendingPreview } from '../env';
 import { connectionView, surfaceGate } from '../graph/connections';
 import { canWrite, engineText, parseDialect, targetText } from '../graph/dialect';
-import { getDocs } from '../docs';
+import { previewFor } from '../graph/previews';
 import { GraphIcon } from '../icons';
 import { styles } from '../styles';
 import AskBar from '../components/AskBar';
@@ -47,8 +51,8 @@ import HistoryPanel from '../components/HistoryPanel';
 import RunSurface from '../components/RunSurface';
 import { createLoadSlot } from '../graph/loadSlot';
 
-/** A sidebar request older than this when the workbench mounts is not replayed. */
-const REQUEST_FRESH_MS = 3000;
+/** Nothing is remembered here: a request is taken through the env, which clears it for every later mount. */
+const NONE_TAKEN: ReadonlySet<string> = new Set();
 
 /** Props. */
 export interface IWorkbenchViewProps {
@@ -62,7 +66,7 @@ export interface IWorkbenchViewProps {
  * @returns The view.
  */
 export const WorkbenchView: React.FC<IWorkbenchViewProps> = ({ endpoint }) => {
-	const { client } = useShellConnection();
+	const env = useGraphEnv();
 	const { probes } = useGraphEndpoints();
 	const probe = probes[endpoint.key];
 	const dialect = useMemo(() => (probe?.ok ? parseDialect(probe.info) : null), [probe]);
@@ -89,16 +93,18 @@ export const WorkbenchView: React.FC<IWorkbenchViewProps> = ({ endpoint }) => {
 
 	// No probe yet (opened from a stale link or right after a refresh): ask the node who it is.
 	useEffect(() => {
-		if (client && !probe && endpoint.state === 'ready') void graphEndpoints.probe(client, endpoint.key);
-	}, [client, probe, endpoint.key, endpoint.state]);
+		if (env.ready && !probe && endpoint.state === 'ready') void env.probe(endpoint.key);
+	}, [env, probe, endpoint.key, endpoint.state]);
 
-	// A click on a label or relationship type in the sidebar: show and run the 25-row preview.
-	const request = useWorkbenchRequest();
-	const handled = useRef(0);
+	// A click on a label or relationship type in the sidebar: show and run the 25-row preview. The request is TAKEN
+	// (by nonce) only when it can be acted on; while the connection is still being checked it waits.
+	const pending = usePendingPreview();
 	useEffect(() => {
-		if (!request || request.seq === handled.current || request.endpointKey !== endpoint.key) return;
-		handled.current = request.seq;
-		if (Date.now() - request.at > REQUEST_FRESH_MS) return;
+		const request = previewFor(pending, endpoint.key, NONE_TAKEN, Date.now());
+		if (!request) return;
+		const waiting = !dialect && !probe && (endpoint.state === 'ready' || endpoint.state === 'probing');
+		if (waiting) return;
+		if (!env.previews.consume(request.nonce)) return;
 		if (!dialect) {
 			announcer.announce('This connection has not answered yet, so the preview was not run.');
 			return;
@@ -111,10 +117,10 @@ export const WorkbenchView: React.FC<IWorkbenchViewProps> = ({ endpoint }) => {
 			return;
 		}
 		put(recipe.cypher, true);
-	}, [request, endpoint.key, dialect, put]);
+	}, [pending, env, endpoint.key, endpoint.state, dialect, probe, put]);
 
 	const openWrite = (): void => {
-		getDocs()?.openStaticDocument(writeUri(endpoint.key), `${endpoint.nodeName || 'Graph'} (write)`, { endpoint });
+		env.openDocument({ kind: 'write', endpoint });
 	};
 	const subtitle = dialect ? [engineText(dialect), targetText(dialect)].filter(Boolean).join(' \u00b7 ') : view.address;
 
@@ -149,7 +155,7 @@ export const WorkbenchView: React.FC<IWorkbenchViewProps> = ({ endpoint }) => {
 					title={endpoint.state === 'ready' ? 'This connection cannot be browsed yet' : 'This connection is not available'}
 					description={view.blocked ?? 'The connection has not answered yet.'}
 					action={
-						<Button variant="primary" onClick={() => getDocs()?.openStaticDocument(CONNECTIONS_URI, 'Connections')}>
+						<Button variant="primary" onClick={() => env.openDocument({ kind: 'connections' })}>
 							Open Connections
 						</Button>
 					}

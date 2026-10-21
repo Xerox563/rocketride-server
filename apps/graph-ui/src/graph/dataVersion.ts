@@ -46,6 +46,8 @@ export interface IDataVersions {
 	bump(key: string): void;
 	/** Subscribe to any change. */
 	subscribe(listener: () => void): () => void;
+	/** Every connection's version, as a plain object (the dev-tool controller publishes it). */
+	snapshot(): Record<string, number>;
 }
 
 /**
@@ -68,6 +70,7 @@ export function createDataVersions(): IDataVersions {
 				listeners.delete(listener);
 			};
 		},
+		snapshot: () => Object.fromEntries(versions),
 	};
 }
 

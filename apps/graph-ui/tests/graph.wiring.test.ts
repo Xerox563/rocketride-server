@@ -103,14 +103,18 @@ test('the run surface takes its editor request from the host\'s slot, and the ho
 
 // A write is not counted in `record`, which the shared runner skips once the document is closed: a write that lands
 // after the console closed still marks other graphs out of date.
+// The count lives behind the GraphEnv: the full app's LOCAL env counts in the call (countWrite on its data versions).
 test('the write console counts a write where it is sent, not in the record step a closed document skips', () => {
 	const surface = code(read('components', 'RunSurface.tsx'));
 	const execute = surface.slice(surface.indexOf('execute: async'), surface.indexOf('settle:'));
-	assert.ok(/countWrite\(dataVersions, endpoint\.key, \(\) => session\.invoke<ReadQueryResult>\(TOOL\.execute/.test(execute), 'execute is sent through countWrite');
+	assert.ok(/env\.countWrite\(endpoint\.key, \(\) => session\.invoke<ReadQueryResult>\(TOOL\.execute/.test(execute), 'execute is sent through the env\'s countWrite');
 	const record = surface.slice(surface.indexOf('record: (run) =>'), surface.indexOf('summarize:'));
-	assert.ok(/isAbandonedWrite\(mode, run\.outcome\)/.test(record), 'record counts only a write the user stopped waiting for');
+	assert.ok(/isAbandonedWrite\(mode, run\.outcome\)\) env\.markAbandonedWrite\(endpoint\.key\)/.test(record), 'record counts only a write the user stopped waiting for');
 	assert.ok(!/mayHaveChangedData/.test(surface));
 	assert.ok(/describeWriteFailure\(message, error\)/.test(surface), 'the write console words its failures as possibly applied');
+
+	const local = code(read('localEnv.ts'));
+	assert.ok(/countWrite: \(key, send\) => countWrite\(stores\.dataVersions, key, send\)/.test(local), 'the LOCAL env counts the write in the call');
 });
 
 // A run is settled by its mode: the write console's runs are not settled as 'rows' with the read toggle's limit.

@@ -41,12 +41,10 @@ import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { Banner, Button, ContentHeader, EmptyState } from 'shell';
 import type { IExplorerEndpoint } from 'shared/explorer';
 import { announcer } from '../adapters/explorer';
-import { useGraphEndpoints } from '../adapters/react';
-import { CONNECTIONS_URI } from '../graph/addresses';
+import { useGraphEndpoints, useGraphEnv } from '../env';
 import { connectionView, surfaceGate } from '../graph/connections';
 import { canWrite, engineText, parseDialect, targetText } from '../graph/dialect';
 import { WRITE_CONSOLE_BANNER, rerunAnnouncement } from '../graph/writeConfirm';
-import { getDocs } from '../docs';
 import { GraphIcon } from '../icons';
 import { styles } from '../styles';
 import HistoryPanel from '../components/HistoryPanel';
@@ -72,6 +70,7 @@ export interface IWriteConsoleViewProps {
  * @returns The view.
  */
 export const WriteConsoleView: React.FC<IWriteConsoleViewProps> = ({ endpoint }) => {
+	const env = useGraphEnv();
 	const { probes } = useGraphEndpoints();
 	const probe = probes[endpoint.key];
 	const dialect = useMemo(() => (probe?.ok ? parseDialect(probe.info) : null), [probe]);
@@ -113,7 +112,7 @@ export const WriteConsoleView: React.FC<IWriteConsoleViewProps> = ({ endpoint })
 					title="The write console is not available for this connection"
 					description={endpoint.state !== 'ready' ? (view.blocked ?? 'This connection is not available.') : writeUnavailableText(dialect?.allowExecute === true, dialect !== null && dialect.capabilities.execute_shape_graph === true)}
 					action={
-						<Button variant="primary" onClick={() => getDocs()?.openStaticDocument(CONNECTIONS_URI, 'Connections')}>
+						<Button variant="primary" onClick={() => env.openDocument({ kind: 'connections' })}>
 							Open Connections
 						</Button>
 					}

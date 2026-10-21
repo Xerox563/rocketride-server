@@ -30,50 +30,84 @@
 // connection's workbench shows and runs. The status line under the tree says how far
 // the schema can be trusted (fresh, sampled, stale, an older format, or unreadable);
 // an old node's snapshot is never presented as "the whole graph".
+//
+// It is mounted by the full app (in the shell's sidebar chrome) and, as a dev
+// tool, by the CONTROLLER (devtool: true), where it also lists the connections:
+// a click opens that connection's workbench document. Either way it reads the
+// LOCAL GraphEnv of its realm; documents open only on a click.
 // =============================================================================
 
-import React, { useEffect, useMemo } from 'react';
-import { Explorer, NOOP_VFS, SidebarMenu, useShellConnection } from 'shell';
-import type { ViewMenu } from 'shell';
-import { loadConnectionSchema } from './adapters/actions';
-import { workbenchRequests } from './adapters/explorer';
-import { useActiveConnection, useGraphEndpoints, useSchema } from './adapters/react';
-import { getDocs } from './docs';
-import { CONNECTIONS_URI, workbenchUri } from './graph/addresses';
-import { SAMPLED_NOTE, schemaStatusText } from './graph/schema';
+import React, { useEffect, useMemo, useSyncExternalStore } from 'react';
+import { Explorer, NOOP_VFS, SidebarMenu } from 'shell';
+import type { ViewMenu, ViewMenuEntry } from 'shell';
+import { useActiveConnection, useGraphEndpoints, useGraphEnv } from './env';
+import type { IGraphEnv } from './env';
+import { connectionView } from './graph/connections';
+import { NO_SCHEMA, SAMPLED_NOTE, schemaStatusText } from './graph/schema';
 import { buildSchemaTree } from './graph/schemaTree';
+import type { ISchemaEntry } from './graph/schemaStore';
 import { GraphIcon } from './icons';
 
 /** Said when the schema listing was cut by the node's own bounds. */
 export const TRUNCATED_NOTE = 'The node lists only part of a very large schema.';
 
-/** Props: none. The sidebar reads shared stores, like the other apps' sidebars. */
-const GraphSidebar: React.FC = () => {
-	const { client, isConnected } = useShellConnection();
+/** A subscription that never fires. */
+const NO_SUBSCRIBE = (): (() => void) => () => undefined;
+
+/** The entry of a connection nothing was loaded for. */
+const IDLE_ENTRY: ISchemaEntry = { status: 'idle', view: NO_SCHEMA, failure: null, loadedAt: 0 };
+
+/**
+ * Follow one connection's full schema entry (the full app's and the controller's own store).
+ *
+ * @param env - The env.
+ * @param key - The connection, or null.
+ * @returns The entry.
+ */
+function useSchemaEntry(env: IGraphEnv, key: string | null): ISchemaEntry {
+	const store = env.schemas;
+	const get = (): ISchemaEntry => (store && key !== null ? store.get(key) : IDLE_ENTRY);
+	return useSyncExternalStore(store ? store.subscribe : NO_SUBSCRIBE, get, get);
+}
+
+/** Props. */
+export interface IGraphSidebarProps {
+	/** The dev-tool sidebar (the controller): also lists the connections, each opening its workbench. */
+	devtool?: boolean;
+}
+
+/** The sidebar: the navigation menu (and, as a dev tool, the connections) plus the active connection's schema. */
+const GraphSidebar: React.FC<IGraphSidebarProps> = ({ devtool = false }) => {
+	const env = useGraphEnv();
+	const isConnected = env.ready;
 	const { endpoints, probes } = useGraphEndpoints();
 	const activeKey = useActiveConnection();
-	const entry = useSchema(activeKey);
+	const entry = useSchemaEntry(env, activeKey);
 	const endpoint = useMemo(() => endpoints.find((e) => e.key === activeKey) ?? null, [endpoints, activeKey]);
 	const probe = activeKey ? probes[activeKey] : undefined;
 	const tree = useMemo(() => buildSchemaTree(entry.view), [entry.view]);
 
 	// Read the schema once when a connection becomes active and has answered its probe.
 	useEffect(() => {
-		if (client && isConnected && endpoint && endpoint.state === 'ready' && probe?.ok && entry.status === 'idle') void loadConnectionSchema(client, endpoint);
-	}, [client, isConnected, endpoint, probe, entry.status]);
+		if (isConnected && endpoint && endpoint.state === 'ready' && probe?.ok && entry.status === 'idle') void env.loadSchema(endpoint.key);
+	}, [env, isConnected, endpoint, probe, entry.status]);
 
-	const menu: ViewMenu = useMemo(
-		() => ({
-			entries: [{ id: 'connections', label: 'Connections', icon: <GraphIcon />, ...(endpoints.length > 0 ? { count: endpoints.length } : {}) }],
-		}),
-		[endpoints.length]
-	);
+	const menu: ViewMenu = useMemo(() => {
+		const entries: ViewMenuEntry[] = [{ id: 'connections', label: 'Connections', icon: <GraphIcon />, ...(endpoints.length > 0 ? { count: endpoints.length } : {}) }];
+		if (devtool) for (const e of endpoints) entries.push({ id: e.key, label: connectionView(e, probes[e.key]).title, icon: <GraphIcon /> });
+		return { entries };
+	}, [devtool, endpoints, probes]);
+
+	const select = (id: string): void => {
+		const chosen = id === 'connections' ? null : endpoints.find((e) => e.key === id) ?? null;
+		env.openDocument(chosen ? { kind: 'workbench', endpoint: chosen } : { kind: 'connections' });
+	};
 
 	const open = (path: string): void => {
 		const target = tree.target(path);
 		if (!target || !endpoint) return;
-		getDocs()?.openStaticDocument(workbenchUri(endpoint.key), endpoint.nodeName || 'Graph', { endpoint });
-		workbenchRequests.request({ endpointKey: endpoint.key, action: target.kind === 'label' ? 'label-preview' : 'type-preview', name: target.name, at: Date.now() });
+		env.openDocument({ kind: 'workbench', endpoint });
+		env.previews.request({ endpointKey: endpoint.key, action: target.kind === 'label' ? 'label-preview' : 'type-preview', name: target.name });
 	};
 
 	const showTree = activeKey !== null && endpoint !== null && (entry.status !== 'idle' || entry.view.labels.length > 0);
@@ -81,7 +115,7 @@ const GraphSidebar: React.FC = () => {
 
 	return (
 		<>
-			<SidebarMenu menu={menu} activeId={activeKey ? '' : 'connections'} onSelect={() => getDocs()?.openStaticDocument(CONNECTIONS_URI, 'Connections')} sectionLabel="Graph Explorer" />
+			<SidebarMenu menu={menu} activeId={devtool ? activeKey ?? '' : activeKey ? '' : 'connections'} onSelect={select} sectionLabel="Graph Explorer" />
 			{showTree && (
 				<>
 					<Explorer
@@ -97,7 +131,7 @@ const GraphSidebar: React.FC = () => {
 						isConnected={isConnected}
 						onOpenFile={open}
 						onRefresh={() => {
-							if (client && endpoint) void loadConnectionSchema(client, endpoint, { fresh: true });
+							if (isConnected && endpoint) void env.loadSchema(endpoint.key, { fresh: true });
 						}}
 					/>
 					<div style={{ padding: '8px 14px', fontSize: 12, lineHeight: 1.45, color: 'var(--rr-text-secondary)' }}>
