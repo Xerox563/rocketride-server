@@ -346,6 +346,108 @@ describe('T7 — an account change in a mounted controller: nothing of the previ
 	});
 });
 
+describe('T7 — a run recorded just before the account goes away is written for that account only, in the real orders', () => {
+	/**
+	 * Whether the history file holds one of an account's runs.
+	 *
+	 * @param files - The user store.
+	 * @param owner - The account.
+	 * @param id - The run's id.
+	 * @returns True once written.
+	 */
+	const written = (files: Record<string, unknown>, owner: string, id: string): boolean => {
+		const file = files[HISTORY_PATH] as { owners?: Record<string, { prefs?: { 'sql.history'?: Record<string, Array<{ id: string }>> } }> } | undefined;
+		return (file?.owners?.[owner]?.prefs?.['sql.history']?.[KEY] ?? []).some((e) => e.id === id);
+	};
+	const record = (r: Awaited<ReturnType<typeof vscodeRig>>, id: string, owner: string) => r.frame.caller.callReply('sql.historyRecord', { connId: 'c-pipe', entry: entry(id, 'SELECT 7', 70), owner }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.historyRecord'] });
+	const historyChecked = (r: Awaited<ReturnType<typeof vscodeRig>>) => until(() => r.engine.requests.some((q) => q.op === 'client.fsStat' && historyFileRequest(q.params)), 'the history file check');
+
+	it('(a) record, the root disconnects, the host flips, the controller unmounts, the same account comes back: written', async () => {
+		const files: Record<string, unknown> = {};
+		const r = await vscodeRig(postgres, files);
+		try {
+			r.engine.realm.root.connect(USER_A);
+			r.h.setHostConnection(true);
+			await until(() => r.frame.owner() === FP_A, 'account A');
+			await historyChecked(r);
+			await settle();
+			await record(r, 'late', FP_A);
+			// The tracker hears the drop before React unmounts the controller.
+			r.engine.realm.root.disconnect();
+			await until(() => !r.controller.core.identity.get().known, 'the tracker to hear the drop');
+			r.h.setHostConnection(false);
+			await settle();
+			r.controller.dispose();
+			await until(() => written(files, FP_A, 'late'), 'the late run to be written', 3_000);
+			// The same account back: the remounted controller reads it.
+			r.remount();
+			r.engine.realm.root.connect(USER_A);
+			r.h.setHostConnection(true);
+			await until(() => r.controller.history.getHistory(KEY).some((e) => e.id === 'late'), 'the remounted controller to read it');
+		} finally {
+			r.dispose();
+		}
+	});
+
+	it('(b) record, a logout with the controller mounted (writes refused while signed out), the same account back: written', async () => {
+		const files: Record<string, unknown> = {};
+		const r = await vscodeRig(postgres, files);
+		let signedOut = false;
+		const write = r.engine.script['client.fsWriteJson']!;
+		r.engine.script['client.fsWriteJson'] = (params) => {
+			if (signedOut) throw new Error('Not authenticated');
+			return write(params);
+		};
+		try {
+			r.engine.realm.root.connect(USER_A);
+			r.h.setHostConnection(true);
+			await until(() => r.frame.owner() === FP_A, 'account A');
+			await historyChecked(r);
+			await settle();
+			await record(r, 'late', FP_A);
+			signedOut = true;
+			r.engine.realm.root.accountChanged(null);
+			await until(() => !r.controller.core.identity.get().known, 'the tracker to hear the logout');
+			await new Promise((resolve) => setTimeout(resolve, 1_300));
+			assert.equal(written(files, FP_A, 'late'), false, 'nothing could be written while signed out');
+			assert.deepEqual(r.controller.history.getHistory(KEY), [], 'nothing is served while signed out');
+			signedOut = false;
+			r.engine.realm.root.accountChanged(USER_A);
+			await until(() => written(files, FP_A, 'late'), 'the late run to be written once A is back', 3_000);
+			await until(() => r.controller.history.getHistory(KEY).some((e) => e.id === 'late'), 'A to be served it again');
+		} finally {
+			r.dispose();
+		}
+	});
+
+	it('(c) A records, then B signs in (directly, or after a moment signed out): A\'s run is never written, and B is never served it', async () => {
+		for (const viaSignOut of [false, true]) {
+			const files: Record<string, unknown> = {};
+			const r = await vscodeRig(postgres, files);
+			try {
+				r.engine.realm.root.connect(USER_A);
+				r.h.setHostConnection(true);
+				await until(() => r.frame.owner() === FP_A, 'account A');
+				await historyChecked(r);
+				await settle();
+				await record(r, 'a-last', FP_A);
+				if (viaSignOut) {
+					r.engine.realm.root.accountChanged(null);
+					await until(() => !r.controller.core.identity.get().known, 'the tracker to hear the sign-out');
+				}
+				r.engine.realm.root.accountChanged(USER_B);
+				await until(() => r.controller.core.identity.get().fingerprint === FP_B, 'B');
+				await new Promise((resolve) => setTimeout(resolve, 1_500));
+				const writes = r.engine.requests.filter((q) => q.op === 'client.fsWriteJson' && historyFileRequest(q.params));
+				assert.equal(JSON.stringify(writes).includes('a-last'), false, `no write carries A's run (${viaSignOut ? 'via sign-out' : 'direct'})`);
+				assert.equal(r.controller.history.getHistory(KEY).some((e) => e.id === 'a-last'), false);
+			} finally {
+				r.dispose();
+			}
+		}
+	});
+});
+
 describe('T7 — a frame reads only its own account\'s history (reviewer F3)', () => {
 	it('a frame bound to A that reads once B is signed in is refused `stale`, never served B\'s statements; no owner is refused too', async () => {
 		const r = await vscodeRig(postgres, { [HISTORY_PATH]: historyOfBoth() });

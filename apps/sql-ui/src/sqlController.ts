@@ -332,22 +332,70 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 	const history = createSqlHistoryStore();
 	let storage: HistoryStorage = 'none';
 	let historyOwner: string | null = null;
+	/** The accessor of the account history is attached to (or loading for). */
 	let prefs: IFsPrefs | null = null;
+	/**
+	 * The previous account's accessor, kept while nobody is vouched for (a
+	 * disconnect, a logout): its pending write still lands if the same
+	 * account comes back, or at the final close. Disposed (its pending write
+	 * dropped) once a DIFFERENT account is known.
+	 */
+	let parked: IFsPrefs | null = null;
 	let detachHistory: (() => void) | null = null;
 	/** Keys frames have read, with the snapshot last seen and its revision. */
 	const watched = new Map<string, { entries: unknown; rev: number; recording: boolean }>();
 	let publishHistory: () => void = () => undefined;
 
+	/**
+	 * One account's history file accessor.
+	 *
+	 * @param owner - The account's fingerprint.
+	 * @returns The accessor (not loaded yet).
+	 */
+	const historyFile = (owner: string): IFsPrefs => {
+		const accessor = createFsPrefs({
+			cm: opts.cm,
+			path: historyPrefsPath('sql'),
+			owner,
+			// Who its writes are for: while nobody is vouched for, still this
+			// account (its pending write is kept, and retried while the
+			// connection is down); the moment a DIFFERENT account is known, that
+			// one, so the library drops the write and nothing of this account's
+			// lands in the next account's file.
+			ownerNow: () => {
+				const now = core.identity.get();
+				return now.known ? now.fingerprint : owner;
+			},
+			onError: (_error, phase) => {
+				if (phase !== 'load' || prefs !== accessor) return;
+				storage = 'session';
+				publishHistory();
+			},
+		});
+		return accessor;
+	};
+
 	const followHistoryOwner = (snapshot: IIdentitySnapshot): void => {
 		const owner = snapshot.known ? snapshot.fingerprint : null;
 		if (owner === historyOwner) return;
+		const previous = historyOwner;
 		historyOwner = owner;
-		// The previous identity's accessor stops (its pending write is dropped:
-		// writes stop once the signed-in identity is not its owner).
+		// The batch still in the store's debounce goes to the previous account's
+		// accessor FIRST: the store's last detach drops it.
+		if (previous !== null) history.flush();
 		detachHistory?.();
 		detachHistory = null;
-		prefs?.dispose();
-		prefs = null;
+		if (prefs !== null) {
+			if (owner === null) {
+				// Nobody is vouched for: keep it (see `parked`).
+				parked?.dispose();
+				parked = prefs;
+			} else {
+				// A different account is known: the previous one's write is dropped.
+				prefs.dispose();
+			}
+			prefs = null;
+		}
 		watched.clear();
 		// Forget the previous identity's entries NOW. The store forgets them
 		// only when it is attached under another owner, and the file-backed
@@ -357,17 +405,18 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 		history.attachPrefs(memoryPrefs(), owner)();
 		storage = owner === null ? 'none' : 'file';
 		if (owner !== null) {
-			const accessor = createFsPrefs({
-				cm: opts.cm,
-				path: historyPrefsPath('sql'),
-				owner,
-				ownerNow: () => core.identity.get().fingerprint,
-				onError: (_error, phase) => {
-					if (phase !== 'load' || prefs !== accessor) return;
-					storage = 'session';
-					publishHistory();
-				},
-			});
+			let accessor: IFsPrefs;
+			if (parked !== null && parked.owner === owner) {
+				// The same account is back: its accessor carries on, and what it
+				// still holds is written now.
+				accessor = parked;
+				parked = null;
+				void accessor.flush();
+			} else {
+				parked?.dispose();
+				parked = null;
+				accessor = historyFile(owner);
+			}
 			prefs = accessor;
 			// Load FIRST, then attach (the store reads its preferences at attach).
 			detachHistory = attachWhenLoaded(accessor, (api, fingerprint) => history.attachPrefs(api, fingerprint));
@@ -551,12 +600,15 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 			offIdentity();
 			offHistory();
 			offHistoryOwner();
-			// Unmounting under the same identity (a VS Code disconnect unmounts the
-			// controller): write the batch still in the store's debounce FIRST
-			// (the last detach drops it), then stop.
+			// Unmounting (a VS Code disconnect unmounts the controller): write the
+			// batch still in the store's debounce FIRST (the last detach drops
+			// it), then let each accessor write what it holds, and stop. A write
+			// that cannot reach the server now (the connection is gone) is lost.
 			history.flush();
 			detachHistory?.();
 			void prefs?.close();
+			void parked?.close();
+			parked = null;
 			offActive();
 			offError();
 			activeSubs.clear();
