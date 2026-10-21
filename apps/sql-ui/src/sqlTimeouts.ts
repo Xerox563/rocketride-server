@@ -88,7 +88,9 @@ export const SQL_OP_TIMEOUT_MS = {
 	'sql.resolveEndpoint': frameOpTimeoutMs(RESOLVE_BUDGET_MS),
 	'sql.releaseEndpoint': frameOpTimeoutMs(2 * RELEASE_STEP_TIMEOUT_MS),
 	'sql.discoverEndpoints': frameOpTimeoutMs(DISCOVERY_WAIT_MS),
-	'sql.execute': frameOpTimeoutMs(RESOLVE_BUDGET_MS + toolCallBudgetMs(null)),
+	// Resolve, then (when no probe has the dialect) one bounded `dialect` call
+	// for the controller's gate, then the statement (unbounded: the 24 h cap).
+	'sql.execute': frameOpTimeoutMs(RESOLVE_BUDGET_MS + toolCallBudgetMs(DIALECT_WAIT_MS) + toolCallBudgetMs(null)),
 	'sql.getSchema': frameOpTimeoutMs(RESOLVE_BUDGET_MS + toolCallBudgetMs(GET_SCHEMA_WAIT_MS)),
 	// refresh_schema, then (on any failure) get_schema.
 	'sql.refreshSchema': frameOpTimeoutMs(RESOLVE_BUDGET_MS + toolCallBudgetMs(REFRESH_SCHEMA_WAIT_MS) + toolCallBudgetMs(GET_SCHEMA_WAIT_MS)),

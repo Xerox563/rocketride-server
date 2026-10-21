@@ -485,7 +485,13 @@ export function createSqlCore(opts: SqlCoreOptions): SqlCore {
 			// The session's last answer (kept while the endpoint re-probes).
 			const kept = shared.info();
 			if (kept !== null && typeof kept.dialect === 'string') return toDialect(kept.dialect);
-			// Neither: ask the node once (bounded, DIALECT_WAIT_MS). No answer: unknown.
+			// Neither: ask the node once. Bounded by the session's own wait
+			// (DIALECT_WAIT_MS, 15 s): inside it the shared session may rebind
+			// and re-send once after a TASK_STOPPED refusal (the tool is
+			// idempotent), so this can be up to two or three sends in all, never
+			// longer than that one wait (toolCallBudgetMs(DIALECT_WAIT_MS) on the
+			// bus, which the frame's `sql.execute` budget includes). No answer:
+			// unknown.
 			try {
 				return await session.dialect();
 			} catch {
