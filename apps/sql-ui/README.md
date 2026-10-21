@@ -650,6 +650,13 @@ these differences:
   app's to start and stop.
 - **Direct connections store their configuration as typed** in your per-user
   server file. Use `${ROCKETRIDE_*}` references for secrets.
+- **A direct connection's new settings apply once its pipeline restarts.**
+  Editing its configuration (host, database, credentials) without changing
+  its engine leaves the temporary pipeline already running with the
+  settings it started with, until every document of the connection is
+  closed or the pipeline idles out (15 minutes); the next document then
+  starts it with the new settings. Changing the engine starts a new
+  pipeline right away.
 - **The limit moves in front of a locking clause.** MySQL requires the
   locking clause after `LIMIT`; PostgreSQL accepts either order; the app
   inserts its `LIMIT` before a trailing locking clause so the read stays

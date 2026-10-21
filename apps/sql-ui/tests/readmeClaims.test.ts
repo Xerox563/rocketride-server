@@ -101,6 +101,13 @@ describe('README claims', () => {
 		assert.match(controller, /return now\.known \? now\.fingerprint : null;/, 'writes hold while nobody is vouched for');
 	});
 
+	it('states the known limit of editing a direct connection\'s settings', () => {
+		assert.match(prose, /A direct connection's new settings apply once its pipeline restarts\./);
+		assert.match(prose, /until every document of the connection is closed or the pipeline idles out \(15 minutes\)/);
+		// The core starts a direct pipeline only when none is running for the connection's key.
+		assert.match(core, /if \(!running\(found\)\) \{\s*if \(record\.mode === 'direct'\) \{/);
+	});
+
 	it('links only to sections that exist', () => {
 		const anchors = new Set([...README.matchAll(/^#{2,3} (.+)$/gm)].map((m) => (m[1] as string).toLowerCase().replace(/[^a-z0-9 -]/g, '').trim().replace(/ /g, '-')));
 		for (const match of README.matchAll(/\]\(#([a-z0-9-]+)\)/g)) assert.ok(anchors.has(match[1] as string), `#${match[1]} is not a section`);
