@@ -32,6 +32,14 @@
 // The bus is wired exactly as the shell's own busPeer.test.ts wires it: a
 // realm port over the real retained registry plus an `emitOp` recorder.
 //
+// THE JSON WIRE. A VS Code webview carries every bus payload through
+// postMessage, as JSON: `undefined` vanishes, a Date becomes a string, a Map
+// becomes `{}`. With `json: true` (the harness default) every publish and
+// signal crosses as its JSON image, and every payload JSON would change is
+// recorded in `violations`, so a test sees an R4 violation end to end the way
+// a VS Code user would. `{ json: false }` models rocket-ui's single realm,
+// where objects cross by reference.
+//
 // The fake REALMS (a VS Code webview realm, a rocket-ui realm) stand in for
 // the ConnectionManager, which cannot load without an SDK client. Each rule
 // they follow cites the source line it copies.
@@ -195,6 +203,14 @@ export function assertJsonSafe(value: unknown, label = 'value'): void {
 // THE BUS AND THE PEERS (real modules)
 // =============================================================================
 
+/** A payload JSON would have changed, and where it was sent. */
+export interface IJsonViolation {
+	/** The bus topic it was published or signalled on. */
+	topic: string;
+	/** What assertJsonSafe said about it. */
+	message: string;
+}
+
 /** A realm bus over the real retained registry, recording summons. */
 export interface IRecordingBus {
 	/** The bus verbs busPeer takes. */
@@ -203,25 +219,46 @@ export interface IRecordingBus {
 	registry: IRetainedRegistry;
 	/** Every `emitOp` (the sidebar peer's summon). */
 	emitted: Array<{ op: string; params: unknown }>;
+	/** With the JSON wire on: every payload JSON changed on its way (empty means R4 held). */
+	violations: IJsonViolation[];
+}
+
+/** How the bus carries payloads. */
+export interface IBusOptions {
+	/** Carry the JSON image of every publish and signal payload (VS Code postMessage). */
+	json?: boolean;
 }
 
 /**
  * A realm bus, wired as packages/shell/src/components/workspace/busPeer.test.ts wires it.
  *
  * @param registry - A registry to share (default: a fresh one).
+ * @param opts - `json`: carry each payload's JSON image (default false here; the harness defaults it on).
  * @returns The bus.
  */
-export function makeBus(registry: IRetainedRegistry = createRetainedRegistry()): IRecordingBus {
+export function makeBus(registry: IRetainedRegistry = createRetainedRegistry(), opts: IBusOptions = {}): IRecordingBus {
 	const port = localRetainedPort(registry);
 	const emitted: Array<{ op: string; params: unknown }> = [];
+	const violations: IJsonViolation[] = [];
+	const cross = (topic: string, payload: unknown): unknown => {
+		// undefined is the registry's own "retract" value, never a payload.
+		if (!opts.json || payload === undefined) return payload;
+		try {
+			assertJsonSafe(payload, topic);
+		} catch (error) {
+			violations.push({ topic, message: error instanceof Error ? error.message : String(error) });
+		}
+		const text = JSON.stringify(payload);
+		return text === undefined ? undefined : (JSON.parse(text) as unknown);
+	};
 	const bus: IBusPeerBus = {
-		publish: port.publish,
-		signal: port.signal,
+		publish: (topic, snapshot) => port.publish(topic, cross(topic, snapshot)),
+		signal: (topic, payload) => port.signal(topic, cross(topic, payload)),
 		subscribe: port.subscribe,
 		read: port.read,
 		emitOp: (op, params) => { emitted.push({ op, params }); },
 	};
-	return { bus, registry, emitted };
+	return { bus, registry, emitted, violations };
 }
 
 /** One write on a tool topic (or host:connection), as the registry saw it. */
@@ -252,10 +289,11 @@ export interface IDevToolHarness extends IRecordingBus {
  * Build a tool's sidebar peer and frame-peer factory over the real modules.
  *
  * @param appId - The tool's app id.
+ * @param opts - `json` (default TRUE): carry payloads as VS Code does; false models rocket-ui.
  * @returns The harness.
  */
-export function createDevToolHarness(appId = 'tool.test'): IDevToolHarness {
-	const recording = makeBus();
+export function createDevToolHarness(appId = 'tool.test', opts: IBusOptions = {}): IDevToolHarness {
+	const recording = makeBus(createRetainedRegistry(), { json: opts.json ?? true });
 	const wire: IWireEntry[] = [];
 	recording.registry.onChange((topic, value, transient) => {
 		if (topic === HOST_CONNECTION_TOPIC || topic.startsWith(`tool:${appId}:`)) wire.push({ topic, value, transient });
@@ -489,6 +527,13 @@ export interface IFakeClientRealm {
 	drop(): void;
 	/** A background reconnect: the handshake sets the SDK account; NO shell:login. */
 	reconnect(handshake: unknown): void;
+	/**
+	 * A connection whose client is NOT authenticated, reporting `stale` as its
+	 * account. The shell never publishes this today (an anonymous attach sets
+	 * no account and emits no shell:connected); it exists to pin the
+	 * fail-closed rule.
+	 */
+	anonymousConnect(stale: unknown): void;
 	/** An `apaext_account` push (the SDK account changes). */
 	accountUpdate(value: unknown): void;
 	/** An `apaext_org_changed` push. */
@@ -514,9 +559,10 @@ export function createFakeClientRealm(): IFakeClientRealm {
 	const counted = countedSubscribe(port);
 	const requests: Array<{ op: string; params: unknown }> = [];
 	let connected = false;
+	let authenticated = false;
 	let sdkAccount: unknown;
 	let managerAccount: unknown;
-	const client = { getAccountInfo: (): unknown => sdkAccount };
+	const client = { getAccountInfo: (): unknown => sdkAccount, isAuthenticated: (): boolean => authenticated };
 
 	const cm: IFakeRealmCm = {
 		on: hub.on,
@@ -540,17 +586,26 @@ export function createFakeClientRealm(): IFakeClientRealm {
 		login(user) {
 			sdkAccount = user;
 			managerAccount = user;
+			authenticated = true;
 			hub.emit('shell:login', { user });
 			connected = true;
 			hub.emit('shell:connected', {});
 		},
 		drop() {
 			sdkAccount = undefined;
+			authenticated = false;
 			connected = false;
 			hub.emit('shell:disconnected', { reason: 'socket closed', hasError: true });
 		},
 		reconnect(handshake) {
 			sdkAccount = handshake;
+			authenticated = handshake !== undefined && handshake !== null;
+			connected = true;
+			hub.emit('shell:connected', {});
+		},
+		anonymousConnect(stale) {
+			sdkAccount = stale;
+			authenticated = false;
 			connected = true;
 			hub.emit('shell:connected', {});
 		},
@@ -564,6 +619,7 @@ export function createFakeClientRealm(): IFakeClientRealm {
 		logout() {
 			managerAccount = undefined;
 			sdkAccount = undefined;
+			authenticated = false;
 			hub.emit('shell:logout', {});
 			connected = false;
 			hub.emit('shell:disconnected', { reason: 'Disconnected by request', hasError: false });

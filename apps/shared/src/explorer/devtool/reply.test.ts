@@ -28,7 +28,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { ExplorerToolError } from '../errors';
 import { codedError } from '../connect/testing';
-import { EXPLORER_ERROR_KINDS, fromReply, isLaneTimeoutText, isReply, replyOk, replying, toReply } from './reply';
+import { EXPLORER_ERROR_KINDS, asReply, fromReply, isLaneTimeoutText, isReply, replyOk, replying, toReply } from './reply';
 import type { Reply } from './reply';
 import { assertJsonSafe } from './testing';
 
@@ -113,6 +113,14 @@ describe('toReply — the controller side', () => {
 		assert.deepEqual(junk, { ok: false, error: { kind: 'raised', message: 'Too many requests' } });
 	});
 
+	it('a void op answers Reply<null>: undefined becomes null, so the reply survives JSON', async () => {
+		const reply = await toReply(async () => { /* a void mutation: save, delete, historyEdit */ });
+		assert.deepEqual(reply, { ok: true, value: null });
+		assertJsonSafe(reply);
+		assert.deepEqual(replyOk(undefined), { ok: true, value: null });
+		assert.equal(fromReply(wire(reply)), null);
+	});
+
 	it('replying() turns a handler into a Reply-returning handler', async () => {
 		const handler = replying(async ({ n }: { n: number }) => {
 			if (n < 0) throw new ExplorerToolError({ kind: 'invalid', tool: 'get_data', message: 'negative' });
@@ -120,6 +128,23 @@ describe('toReply — the controller side', () => {
 		});
 		assert.deepEqual(await handler({ n: 2 }), { ok: true, value: 4 });
 		assert.deepEqual(await handler({ n: -1 }), { ok: false, error: { kind: 'invalid', tool: 'get_data', message: 'negative' } });
+	});
+});
+
+describe('asReply — what the controller makes of a handler result', () => {
+	it('passes a Reply through (undefined value: null) and wraps anything else, a plain result with an `ok` field included', () => {
+		assert.deepEqual(asReply({ ok: true, value: 3 }), { ok: true, value: 3 });
+		assert.deepEqual(asReply({ ok: true, value: undefined }), { ok: true, value: null });
+		const failed = { ok: false, error: { kind: 'invalid', message: 'bad' } };
+		assert.equal(asReply(failed), failed);
+		assert.deepEqual(asReply(undefined), { ok: true, value: null });
+		assert.deepEqual(asReply([1]), { ok: true, value: [1] });
+		// A probe result (connect/store IProbeResult) is data, not a Reply.
+		const probe = { ok: true, info: { dialect: 'postgres' }, dialect: 'postgres' };
+		assert.deepEqual(asReply(probe), { ok: true, value: probe });
+		const failedProbe = { ok: false, info: null, dialect: null, error: { kind: 'timeout', message: 'slow' } };
+		assert.deepEqual(asReply(failedProbe), { ok: true, value: failedProbe });
+		assert.deepEqual(asReply({ ok: true }), { ok: true, value: { ok: true } });
 	});
 });
 
@@ -156,6 +181,10 @@ describe('fromReply — the frame side', () => {
 		});
 	});
 
+	it("reads a success whose value was lost on the wire (an older controller's void op) as null", () => {
+		assert.equal(fromReply(wire({ ok: true, value: undefined }) as unknown as Reply<null>), null);
+	});
+
 	it('carries retryAfterS onto the rebuilt error', () => {
 		assert.throws(() => fromReply({ ok: false, error: { kind: 'raised', message: 'Too many requests', retryAfterS: 3 } }), (error: unknown) => {
 			assert.equal((error as { retryAfterS?: number }).retryAfterS, 3);
@@ -164,7 +193,8 @@ describe('fromReply — the frame side', () => {
 	});
 
 	it('throws a protocol error, never an ExplorerToolError, for something that is not a Reply', () => {
-		for (const bad of [undefined, null, 42, { ok: 'yes' }, { ok: true }, { ok: false }, { ok: false, error: { kind: 'nope', message: 'x' } }, { ok: false, error: { kind: 'raised' } }]) {
+		// `{ ok: true }` is NOT here: it is a void success whose null value JSON dropped (see above).
+		for (const bad of [undefined, null, 42, { ok: 'yes' }, { ok: false }, { ok: false, error: { kind: 'nope', message: 'x' } }, { ok: false, error: { kind: 'raised' } }]) {
 			assert.throws(() => fromReply(bad as unknown as Reply<unknown>), (error: unknown) => error instanceof Error && !(error instanceof ExplorerToolError), JSON.stringify(bad));
 		}
 	});
@@ -174,7 +204,7 @@ describe('fromReply — the frame side', () => {
 		assert.equal(isReply({ ok: true, value: undefined }), true);
 		assert.equal(isReply({ ok: false, error: { kind: 'stale', message: 'm' } }), true);
 		assert.equal(isReply({ ok: false, error: { kind: 'stale' } }), false);
-		assert.equal(isReply({ ok: true }), false);
+		assert.equal(isReply({ ok: true }), true, 'JSON drops an undefined value; the success is still a Reply');
 		assert.equal(isReply('ok'), false);
 	});
 });

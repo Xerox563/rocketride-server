@@ -137,6 +137,24 @@ describe('socketless realm (VS Code webview): the root account topic is the auth
 		tracker.dispose();
 	});
 
+	it('a topic push newer than an in-flight root read wins (the late read is ignored)', async () => {
+		const realm = createFakeSocketlessRealm();
+		realm.root.connect(A);
+		await settle();
+		const releases: Array<(value: unknown) => void> = [];
+		const cm: IIdentityBus = { ...realm.cm, read: () => new Promise<unknown>((resolve) => { releases.push(resolve); }) };
+		const tracker = createIdentityTracker({ cm });
+		await settle();
+		assert.equal(releases.length, 1, 'the mount read is in flight');
+		realm.root.accountChanged(B);
+		await settle();
+		assert.equal(tracker.get().fingerprint, fp(B));
+		releases[0](A);
+		await settle();
+		assert.equal(tracker.get().fingerprint, fp(B), 'the older read must not override the newer push');
+		tracker.dispose();
+	});
+
 	it('mounted while disconnected: unknown until the root connects', async () => {
 		const realm = createFakeSocketlessRealm();
 		const tracker = createIdentityTracker({ cm: realm.cm });
@@ -237,6 +255,17 @@ describe('client realm (rocket-ui): the SDK client account is the authority', ()
 		assert.equal(tracker.get().known, false, 'the old organization is not trusted again');
 		realm.accountUpdate(A2);
 		assert.equal(tracker.get().fingerprint, fp(A2));
+		tracker.dispose();
+	});
+
+	it('fails closed on a connection whose client is not authenticated (an anonymous attach), whatever account it reports', () => {
+		const realm = createFakeClientRealm();
+		realm.anonymousConnect(A1);
+		assert.equal(realm.cm.isConnected(), true);
+		const tracker = createIdentityTracker({ cm: realm.cm });
+		assert.equal(tracker.get().known, false);
+		realm.login(B);
+		assert.equal(tracker.get().fingerprint, fp(B), 'an authenticated login is trusted');
 		tracker.dispose();
 	});
 

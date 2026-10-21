@@ -35,10 +35,11 @@ import type { DevToolPeer } from './realm';
 import { replyOk, toReply } from './reply';
 import type { Reply } from './reply';
 import { MAX_TIMER_MS } from './timeouts';
+import { DeadlineError } from './deadline';
 import { createDevToolHarness, manualNow, settle, shellProtocol, spyPeer } from './testing';
 
 interface FrameOps extends ToolOpMap {
-	'f.echo': ToolOpSpec<IDeadline & { x: number }, number>;
+	'f.echo': ToolOpSpec<IDeadline & { x: number }, Reply<number>>;
 	'f.read': ToolOpSpec<IDeadline & { q: string }, Reply<{ rows: number[] }>>;
 	'f.hang': ToolOpSpec<IDeadline, never>;
 }
@@ -49,12 +50,14 @@ interface FrameOps extends ToolOpMap {
  * @param h - The harness.
  * @param seen - Receives every params object the controller handled.
  * @param now - The controller clock (default: real).
+ * @param onRefused - Told about refused calls.
  * @returns Dispose.
  */
-function serve(h: ReturnType<typeof createDevToolHarness>, seen: unknown[] = [], now?: () => number): () => void {
+function serve(h: ReturnType<typeof createDevToolHarness>, seen: unknown[] = [], now?: () => number, onRefused?: (error: DeadlineError) => void): () => void {
 	const attached = attachController<FrameOps>({
 		peer: h.sidebarPeer,
 		...(now ? { now } : {}),
+		...(onRefused ? { onRefused } : {}),
 		createToolChannel: shellProtocol.createToolChannel,
 		createToolOpServer: shellProtocol.createToolOpServer,
 		handlers: {
@@ -88,7 +91,7 @@ describe('createFrameCaller — calls', () => {
 		const stop = serve(h, seen, clock.now);
 		const caller = createFrameCaller<FrameOps>({ peer: h.newFramePeer(), ...counted(), now: clock.now });
 		await settle();
-		assert.equal(await caller.call('f.echo', { x: 7 }, { timeoutMs: 30_000 }), 7);
+		assert.deepEqual(await caller.call('f.echo', { x: 7 }, { timeoutMs: 30_000 }), { ok: true, value: 7 });
 		assert.deepEqual(seen, [{ x: 7, deadlineAt: 80_000 }]);
 		caller.dispose();
 		stop();
@@ -133,6 +136,25 @@ describe('createFrameCaller — calls', () => {
 			return true;
 		});
 		assert.equal(caller.pending(), 0);
+		caller.dispose();
+		stop();
+	});
+
+	it("the controller's refusal of an expired call reaches a still-waiting frame as kind timeout", async () => {
+		const h = createDevToolHarness();
+		const refused: string[] = [];
+		// The controller's clock runs a minute ahead of the frame's (e.g. timers throttled in a hidden webview).
+		const stop = serve(h, [], () => 1_060_000, (error) => refused.push(error.reason));
+		const caller = createFrameCaller<FrameOps>({ peer: h.newFramePeer(), ...counted(), now: () => 1_000_000 });
+		await settle();
+		await assert.rejects(caller.callReply('f.echo', { x: 1 }, { timeoutMs: 5_000 }), (error: unknown) => {
+			assert.ok(error instanceof ExplorerToolError, 'not a plain protocol Error');
+			assert.equal(error.kind, 'timeout');
+			assert.equal(error.tool, 'f.echo');
+			assert.match(error.message, /after its deadline/);
+			return true;
+		});
+		assert.deepEqual(refused, ['expired']);
 		caller.dispose();
 		stop();
 	});
@@ -187,6 +209,45 @@ describe('createFrameCaller — host:connection', () => {
 		await settle();
 		assert.equal(caller.connected(), false);
 		caller.dispose();
+	});
+});
+
+describe('createFrameCaller — fail fast while the host is known to be down', () => {
+	it('a call made while host:connection is already false rejects at once as unavailable, posts nothing and never runs later', async () => {
+		const h = createDevToolHarness();
+		h.setHostConnection(false);
+		const caller = createFrameCaller<FrameOps>({ peer: h.newFramePeer(), ...counted() });
+		await settle();
+		assert.equal(caller.connected(), false);
+		const callsBefore = h.wire.filter((entry) => (entry.value as { __rrtool?: string })?.__rrtool === 'call').length;
+		await assert.rejects(caller.callReply('f.echo', { x: 1 }, { timeoutMs: 60_000 }), (error: unknown) => {
+			assert.ok(error instanceof ExplorerToolError);
+			assert.equal(error.kind, 'unavailable');
+			assert.equal(error.tool, 'f.echo');
+			return true;
+		});
+		assert.equal(caller.pending(), 0);
+		const seen: unknown[] = [];
+		const stop = serve(h, seen);
+		h.setHostConnection(true);
+		await settle();
+		assert.equal(h.wire.filter((entry) => (entry.value as { __rrtool?: string })?.__rrtool === 'call').length, callsBefore, 'nothing was posted');
+		assert.deepEqual(seen, [], 'a controller that mounts later never runs it');
+		assert.equal(caller.connected(), true);
+		assert.deepEqual(await caller.callReply('f.echo', { x: 2 }, { timeoutMs: 5_000 }), 2, 'calls flow again once the host is back');
+		caller.dispose();
+		stop();
+	});
+
+	it('null (the host never published host:connection) passes calls through', async () => {
+		const h = createDevToolHarness();
+		const stop = serve(h);
+		const caller = createFrameCaller<FrameOps>({ peer: h.newFramePeer(), ...counted() });
+		await settle();
+		assert.equal(caller.connected(), null);
+		assert.deepEqual(await caller.callReply('f.echo', { x: 5 }, { timeoutMs: 5_000 }), 5);
+		caller.dispose();
+		stop();
 	});
 });
 

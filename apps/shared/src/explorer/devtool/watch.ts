@@ -36,8 +36,11 @@
 //   - forwards every identity change to the store (`onIdentity`); unknown
 //     arrives as null, which resets everything the store holds;
 //   - when discovery becomes allowed (first activation with a known identity,
-//     or a known identity again after a drop or a switch) it asks for one
-//     refresh (`onReconnect`: discover and re-probe);
+//     or a known identity again after a drop) it asks for one refresh
+//     (`onReconnect`: discover and re-probe), and again when the fingerprint
+//     switches between two KNOWN identities while discovery stays allowed
+//     (the store reset for the new identity and must not stay empty); a
+//     change in permission hints alone (same fingerprint) asks for nothing;
 //   - task events (`shell:event` apaevt_task) and window focus wake the store
 //     ONLY while allowed;
 //   - the task monitor is registered the first time discovery is allowed,
@@ -109,6 +112,7 @@ export function createDevToolDiscovery(opts: IDevToolDiscoveryOptions): IDevTool
 	const listeners = new Set<(allowed: boolean) => void>();
 	const compute = (): boolean => identity.get().known && activation.isOpen();
 	let allowed = compute();
+	let fingerprint = identity.get().fingerprint;
 	let disposed = false;
 
 	/** Fan-out targets inside the watch (one per attached store). */
@@ -123,8 +127,13 @@ export function createDevToolDiscovery(opts: IDevToolDiscoveryOptions): IDevTool
 	};
 
 	const offIdentity = identity.subscribe((snapshot) => {
+		const wasAllowed = allowed;
+		const previous = fingerprint;
+		fingerprint = snapshot.fingerprint;
 		for (const waker of [...wakers]) waker.onIdentity(snapshot.identity);
 		update();
+		const switched = previous !== null && fingerprint !== null && previous !== fingerprint;
+		if (wasAllowed && allowed && switched) for (const waker of [...wakers]) waker.onAllowed();
 	});
 	const offActivation = activation.subscribe(() => update());
 

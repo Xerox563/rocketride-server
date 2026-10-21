@@ -30,11 +30,12 @@ import type { IToolOpServer, ToolChannel, ToolOpMap, ToolOpSpec } from 'shell';
 import { attachController } from './controller';
 import type { IDeadline } from './deadline';
 import type { DevToolPeer } from './realm';
+import type { Reply } from './reply';
 import { createDevToolHarness, manualNow, settle, shellProtocol, spyPeer } from './testing';
 
 interface TestOps extends ToolOpMap {
-	't.echo': ToolOpSpec<IDeadline & { x: number }, number>;
-	't.other': ToolOpSpec<IDeadline, string>;
+	't.echo': ToolOpSpec<IDeadline & { x: number }, Reply<number>>;
+	't.other': ToolOpSpec<IDeadline, Reply<string>>;
 }
 
 /** Counts op servers the controller creates and disposes, over the real factory. */
@@ -114,6 +115,18 @@ describe('attachController — subscription order and lifetime (R6)', () => {
 	});
 });
 
+describe('attachController — every op answers a Reply (R3)', () => {
+	it('refuses, at compile time, an op map whose results are not Replies', () => {
+		interface PlainOps extends ToolOpMap {
+			'p.count': ToolOpSpec<IDeadline, number>;
+		}
+		const h = createDevToolHarness();
+		// @ts-expect-error -- every controller op answers a Reply; a plain result type is refused
+		const attached = attachController<PlainOps>({ peer: h.sidebarPeer, createToolChannel: shellProtocol.createToolChannel, createToolOpServer: shellProtocol.createToolOpServer, handlers: {} });
+		attached.dispose();
+	});
+});
+
 describe('attachController — every handler is served through the deadline guard (R2)', () => {
 	it('answers an on-time call, refuses a late one and one without a deadline, and opens activation on the first accepted op', async () => {
 		const h = createDevToolHarness();
@@ -134,8 +147,8 @@ describe('attachController — every handler is served through the deadline guar
 
 		await assert.rejects(call('t.echo', { x: 1 } as TestOps['t.echo']['params'], { timeoutMs: 1_000 }), /deadlineAt/);
 		await assert.rejects(call('t.echo', { x: 2, deadlineAt: 999 }, { timeoutMs: 1_000 }), /deadline/);
-		assert.equal(await call('t.echo', { x: 3, deadlineAt: 5_000 }, { timeoutMs: 1_000 }), 30);
-		assert.equal(await call('t.echo', { x: 4, deadlineAt: 5_000 }, { timeoutMs: 1_000 }), 40);
+		assert.deepEqual(await call('t.echo', { x: 3, deadlineAt: 5_000 }, { timeoutMs: 1_000 }), { ok: true, value: 30 });
+		assert.deepEqual(await call('t.echo', { x: 4, deadlineAt: 5_000 }, { timeoutMs: 1_000 }), { ok: true, value: 40 });
 		assert.deepEqual(ran, [3, 4]);
 		assert.deepEqual(firstOps, ['t.echo'], 'once, on the first op that was accepted');
 		attached.dispose();

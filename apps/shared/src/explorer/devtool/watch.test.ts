@@ -158,6 +158,26 @@ describe('createDevToolDiscovery', () => {
 		r.dispose();
 	});
 
+	it('a switch between two KNOWN identities while discovery stays allowed rediscovers for the new one', async () => {
+		const r = rig();
+		r.realm.login(account('user-a', 'org-1', 'team-1'));
+		r.realm.activate(APP);
+		await r.clock.advance(1_000);
+		const before = r.world.getTasksCalls;
+		assert.equal(r.endpoints(), 1);
+		r.world.rows = [row({ ownerId: 'user-a', teamId: 'team-2' })];
+		r.realm.accountUpdate(account('user-a', 'org-1', 'team-2'));
+		assert.equal(r.allowed(), true, 'allowed throughout: no false -> true edge');
+		await r.clock.advance(1_000);
+		assert.equal(r.world.getTasksCalls, before + 1, 'the store was reset for team-2 and asked to discover again');
+		assert.equal(r.endpoints(), 1);
+		const permissionsOnly = r.world.getTasksCalls;
+		r.realm.accountUpdate(account('user-a', 'org-1', 'team-2', { permissions: ['task.data'] }));
+		await r.clock.advance(1_000);
+		assert.equal(r.world.getTasksCalls, permissionsOnly, 'a hint-only change (same fingerprint) does not rediscover');
+		r.dispose();
+	});
+
 	it('the identity the store holds follows the tracker', async () => {
 		const realm = createFakeSocketlessRealm();
 		realm.root.connect(account('user-a', 'org-1', 'team-1'));

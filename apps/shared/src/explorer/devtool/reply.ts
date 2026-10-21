@@ -35,6 +35,11 @@
 // tool and message, so failures.ts, the wording tables and every
 // `error.code === …` switch work unchanged in a frame.
 //
+// VOID OPS answer `Reply<null>`. JSON has no `undefined`: `{ ok: true, value:
+// undefined }` arrives in a VS Code webview as `{ ok: true }`. So `replyOk`
+// and `toReply` turn an undefined value into null, and a success that lost
+// its value on the wire still reads as a Reply (its value is null).
+//
 // What still throws (and crosses as a plain message): programming errors
 // (TypeError, ReferenceError, RangeError, SyntaxError) and protocol errors (a
 // malformed Reply, an unknown op, a missing deadline). Those are bugs.
@@ -82,8 +87,11 @@ export interface ReplyError {
 /** What an engine-facing op returns. */
 export type Reply<T> = { ok: true; value: T } | { ok: false; error: ReplyError };
 
-/** The value type a Reply carries. */
-export type ReplyValue<R> = R extends Reply<infer T> ? T : never;
+/** The value type a Reply carries (not distributive: `Reply<T>` is itself a union). */
+export type ReplyValue<R> = [R] extends [Reply<infer T>] ? T : never;
+
+/** What a void body answers: `void` / `undefined` become `null` (JSON has no undefined). */
+export type VoidAsNull<T> = [T] extends [never] ? never : [T] extends [void] ? null : T;
 
 /** Every {@link ExplorerErrorKind}, at runtime (a Reply naming any other kind is a protocol error). */
 export const EXPLORER_ERROR_KINDS = ['raised', 'invalid', 'store', 'error-envelope', 'malformed', 'timeout', 'upgrade', 'unavailable', 'stale'] as const satisfies readonly ExplorerErrorKind[];
@@ -157,13 +165,13 @@ function readRetryAfter(error: unknown): number | undefined {
 // =============================================================================
 
 /**
- * A successful Reply.
+ * A successful Reply. An undefined value (a void op) becomes null.
  *
  * @param value - The (JSON-safe) value.
  * @returns The Reply.
  */
-export function replyOk<T>(value: T): Reply<T> {
-	return { ok: true, value };
+export function replyOk<T>(value: T): Reply<VoidAsNull<T>> {
+	return { ok: true, value: (value === undefined ? null : value) as VoidAsNull<T> };
 }
 
 /**
@@ -196,9 +204,9 @@ export function toReplyError(error: unknown, tool?: string): ReplyError {
  * @returns The Reply.
  * @throws Programming errors, unchanged.
  */
-export async function toReply<T>(fn: () => T | Promise<T>, opts: { tool?: string } = {}): Promise<Reply<T>> {
+export async function toReply<T>(fn: () => T | Promise<T>, opts: { tool?: string } = {}): Promise<Reply<VoidAsNull<T>>> {
 	try {
-		return { ok: true, value: await fn() };
+		return replyOk(await fn());
 	} catch (error) {
 		return { ok: false, error: toReplyError(error, opts.tool) };
 	}
@@ -211,7 +219,7 @@ export async function toReply<T>(fn: () => T | Promise<T>, opts: { tool?: string
  * @param opts - `tool`: the node tool to name when a failure names none.
  * @returns The handler, answering Replies.
  */
-export function replying<P, T>(handler: (params: P) => T | Promise<T>, opts: { tool?: string } = {}): (params: P) => Promise<Reply<T>> {
+export function replying<P, T>(handler: (params: P) => T | Promise<T>, opts: { tool?: string } = {}): (params: P) => Promise<Reply<VoidAsNull<T>>> {
 	return (params: P) => toReply(() => handler(params), opts);
 }
 
@@ -220,15 +228,16 @@ export function replying<P, T>(handler: (params: P) => T | Promise<T>, opts: { t
 // =============================================================================
 
 /**
- * Whether a value is a well-formed Reply.
+ * Whether a value is a well-formed Reply, as it arrives over the wire.
  *
  * @param value - Anything (it arrived over the wire).
- * @returns True for `{ok: true, value}` or `{ok: false, error: {kind, message}}` with a known kind.
+ * @returns True for `{ok: true[, value]}` (JSON drops an undefined value) or
+ *   `{ok: false, error: {kind, message}}` with a known kind.
  */
 export function isReply(value: unknown): value is Reply<unknown> {
 	if (value === null || typeof value !== 'object') return false;
 	const reply = value as { ok?: unknown; value?: unknown; error?: unknown };
-	if (reply.ok === true) return 'value' in reply;
+	if (reply.ok === true) return true;
 	if (reply.ok !== false || reply.error === null || typeof reply.error !== 'object') return false;
 	const error = reply.error as { kind?: unknown; message?: unknown };
 	return typeof error.kind === 'string' && KINDS.has(error.kind) && typeof error.message === 'string';
@@ -264,8 +273,32 @@ export function errorFromReply(error: ReplyError, fallbackTool = ''): ExplorerTo
  */
 export function fromReply<T>(reply: Reply<T>, opts: { tool?: string } = {}): T {
 	if (!isReply(reply)) throw new Error(`Protocol error: expected a Reply, got ${describe(reply)}.`);
-	if (reply.ok) return reply.value as T;
+	if (reply.ok) return (reply.value === undefined ? null : reply.value) as T;
 	throw errorFromReply(reply.error, opts.tool);
+}
+
+/**
+ * Normalise what a controller handler produced into the Reply it answers
+ * (attachController applies it to every handler, so a lane cannot lose a
+ * failure's kind or code by forgetting `toReply`):
+ *
+ *   - a returned Reply, recognised STRICTLY (its keys are exactly `ok` +
+ *     `value`, or `ok` + a well-formed `error`), passes through, an undefined
+ *     value becoming null; a plain result that merely has an `ok` field (such
+ *     as a probe result) is NOT taken for one;
+ *   - any other value becomes `replyOk(value)` (undefined: null).
+ *
+ * @param out - The handler's resolved result.
+ * @returns The Reply.
+ */
+export function asReply(out: unknown): Reply<unknown> {
+	if (out !== null && typeof out === 'object' && !Array.isArray(out)) {
+		const keys = Object.keys(out).sort().join(',');
+		const reply = out as { ok?: unknown; value?: unknown };
+		if (reply.ok === true && keys === 'ok,value') return replyOk(reply.value);
+		if (reply.ok === false && keys === 'error,ok' && isReply(out)) return out as Reply<unknown>;
+	}
+	return replyOk(out);
 }
 
 /**

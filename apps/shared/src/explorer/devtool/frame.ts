@@ -37,18 +37,26 @@
 //   - The moment `host:connection` turns false, every pending call is
 //     rejected: the caller stops waiting, and since nothing can be cancelled
 //     the error says the call may still have run (kind `timeout`).
-//   - The op lane's own timeout text becomes an ExplorerToolError of kind
+//   - FAIL FAST: a call made while `host:connection` is already false is
+//     rejected at once, before anything is posted, as kind `unavailable`
+//     (it was not sent, so it cannot have run). Before the host has published
+//     the topic at all (`connected()` is null) calls pass through.
+//   - The op lane's own timeout text, and the controller's refusal of a call
+//     that arrived after its deadline, become an ExplorerToolError of kind
 //     `timeout`; Reply ops are unwrapped by `callReply` (reply.ts), which
 //     rebuilds the controller's ExplorerToolError. Anything else (an op no
-//     controller serves, a refused deadline) is a protocol error and stays a
-//     plain Error.
+//     controller serves, a missing deadline, a programming error in a
+//     handler) is a protocol error and stays a plain Error.
+//   - A missing or unusable `timeoutMs` is a programming error: `call` and
+//     `callReply` THROW it synchronously (a RangeError), so it never reaches
+//     a `.catch` on the returned promise.
 //   - `dispose` (the effect cleanup) stops following host:connection and
 //     rejects what is still pending as `stale`, which callers ignore.
 // =============================================================================
 
 import type { ToolChannel, ToolControllerFn, ToolOpMap, ToolOpParams, ToolOpResult } from 'shell';
 import { ExplorerToolError, readErrorMessage } from '../errors';
-import { stampDeadline } from './deadline';
+import { isDeadlineExpiredText, stampDeadline } from './deadline';
 import { channelFor } from './realm';
 import type { DevToolPeer } from './realm';
 import { fromReply, isLaneTimeoutText } from './reply';
@@ -84,12 +92,17 @@ export interface IFrameCallerOptions {
 /** A frame's way to call its controller. */
 export interface IFrameCaller<O extends ToolOpMap> {
 	/**
-	 * Call an op and return its raw result.
+	 * Call an op and return its raw result (a Reply, for every op a controller
+	 * wired with attachController serves).
 	 *
 	 * @throws RangeError (synchronously) when `timeoutMs` is missing or unusable.
 	 */
 	call<K extends keyof O & string>(op: K, params: FrameParams<O, K>, opts: IFrameCallOptions): Promise<ToolOpResult<O, K>>;
-	/** Call a Reply op and return its value, or reject with the controller's ExplorerToolError. */
+	/**
+	 * Call a Reply op and return its value, or reject with the controller's ExplorerToolError.
+	 *
+	 * @throws RangeError (synchronously) when `timeoutMs` is missing or unusable.
+	 */
 	callReply<K extends keyof O & string>(op: K, params: FrameParams<O, K>, opts: IFrameCallOptions): Promise<ReplyValue<ToolOpResult<O, K>>>;
 	/** Calls still waiting. */
 	pending(): number;
@@ -173,7 +186,7 @@ export function createFrameCaller<O extends ToolOpMap>(opts: IFrameCallerOptions
 	 */
 	const mapFailure = (op: string, error: unknown): unknown => {
 		const message = readErrorMessage(error);
-		return isLaneTimeoutText(message) ? new ExplorerToolError({ kind: 'timeout', tool: op, message }) : error;
+		return isLaneTimeoutText(message) || isDeadlineExpiredText(message) ? new ExplorerToolError({ kind: 'timeout', tool: op, message }) : error;
 	};
 
 	const stale = (op: string): ExplorerToolError => new ExplorerToolError({ kind: 'stale', tool: op, message: `'${op}' was dropped: its frame closed.` });
@@ -181,6 +194,9 @@ export function createFrameCaller<O extends ToolOpMap>(opts: IFrameCallerOptions
 	const call = (op: string, params: unknown, options: IFrameCallOptions): Promise<unknown> => {
 		const timeoutMs = assertTimeoutMs(options?.timeoutMs, `'${op}' timeoutMs`);
 		if (disposed) return Promise.reject(stale(op));
+		if (connected === false) {
+			return Promise.reject(new ExplorerToolError({ kind: 'unavailable', tool: op, message: `Not connected to a server, so '${op}' was not sent.` }));
+		}
 		const args = stampDeadline(params as object | undefined, timeoutMs, now);
 		return new Promise<unknown>((resolve, reject) => {
 			const entry: IPending = { op, reject };

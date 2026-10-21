@@ -31,7 +31,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { account, assertJsonSafe, createDevToolHarness, createFakeSocketlessRealm, settle, shellProtocol } from './testing';
+import { account, assertJsonSafe, createDevToolHarness, createFakeSocketlessRealm, makeBus, settle, shellProtocol } from './testing';
 
 describe('assertJsonSafe', () => {
 	it('accepts plain JSON data', () => {
@@ -69,6 +69,42 @@ describe('assertJsonSafe', () => {
 
 	it('names where the problem is', () => {
 		assert.throws(() => assertJsonSafe({ rows: [[1, new Map()]] }, 'result'), /result\.rows\[0\]\[1\]/);
+	});
+});
+
+describe('the JSON wire (what VS Code postMessage does to every payload)', () => {
+	it('makeBus({ json: true }) delivers the JSON image of each signal and publish, and records what JSON changed', async () => {
+		const { bus, registry, violations } = makeBus(undefined, { json: true });
+		const seen: unknown[] = [];
+		bus.subscribe('t', (value) => seen.push(value));
+		const sent = { a: 1, gone: undefined, nested: { at: new Date(0) } };
+		bus.signal('t', sent);
+		await settle();
+		assert.deepEqual(seen, [{ a: 1, nested: { at: '1970-01-01T00:00:00.000Z' } }]);
+		assert.notEqual(seen[0], sent, 'a copy, as across postMessage');
+		assert.equal(violations.length, 1);
+		assert.equal(violations[0].topic, 't');
+		assert.match(violations[0].message, /t\.gone/);
+		bus.publish('r', { rows: [[1, 2]] });
+		assert.deepEqual(registry.read('r'), { rows: [[1, 2]] });
+		assert.equal(violations.length, 1, 'a JSON-safe payload is not a violation');
+	});
+
+	it('the harness serialises by default; { json: false } models the in-process rocket-ui realm', async () => {
+		const strict = createDevToolHarness();
+		const loose = createDevToolHarness('tool.test', { json: false });
+		for (const h of [strict, loose]) {
+			const seen: unknown[] = [];
+			h.sidebarPeer.subscribe((m) => seen.push(m));
+			const frame = h.newFramePeer();
+			frame.subscribe(() => undefined);
+			await settle();
+			frame.post({ __rrtool: 'call', id: 'x:1', op: 't.op', args: { gone: undefined } });
+			await settle();
+			assert.equal('gone' in ((seen.at(-1) as { args: object }).args), h === loose);
+		}
+		assert.equal(strict.violations.length, 1);
+		assert.deepEqual(loose.violations, []);
 	});
 });
 

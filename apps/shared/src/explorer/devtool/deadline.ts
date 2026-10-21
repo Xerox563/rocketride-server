@@ -79,6 +79,21 @@ export class DeadlineError extends Error {
 	}
 }
 
+/** The expired-refusal text (see {@link DeadlineError}): `'<op>' arrived <n> ms after its deadline; …`. */
+const EXPIRED_TEXT = /^'[^']*' arrived \d+ ms after its deadline;/;
+
+/**
+ * Whether a message is the controller's refusal of an expired call. It
+ * crosses the op lane as text only; a frame still waiting for that call
+ * (timers throttled in a hidden webview) treats it as a timeout.
+ *
+ * @param message - The message.
+ * @returns True for an expired-call refusal.
+ */
+export function isDeadlineExpiredText(message: string): boolean {
+	return EXPIRED_TEXT.test(message);
+}
+
 /**
  * Stamp a call's deadline onto a copy of its params.
  *

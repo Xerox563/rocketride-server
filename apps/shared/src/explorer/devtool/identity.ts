@@ -66,6 +66,17 @@
 // the same account through the drop it never republishes it, and the re-read
 // on `shell:connected` finds it current.
 //
+// ORDER. A topic delivery is newer than any root read still in flight, so it
+// invalidates that read: a late read can never override a newer push.
+//
+// ANONYMOUS SESSIONS (checked in source). An anonymous or public attach never
+// yields an identity today: the SDK's `_attachAnonymous` sets no account
+// (client.ts), the manager emits `shell:connected` only for an AUTHENTICATED
+// client (connection.ts onConnected guard and `_connect`'s
+// requireAuthenticatedResult, which demands a userId), and the root publishes
+// a null account. The tracker still fails closed on it: in a client realm the
+// identity is known only while the client reports `isAuthenticated()`.
+//
 // A bus without `read`/`subscribe` (a bare structural fake) degrades to the
 // strict event rule: the mount-time `getAccountInfo()`, then only account
 // events. Epochs are never compared (a remounted VS Code controller restarts
@@ -157,10 +168,21 @@ export function createIdentityTracker(opts: { cm: IIdentityBus }): IIdentityTrac
 	const client = (): unknown => (typeof cm.getClient === 'function' ? cm.getClient() : undefined);
 	const socketless = (): boolean => typeof cm.getClient === 'function' && (client() === null || client() === undefined);
 	const canReadRoot = (): boolean => socketless() && typeof cm.read === 'function';
+	/** In a client realm, whether the client says its session is authenticated (fails closed). */
+	const authenticated = (): boolean => {
+		if (socketless()) return true;
+		const own = client() as { isAuthenticated?: () => unknown } | undefined;
+		if (typeof own?.isAuthenticated !== 'function') return true;
+		try {
+			return own.isAuthenticated() === true;
+		} catch {
+			return false;
+		}
+	};
 
 	/** Recompute the answer and tell subscribers when it changed. */
 	const publish = (): void => {
-		const identity = isConnected() && account ? identityFromConnectResult(account) : null;
+		const identity = isConnected() && authenticated() && account ? identityFromConnectResult(account) : null;
 		const next: IIdentitySnapshot = identity === null ? UNKNOWN : { known: true, identity, fingerprint: identityFingerprint(identity) };
 		const nextSignature = identity === null ? '' : JSON.stringify(identity);
 		if (nextSignature === signature) return;
@@ -223,6 +245,8 @@ export function createIdentityTracker(opts: { cm: IIdentityBus }): IIdentityTrac
 	if (typeof cm.subscribe === 'function') {
 		offs.push(cm.subscribe(ACCOUNT_MIRROR_TOPIC, (value) => {
 			if (disposed || !socketless()) return;
+			// Newer than any read still in flight: that read must not land after it.
+			readSeq += 1;
 			if (value) accept(value);
 			else forget(false);
 		}));
