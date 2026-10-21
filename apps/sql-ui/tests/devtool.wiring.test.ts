@@ -217,8 +217,18 @@ describe('T3 — every op round-trips JSON-safe; failures come back as equal Exp
 			assert.deepEqual(results.history, [{ ...entry, pinned: true }]);
 			await r.env.saveConnection({ ...PIPELINE, id: 'c-new', name: 'New' });
 			await r.env.deleteConnection({ ...PIPELINE, id: 'c-new', name: 'New' });
-			r.env.releaseEndpoint('c-direct');
+			// The direct document's release carries the key it opened, and the
+			// controller sees it.
+			const released: Array<[string, string | undefined]> = [];
+			const release = r.mount.core.release.bind(r.mount.core);
+			r.mount.core.release = (connId, key) => {
+				released.push([connId, key]);
+				return release(connId, key);
+			};
+			const directKey = endpointForConnection(DIRECT).key;
+			r.env.releaseEndpoint('c-direct', directKey);
 			await until(() => r.engine.ops().includes('client.terminate'), 'the release');
+			assert.deepEqual(released, [['c-direct', directKey]]);
 			assert.deepEqual(results.execute, { rows: [{ id: 1, name: 'a' }, { id: 2, name: null }], affected_rows: 0 });
 			assert.equal(results.dialect, 'postgres');
 			assert.deepEqual(results.discover, [{ key: 'p1:s1:db_1', projectId: 'p1', pipelineName: 'Pipeline A', source: 's1', nodeId: 'db_1', nodeName: 'Orders DB', provider: 'db_postgres', running: true }]);
@@ -604,9 +614,10 @@ describe('T10 — write gates hold in the controller even when a frame calls the
 		try {
 			await r.env.resolveEndpoint(PIPELINE);
 			const before = r.engine.requests.length;
-			type Checked = 'sql.execute' | 'sql.getSchema' | 'sql.getService' | 'sql.validate';
+			type Checked = 'sql.execute' | 'sql.getSchema' | 'sql.getService' | 'sql.validate' | 'sql.releaseEndpoint';
 			const call = (op: Checked, params: Record<string, unknown>) => r.frame.caller.callReply(op, { connId: 'c-pipe', ...params } as never, { timeoutMs: SQL_OP_TIMEOUT_MS[op] });
 			const bad: Array<[Checked, Record<string, unknown>]> = [
+				['sql.releaseEndpoint', { key: 42 }],
 				['sql.getService', { provider: 42 }],
 				['sql.getService', { provider: '' }],
 				['sql.validate', { pipeline: 'x' }],
