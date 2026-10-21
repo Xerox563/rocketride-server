@@ -96,7 +96,7 @@ import type { ConnectionsState, HistoryState, SqlOps } from './ops';
 import { checkHistoryEdit, checkHistoryEntry } from './history/api';
 import type { HistoryEdit, HistoryStorage } from './history/api';
 import type { HistoryEntry } from './history/types';
-import { createSqlHistoryStore } from './history/historyStore';
+import { createSqlHistoryStore, memoryPrefs } from './history/historyStore';
 import type { SqlHistoryStore } from './history/historyStore';
 import type { SqlSidebarBridge } from './sidebarBridge';
 import { gateStatement } from './sql/gate';
@@ -222,6 +222,12 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 		prefs?.dispose();
 		prefs = null;
 		watched.clear();
+		// Forget the previous identity's entries NOW. The store forgets them
+		// only when it is attached under another owner, and the file-backed
+		// attach below waits for the new identity's file to be read (seconds,
+		// with retries): until then a read would answer from memory with the
+		// previous account's statements. A sign-out (owner null) forgets too.
+		history.attachPrefs(memoryPrefs(), owner)();
 		storage = owner === null ? 'none' : 'file';
 		if (owner !== null) {
 			const accessor = createFsPrefs({
@@ -259,14 +265,20 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 		'sql.envKeys': () => core.envKeys(),
 		'sql.saveConnection': async ({ connection, owner }) => {
 			requireOwner(owner, 'saveConnection');
-			await core.saveConnection(connection);
+			// Checked again where the list changes: the account may change while
+			// the list is still being read.
+			await core.saveConnection(connection, () => requireOwner(owner, 'saveConnection'));
 		},
 		'sql.deleteConnection': async ({ connId, owner }) => {
 			requireOwner(owner, 'deleteConnection');
-			await core.deleteConnection(connId);
+			await core.deleteConnection(connId, () => requireOwner(owner, 'deleteConnection'));
 		},
 		'sql.history': async ({ connId }) => {
+			const askedFor = historyOwner;
 			const key = await core.keyOf(connId);
+			// The account changed while the connection was looked up: the
+			// answer would be another account's history.
+			if (historyOwner !== askedFor) throw new ExplorerToolError({ kind: 'stale', tool: 'history', message: 'The signed-in account changed, so this history was not read.' });
 			if (!watched.has(key)) {
 				watched.set(key, { entries: history.getHistory(key), rev: 1, recording: history.getRecording(key) });
 				publishHistory();
@@ -276,11 +288,14 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 		'sql.historyRecord': async ({ connId, entry, owner }) => {
 			requireOwner(owner, 'historyRecord');
 			const key = await core.keyOf(connId);
+			// Again after the lookup: the run must land in its own account's history.
+			requireOwner(owner, 'historyRecord');
 			history.runs.emitRun(key, checkHistoryEntry(entry));
 		},
 		'sql.historyEdit': async ({ connId, edit, owner }) => {
 			requireOwner(owner, 'historyEdit');
 			const key = await core.keyOf(connId);
+			requireOwner(owner, 'historyEdit');
 			applyHistoryEdit(history, key, checkHistoryEdit(edit));
 		},
 	};

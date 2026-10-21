@@ -569,7 +569,8 @@ these differences:
   kept for that session only and nothing is written to it. Two windows that
   change history at the same time each write the file from what they read, so
   the last one to save wins. The drawer's privacy line says which of these
-  applies.
+  applies. The sidebar forgets one account's history as soon as you sign out
+  or another account signs in, before the next account's section is read.
 - **Switches are for the session.** **Run and stop asking on this
   connection** turns the pattern check off until the document's window
   closes, not for good (the app keeps it in your workspace preferences). A

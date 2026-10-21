@@ -182,11 +182,18 @@ export interface SqlCore {
 	 * Insert or replace a saved connection, once the list is read for the
 	 * signed-in identity (never queued onto someone else's list).
 	 *
+	 * @param connection - The record.
+	 * @param stillAllowed - Throws when the change is no longer allowed; run after every wait, right before the list changes (default: the account signed in at the call is still signed in).
 	 * @throws ExplorerToolError `invalid` (not a usable record) or `unavailable` (not signed in, list unreadable).
 	 */
-	saveConnection(connection: SavedSqlConnection): Promise<void>;
-	/** Delete a saved connection; a direct one's temp pipeline is stopped first, best effort. */
-	deleteConnection(connId: string): Promise<void>;
+	saveConnection(connection: SavedSqlConnection, stillAllowed?: () => void): Promise<void>;
+	/**
+	 * Delete a saved connection; a direct one's temp pipeline is stopped first, best effort.
+	 *
+	 * @param connId - The connection id.
+	 * @param stillAllowed - Throws when the change is no longer allowed; run after every wait (default: the account signed in at the call is still signed in).
+	 */
+	deleteConnection(connId: string, stillAllowed?: () => void): Promise<void>;
 	/** Stop everything the core follows (idempotent). */
 	dispose(): void;
 }
@@ -331,6 +338,23 @@ export function createSqlCore(opts: SqlCoreOptions): SqlCore {
 	};
 
 	/**
+	 * A check, made now, that the account signed in later is still this one
+	 * (a change to the saved list must land in the list of the account it was
+	 * asked for, even when the account changes while the list is read).
+	 *
+	 * @param tool - What is being done (named in errors).
+	 * @returns The check: it throws `unavailable` (signed out) or `stale` (another account).
+	 */
+	const sameAccount = (tool: string): (() => void) => {
+		const askedBy = identity.get().known ? identity.get().fingerprint : null;
+		return () => {
+			const now = identity.get().known ? identity.get().fingerprint : null;
+			if (now === null) throw unavailable(tool, 'Not signed in to a RocketRide server, so nothing was changed.');
+			if (now !== askedBy) throw new ExplorerToolError({ kind: 'stale', tool, message: 'The signed-in account changed, so nothing was changed.' });
+		};
+	};
+
+	/**
 	 * Wait (bounded) until the saved-connection list is read for the signed-in identity.
 	 *
 	 * @param tool - What is being done (named in errors).
@@ -472,14 +496,17 @@ export function createSqlCore(opts: SqlCoreOptions): SqlCore {
 		},
 		getService: (provider) => busRequest(cm, 'client.getService', { service: provider }, SERVICE_TIMEOUT_MS),
 		validate: (pipeline) => busRequest(cm, 'client.validate', { pipeline }, VALIDATE_TIMEOUT_MS),
-		async saveConnection(connection) {
+		async saveConnection(connection, stillAllowed = sameAccount('saveConnection')) {
 			const record = checkSavedConnection(connection);
 			await listReady('saveConnection');
+			stillAllowed();
 			upsertSavedConnection(record);
 		},
-		async deleteConnection(connId) {
+		async deleteConnection(connId, stillAllowed = sameAccount('deleteConnection')) {
 			await listReady('deleteConnection');
+			stillAllowed();
 			await this.release(connId);
+			stillAllowed();
 			deleteSavedConnection(connId);
 		},
 		async envKeys() {

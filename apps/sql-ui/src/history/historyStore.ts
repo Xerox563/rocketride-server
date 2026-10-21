@@ -45,6 +45,7 @@ import { createHistoryStore } from 'shared/explorer/history/store';
 import type { IHistoryStore } from 'shared/explorer/history/store';
 import { createRunEvents } from 'shared/explorer/history/runEvents';
 import { createHistoryPrefsBridge } from 'shared/explorer/react';
+import type { IPrefsAccessor } from 'shared/explorer/history/types';
 import type { HistoryEntry } from './types';
 import { DEFAULT_HISTORY_LIMITS } from './trim';
 import { sqlRunEvents } from './runEvents';
@@ -89,6 +90,21 @@ export function createSqlHistoryStore(runs = createRunEvents<'sql'>()): SqlHisto
 }
 
 /** The full app's store (module-level), on the app's run bus. */
+/**
+ * A throwaway accessor kept in memory: nothing is read from or written to
+ * anywhere else. Attaching a store to one under a new owner (and detaching it
+ * at once) makes the store forget the previous owner's entries straight away.
+ *
+ * @returns The accessor.
+ */
+export function memoryPrefs(): IPrefsAccessor {
+	const values = new Map<string, unknown>();
+	return {
+		getPref: (key) => values.get(key),
+		setPref: (key, value) => { values.set(key, value); },
+	};
+}
+
 const store = createSqlHistoryStore(sqlRunEvents);
 
 /**
