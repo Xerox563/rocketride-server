@@ -117,6 +117,13 @@ export interface IWorkspaceContext {
 	appState: Record<string, unknown>;
 	/** Update the opaque app-owned state via a functional updater. */
 	updateAppState: (updater: (prev: Record<string, unknown>) => Record<string, unknown>) => void;
+	/**
+	 * Writes the workspace's pending debounced state to disk NOW.
+	 *
+	 * Hand this to Documents as `WorkspaceBinding.flushNow` so a page
+	 * teardown cannot strand the last change in a timer that never fires.
+	 */
+	flushWorkspaceNow: () => void;
 	/** ID of the currently active app. */
 	activeAppId: string;
 	/** Lightweight manifest entries for all apps — always available, no bundle load needed. */
@@ -245,7 +252,7 @@ export const WorkspaceProvider: React.FC<IWorkspaceProviderProps> = ({ apps, wor
 	// Destructure all state and mutation helpers from the persistence hook
 	const {
 		loaded, seeded, activeAppId, prefs, appState, settings: settingsOverrides,
-		switchApp, updatePrefs, updateAppState, updateSetting: writeSettingOverride,
+		switchApp, updatePrefs, updateAppState, flushWorkspaceNow, updateSetting: writeSettingOverride,
 	} = useWorkspaceState(client, isConnected, defaultAppId, workspaceDir, startupAppId);
 
 	// ── Settings registry + effective values ───────────────────────────────
@@ -663,7 +670,7 @@ export const WorkspaceProvider: React.FC<IWorkspaceProviderProps> = ({ apps, wor
 		<WorkspaceContext.Provider value={{
 			loaded, seeded, appLoading,
 			prefs,
-			appState, updateAppState,
+			appState, updateAppState, flushWorkspaceNow,
 			activeAppId,
 			appManifest: apps,
 			loadedApps,

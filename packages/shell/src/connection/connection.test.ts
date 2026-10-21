@@ -37,6 +37,8 @@ import { ApiKeyAuthProvider } from '../auth/ApiKeyAuthProvider';
 import { CloudAuthProvider } from '../auth/CloudAuthProvider';
 import { CONNECT_TIMEOUT_MS, LS_TOKEN } from '../constants';
 import { resetDevGateForTests } from '../util/devGate';
+import { createRetainedRegistry, localRetainedPort } from '../ops/retained';
+import type { IRetainedPort } from '../ops/retained';
 
 type EmittedEvent = { event: string; payload: unknown };
 
@@ -1176,4 +1178,76 @@ test('timeout cleanup leaves a replacement shell operation attached', async () =
 		globalThis.setTimeout = realSetTimeout;
 		globalThis.clearTimeout = realClearTimeout;
 	}
+});
+
+// =============================================================================
+// RETAINED TOPIC LANE — late joiners
+// =============================================================================
+
+/**
+ * A manager with ONLY the retained lane's fields installed. The suite's
+ * other adapter builds a connection-status manager; this one deliberately
+ * stays minimal so the test exercises subscribe/publish and nothing else.
+ *
+ * @returns The manager under test.
+ */
+function createTopicManager(): ConnectionManager {
+	const manager = Object.create(ConnectionManager.prototype) as ConnectionManager;
+	const fields = manager as unknown as { topicSubs: Map<string, unknown>; retainedPort: IRetainedPort };
+	fields.topicSubs = new Map();
+	fields.retainedPort = localRetainedPort(createRetainedRegistry());
+	return manager;
+}
+
+test('a retained topic replays to EVERY subscriber, not just the one that opened the port', async () => {
+	const cm = createTopicManager();
+	cm.publish('host:connection', { connected: true });
+
+	// First subscriber: replayed by the port subscription it opens.
+	const first: unknown[] = [];
+	cm.subscribe('host:connection', (s) => first.push(s));
+	await new Promise((r) => setTimeout(r, 0));
+	assert.deepEqual(first, [{ connected: true }]);
+
+	// Second subscriber on the SAME topic — a second tool frame mounting
+	// later. The port replay already fired, so this one has to replay off
+	// the realm's cache or it waits forever for an edge (the profiler's
+	// "Waiting for the server connection..." while demonstrably connected).
+	const second: unknown[] = [];
+	cm.subscribe('host:connection', (s) => second.push(s));
+	await new Promise((r) => setTimeout(r, 0));
+	assert.deepEqual(second, [{ connected: true }]);
+
+	// And the edge still reaches both exactly once more.
+	cm.publish('host:connection', { connected: false });
+	await new Promise((r) => setTimeout(r, 0));
+	assert.deepEqual(first, [{ connected: true }, { connected: false }]);
+	assert.deepEqual(second, [{ connected: true }, { connected: false }]);
+});
+
+test('a late subscriber that unsubscribes before the replay microtask gets nothing', async () => {
+	const cm = createTopicManager();
+	cm.publish('t', 1);
+	cm.subscribe('t', () => {});
+	await new Promise((r) => setTimeout(r, 0));
+
+	const seen: unknown[] = [];
+	const off = cm.subscribe('t', (s) => seen.push(s));
+	off();
+	await new Promise((r) => setTimeout(r, 0));
+	assert.deepEqual(seen, []);
+});
+
+test('a joiner arriving before the first replay is not served twice', async () => {
+	const cm = createTopicManager();
+	cm.publish('t', 1);
+	const a: unknown[] = [];
+	const b: unknown[] = [];
+	// Both subscribe in the same tick: the port replay has not run yet, so
+	// the second has no cache to read and is fanned by that one replay.
+	cm.subscribe('t', (s) => a.push(s));
+	cm.subscribe('t', (s) => b.push(s));
+	await new Promise((r) => setTimeout(r, 0));
+	assert.deepEqual(a, [1]);
+	assert.deepEqual(b, [1]);
 });

@@ -137,7 +137,7 @@ const styles = {
 
 const ExplorerApp: React.FC<ShellAppProps> = () => {
 	const { client, isConnected } = useShellConnection();
-	const { loaded, appState, updateAppState } = useWorkspace();
+	const { loaded, appState, updateAppState, flushWorkspaceNow } = useWorkspace();
 	const [ready, setReady] = useState(false);
 
 	// The FULL APP's store surface: the realm legitimately owns a client, so
@@ -148,7 +148,7 @@ const ExplorerApp: React.FC<ShellAppProps> = () => {
 		if (!client || !loaded) return;
 
 		const vfs = createStoreVfs(createLocalExplorerFs(true));
-		createDocs(vfs, { appState, updateAppState });
+		createDocs(vfs, { appState, updateAppState, flushNow: flushWorkspaceNow });
 		setReady(true);
 
 		return () => { destroyDocs(); setReady(false); };
@@ -185,7 +185,8 @@ export const ExplorerDevTool: React.FC<DevToolProps> = ({ peer, channel }) => {
 	// controller op, and readiness is the host-published `host:connection`
 	// system topic replicated over the tool channel.
 	const toolChannel = useMemo(() => channel ?? createToolChannel(peer), [channel, peer]);
-	const engineReady = useConnectionReady(toolChannel);
+	// Tri-state collapsed at the gate: "no snapshot yet" disables like false.
+	const engineReady = useConnectionReady(toolChannel) === true;
 	const call = useMemo(() => createToolController<ExplorerOps>(peer), [peer]);
 	const fs = useMemo(() => createRemoteExplorerFs(call, engineReady), [call, engineReady]);
 	const [ready, setReady] = useState(false);
@@ -219,16 +220,7 @@ const ExplorerAppReady: React.FC<{ docs: Documents; fs: IExplorerFs }> = ({ docs
 	// --- Ctrl+S handler -------------------------------------------------------
 
 	useEffect(() => {
-		const handler = () => {
-			const s = docs.getState();
-			const group = s.groups[s.activeGroupId];
-			if (!group) return;
-			const editorId = group.editorIds[group.activeEditorIndex];
-			if (!editorId) return;
-			const editor = s.editors[editorId];
-			if (!editor) return;
-			docs.saveDocument(editor.documentUri);
-		};
+		const handler = () => { void docs.saveActiveDocument(); };
 		window.addEventListener('tab:save', handler);
 		return () => window.removeEventListener('tab:save', handler);
 	}, []);
@@ -252,7 +244,7 @@ const ExplorerAppReady: React.FC<{ docs: Documents; fs: IExplorerFs }> = ({ docs
 								isActive={state.activeGroupId === groupId}
 								canClose={canCloseGroups}
 								onSplit={(gid, dir) => docs.splitGroupWithDocument(gid, dir)}
-								onCloseGroup={(gid) => docs.closeGroup(gid)}
+								onCloseGroup={(gid) => { void docs.requestCloseGroup(gid); }}
 							/>
 
 							<div style={styles.content}>

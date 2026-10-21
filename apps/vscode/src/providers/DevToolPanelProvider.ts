@@ -41,6 +41,8 @@
 
 import * as vscode from 'vscode';
 import { getLogger } from '../shared/util/output';
+// Deep import on purpose — ext-host-safe .ts leaf (see busHost.ts).
+import { fetchDevToolCatalog } from 'shared/tools/core/devToolCatalog';
 import { ConnectionManager } from '../connection/connection';
 import type { BusHost } from './toolhost/busHost';
 import { renderWebviewHtml } from './toolhost/frameworkProvider';
@@ -390,9 +392,23 @@ export class DevToolPanelProvider {
 	 *
 	 * @param appId - The tool whose frame is asking.
 	 */
-	private toolView(appId: string): DevToolViewPayload {
+	private async toolView(appId: string): Promise<DevToolViewPayload> {
 		const connected = this.connectionManager.isConnected();
-		const row = connected ? this.findApp(appId) : undefined;
+		// The account row is the fast path (desktop tools — already in
+		// memory); the CATALOG is the authority. A pinned tool need not be
+		// on the desktop: anything the reachable-rungs walk returns is
+		// servable (publish visibility IS the access rule), which is exactly
+		// how the browser shell mounts it — its probe registers every public
+		// remote. Resolving only the account list here was the desktop-only
+		// bug's third surface (picker, readme, THIS).
+		let row = connected ? this.findApp(appId) : undefined;
+		if (connected && (!row || row.registryVersion === undefined) && this.busHost) {
+			try {
+				row = (await fetchDevToolCatalog(this.busHost.rootBus)).find((a) => a.id === appId);
+			} catch (err) {
+				getLogger().error(`[devtool] catalog resolve failed for ${appId}: ${err}`);
+			}
+		}
 		return {
 			connected,
 			engineHttpUrl: connected ? (this.connectionManager.getHttpUrl() || 'http://localhost:5565').replace(/\/$/, '') : '',

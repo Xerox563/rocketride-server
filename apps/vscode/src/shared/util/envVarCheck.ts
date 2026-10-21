@@ -18,7 +18,7 @@
 
 import * as vscode from 'vscode';
 import type { RocketRideClient } from 'rocketride';
-import { decideEnvVars, extractPipelineEnvVars } from './envVarDecision';
+import { decideEnvVars, extractPipelineEnvVars } from 'shared/utils/envVarDecision';
 import { getLogger } from './output';
 
 /**

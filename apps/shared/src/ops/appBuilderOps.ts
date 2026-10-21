@@ -22,12 +22,17 @@
 // =============================================================================
 
 import type { ShellOpMap, ShellOpSpec } from 'shell/src/ops/busOps';
-import type { AppSummary, AppBuilderStage, AppBuilderCapabilities, ListingDraft, PreflightCheck } from '../tools/appdev/types';
+import type { AppSummary, AppBuilderCapabilities, ListingDraft, PreflightCheck } from '../tools/appdev/types';
 
 /**
  * What `host.appbuilder.load` answers: the page's full boot state. The
  * framework-global facts (connection, account/catalog, services) ride their
  * own mirror topics — this is only what is PER-APP and host-known.
+ *
+ * NOTE what is NOT here: the App Builder's UI preferences (stage, preview
+ * layout, zoom, Inherit Auth). Those are PREFS, and prefs have exactly one
+ * mechanism — the `app:<appId>` partition off the workspace manager's mirror.
+ * A host neither stores nor delivers them.
  */
 export interface AppBuilderLoadPayload {
 	/** The app under construction (folder-scan truth, not the catalog row). */
@@ -36,11 +41,6 @@ export interface AppBuilderLoadPayload {
 	previewUrl: string;
 	/** Host affordances (fixed per host). */
 	capabilities: AppBuilderCapabilities;
-	/** The persisted stage, normalized ('dashboard' when never persisted). */
-	stage: AppBuilderStage;
-	/** The persisted per-app UI preference bag. MUST be applied before the
-	 *  views mount — getPref is synchronous by contract. */
-	prefs: Record<string, unknown>;
 }
 
 // RETAINED TOPICS / SIGNALS the App Builder page rides (host = the writer;
@@ -60,10 +60,6 @@ export interface AppBuilderLoadPayload {
 export interface AppBuilderHostOpMap extends ShellOpMap {
 	/** The page's full boot state (see {@link AppBuilderLoadPayload}). */
 	'host.appbuilder.load': ShellOpSpec<{ app: string }, AppBuilderLoadPayload>;
-	/** Persists the active stage (emitOp). */
-	'host.appbuilder.stage': ShellOpSpec<{ app: string; stage: AppBuilderStage }, void>;
-	/** Persists one per-app UI preference (emitOp, merge-write). */
-	'host.appbuilder.pref': ShellOpSpec<{ app: string; key: string; value: unknown }, void>;
 	/** Full inner-loop reset: kill + reinstall + respawn the dev session
 	 *  (emitOp). NOT the cloud's iframe remount — the semantics are host-
 	 *  specific by design. */

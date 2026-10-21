@@ -37,8 +37,10 @@
 //    document — selections ride the DevToolProps peer channel to the frame.
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ConnectionManager, SidebarMenu, createToolChannel, createToolOpServer, typedToolChannel, useDashboardData, useShellEvent } from 'shell';
-import type { DevToolProps, MonitorPageId, ViewMenu } from 'shell';
+import { ConnectionManager, SidebarMenu, createToolChannel, createToolOpServer, typedToolChannel, useShellEvent } from 'shell';
+import { useDashboardData } from './monitor/useDashboardData';
+import type { DevToolProps, ViewMenu } from 'shell';
+import type { MonitorPageId } from './monitor';
 import type { IDashboardSnapshot, MonitorOps, MonitorStateMap } from './ops';
 
 // =============================================================================
@@ -108,10 +110,14 @@ export const MonitorDevToolSidebar: React.FC<DevToolProps> = ({ peer, channel, d
 	const [page, setPage] = useState<MonitorPageId>('overview');
 
 	// SINGLE-PANE UX: the monitor is one surface, so activating its sidebar
-	// tab opens (or reveals) the pane — the tool's choice, made here. This
-	// mount only exists because the tab was selected, so mounting IS the
-	// first activation; the shell event covers re-selections.
-	useEffect(() => { documents?.open('', 'Server Monitor'); }, [documents]);
+	// tab opens (or reveals) the pane — the tool's choice, made here.
+	//
+	// Mounting is NOT an activation. The host keeps every pinned tool's
+	// sidebar mounted (SidebarChrome's TabPanel hides inactive panels with
+	// display:none rather than unmounting them), so opening on mount
+	// reopened this pane on every page load — including panes the user had
+	// deliberately closed. This listener is registered long before any
+	// selection can happen, so it covers the first selection too.
 	useShellEvent('shell:toolSidebarActivated', ({ appId }) => {
 		if (appId === 'rocketride.monitor') documents?.open('', 'Server Monitor');
 	});

@@ -44,9 +44,9 @@
 import { createContext, useContext } from 'react';
 import type { DevToolProps } from './types';
 import type { PrefsStore } from './prefsStore';
-import type { ToolWorkspaceFs } from './toolWorkspaceFs';
+import type { WorkspaceFs } from '../../workspace/workspaceFs';
 
-export type { ToolWorkspaceFs } from './toolWorkspaceFs';
+export type { WorkspaceFs } from '../../workspace/workspaceFs';
 
 // =============================================================================
 // THE SERVICES CONTRACT
@@ -59,7 +59,7 @@ export interface ToolHostServices {
 	/** Opens a workspace FILE in the host's editor surface. */
 	openFile?: (path: string) => void;
 	/** Workspace/store file access for tool discovery. */
-	workspaceFs?: ToolWorkspaceFs;
+	workspaceFs?: WorkspaceFs;
 	/** This tool's preference partition — PRE-SCOPED by the host (see
 	 *  scopedPrefs): the handle physically cannot address another app's
 	 *  keys, and system prefs are not reachable through it. */

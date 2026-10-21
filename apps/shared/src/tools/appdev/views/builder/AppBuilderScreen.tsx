@@ -54,6 +54,24 @@ import type { AppBuilderStage, AppSummary, IAppBuilderHost } from '../../types';
 // TYPES
 // =============================================================================
 
+/** The prefs key holding the active activity view. */
+const STAGE_PREF_KEY = 'stage';
+
+/**
+ * Maps a persisted stage to the CURRENT vocabulary, defaulting to the landing
+ * view. Two legacy values exist and must not resurrect a tab that is gone:
+ * 'develop' predates the DEVELOP -> DESIGN rename, and 'code' predates the
+ * web host dropping the CODE tab (the Explorer's file tabs replaced it).
+ *
+ * @param raw - The persisted value, or undefined when never persisted.
+ * @returns A stage that exists today.
+ */
+function normalizeStage(raw: unknown): AppBuilderStage {
+	if (raw === 'develop') return 'design';
+	if (raw === 'design' || raw === 'package' || raw === 'store' || raw === 'deploy' || raw === 'dashboard') return raw;
+	return 'dashboard';
+}
+
 /** Props for the {@link AppBuilderScreen} component. */
 export interface IAppBuilderScreenProps {
 	/** The host adapter — the single seam to platform data and actions. */
@@ -62,10 +80,6 @@ export interface IAppBuilderScreenProps {
 	app: AppSummary;
 	/** Host-rendered live preview surface (iframe wrapper). */
 	previewPane?: React.ReactNode;
-	/** Initial activity view (defaults to 'dashboard'). */
-	initialStage?: AppBuilderStage;
-	/** Notified when the user switches views (hosts persist view state). */
-	onStageChange?: (stage: AppBuilderStage) => void;
 }
 
 // =============================================================================
@@ -119,10 +133,13 @@ const styles: Record<string, React.CSSProperties> = {
  * @param props - See {@link IAppBuilderScreenProps}.
  */
 export const AppBuilderScreen: React.FC<IAppBuilderScreenProps> = ({
-	host, app, previewPane, initialStage, onStageChange,
+	host, app, previewPane,
 }) => {
 	// ── Stage — the active activity view ─────────────────────────────────
-	const [stage, setStage] = useState<AppBuilderStage>(initialStage ?? 'dashboard');
+	// Persisted HERE, not by the host: it is a pref like every other App
+	// Builder UI pref, read synchronously off the host's prefs partition.
+	// Both hosts used to carry identical stage plumbing of their own.
+	const [stage, setStage] = useState<AppBuilderStage>(() => normalizeStage(host.getPref?.(STAGE_PREF_KEY)));
 
 	// ── Namespace gate ───────────────────────────────────────────────────
 	// The app id's prefix must match the org's developerId to publish. On a
@@ -148,11 +165,11 @@ export const AppBuilderScreen: React.FC<IAppBuilderScreenProps> = ({
 		],
 	}), []);
 
-	/** Switch views and let the host persist the selection. */
+	/** Switch views and persist the selection. */
 	const selectStage = (id: string): void => {
 		const next = id as AppBuilderStage;
 		setStage(next);
-		onStageChange?.(next);
+		host.setPref?.(STAGE_PREF_KEY, next);
 	};
 
 	return (

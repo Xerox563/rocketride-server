@@ -36,10 +36,11 @@
 //
 // There is deliberately NO shared flat bag. The raw string-keyed PrefsStore
 // below is the HOST/storage layer; tool and shell code consume it through
-// `typedPrefs` (compile-time keys) and hosts hand tools `scopedPrefs`
-// partitions. Orthogonal to ownership, each WRITE may carry a durability
-// SCOPE: 'workspace' (roams with the workspace) or 'global' (per user).
-// The key's OWNER decides its scope; storage backends map both.
+// `typedPrefs` (compile-time keys) and hosts hand tools their partition.
+//
+// PARTITIONS ARE THE ONLY AXIS. There is deliberately no second durability
+// 'scope': an app has ONE bag, and state that must outlive or span apps goes
+// in the `shell` partition, which is what "global" ever meant here.
 //
 // Reads are SYNCHRONOUS (grid persistence and boot paths demand it): a
 // store hydrates once (await `ready` before first mount where ordering
@@ -48,9 +49,6 @@
 // =============================================================================
 
 import { useSyncExternalStore } from 'react';
-
-/** Durability of one written key: roams with the workspace, or per-user. */
-export type PrefScope = 'workspace' | 'global';
 
 /**
  * The raw, string-keyed preference store a HOST implements. Tool and shell
@@ -63,7 +61,7 @@ export interface PrefsStore {
 	/** One key's current value (synchronous). */
 	get(key: string): unknown;
 	/** Writes one key (fire-and-forget merge; notifies subscribers). */
-	set(key: string, value: unknown, scope?: PrefScope): void;
+	set(key: string, value: unknown): void;
 	/** Subscribe to any change; returns unsubscribe. */
 	subscribe(cb: () => void): () => void;
 	/** Resolves once the store has hydrated from its backend. */
@@ -79,12 +77,6 @@ export interface PrefsStore {
 export interface ShellPrefsMap {
 	/** The sidebar chrome style ('rocketride' | 'vscode' | 'cursor'). */
 	sidebarMode?: string;
-	/** The sidebar strip's tab order (mode ids + `tool:<appId>` ids). */
-	sidebarTabOrder?: string[];
-	/** Pinned dev-tool app ids, in pin order. */
-	devToolPins?: string[];
-	/** Disabled builtin tool ids (builtins are disabled, never removed). */
-	disabledBuiltins?: string[];
 	/** DataGrid layout blobs: tableId -> { persistence type -> blob }. */
 	tableLayouts?: Record<string, Record<string, unknown>>;
 }
@@ -96,7 +88,7 @@ export interface TypedPrefsStore<M> {
 	/** One key's current value. */
 	get<K extends keyof M & string>(key: K): M[K] | undefined;
 	/** Writes one key. */
-	set<K extends keyof M & string>(key: K, value: M[K], scope?: PrefScope): void;
+	set<K extends keyof M & string>(key: K, value: M[K]): void;
 	/** Subscribe to any change; returns unsubscribe. */
 	subscribe(cb: () => void): () => void;
 	/** Resolves once hydrated. */
@@ -136,60 +128,162 @@ export function scopedPrefs(store: PrefsStore, partition: string): PrefsStore {
 			return out;
 		},
 		get: (key) => store.get(prefix + key),
-		set: (key, value, scope) => store.set(prefix + key, value, scope),
+		set: (key, value) => store.set(prefix + key, value),
 		subscribe: (cb) => store.subscribe(cb),
 		ready: store.ready,
 	};
 }
 
+// =============================================================================
+// THE MIRROR — how a REALM gets a prefs store
+// =============================================================================
+//
+// Prefs are the fourth mirror, beside status/account/services: the workspace
+// manager (the browser shell root, or the VS Code extension host) owns the
+// state and is the SINGLE WRITER. Realms never touch the workspace files —
+// that is state shared across realms, and direct access means lost updates
+// (two realms read, both write, one silently wins).
+//
+// ONE RETAINED TOPIC PER PARTITION, not one for the whole workspace. A realm
+// receives the handful of small keys for the app it hosts and cannot even
+// OBSERVE another app's prefs — the isolation `scopedPrefs` gives by key
+// prefix, now enforced at the transport. (These topic names are keyed by
+// partition, against the usual static-name doctrine. The exception is
+// deliberate and bounded: partitions are durable app identities, a handful
+// per workspace, not per-session — the thing that doctrine exists to stop.)
+//
+// `appState` — the Documents blob, and the bulk of a workspace file — has no
+// place here. It is opaque to the shell and already owned by the Documents
+// library; if a realm ever needs it, that is a separate channel.
+// =============================================================================
+
+/** The retained topic carrying ONE partition's prefs. */
+export function prefsTopic(partition: string): string {
+	return `shell:prefs:${partition}`;
+}
+
+/** The minimal bus surface a mirrored prefs store needs. */
+export interface IPrefsBus {
+	/** Subscribe to a retained topic (replays the current snapshot). */
+	subscribe(topic: string, cb: (snapshot: unknown) => void): () => void;
+	/** Fire-and-forget op to the workspace manager. */
+	emitOp(op: string, params: unknown): void;
+}
+
 /**
- * A hydrate-once, in-memory store over a message bridge — the shape every
- * ISOLATED host realm needs (a VS Code webview, an iframe): the host seeds
- * the full snapshot once (`seed`), writes go up through `post`, and remote
- * echoes land through `apply`. Reads never wait on the wire.
+ * A MIRRORED prefs store for ONE partition — the shape every realm uses.
  *
- * @param post - Sends one write to the owning side.
- * @returns The store plus the bridge's seed/apply feeds.
+ * Reads are SYNCHRONOUS off the realm's mirrored copy (never a round-trip,
+ * which is the constraint grid persistence and boot paths impose). Writes go
+ * to the manager as a fire-and-forget `shell.setPref`; it merges,
+ * republishes, and debounces the dump, so every realm converges.
+ *
+ * `shell.prefs.attach` is what makes the first snapshot arrive: the registry
+ * cannot tell the manager that someone subscribed, and a partition the
+ * manager has not loaded has no retained value to replay. The realm
+ * therefore DECLARES its partition and the manager publishes it — even when
+ * empty, so `ready` resolves either way.
+ *
+ * @param bus - The realm's connection manager (subscribe + emitOp).
+ * @param partition - The partition this store is confined to.
+ * @returns The store plus a disposer for its subscription.
  */
-export function createBridgedPrefsStore(post: (key: string, value: unknown, scope: PrefScope) => void): {
-	store: PrefsStore;
-	/** Seeds (or replaces) the hydrated snapshot; resolves `ready`. */
-	seed(values: Record<string, unknown>): void;
-	/** Applies one remote write (another realm changed a key). */
-	apply(key: string, value: unknown): void;
-} {
+export function createMirroredPrefsStore(bus: IPrefsBus, partition: string): { store: PrefsStore; dispose(): void } {
 	let values: Record<string, unknown> = {};
 	const subs = new Set<() => void>();
 	let resolveReady!: () => void;
 	const ready = new Promise<void>((resolve) => (resolveReady = resolve));
-	const notify = () => subs.forEach((cb) => cb());
+	const notify = (): void => subs.forEach((cb) => cb());
+
+	const off = bus.subscribe(prefsTopic(partition), (snapshot) => {
+		values = { ...((snapshot as Record<string, unknown>) ?? {}) };
+		resolveReady();
+		notify();
+	});
+	// Subscribe FIRST, then declare — a publish answering the attach must not
+	// land before there is anyone to receive it.
+	bus.emitOp('shell.prefs.attach', { partition });
 
 	const store: PrefsStore = {
 		snapshot: () => values,
 		get: (key) => values[key],
-		set(key, value, scope) {
-			// Optimistic: the local cache is current immediately; the owning
-			// side persists (fire-and-forget, like every prefs write).
+		set(key, value) {
+			// Optimistic: a read in the same tick sees the write. The
+			// manager's republish confirms it (and corrects it if it merged
+			// something else in between).
 			values = { ...values, [key]: value };
 			notify();
-			post(key, value, scope ?? 'workspace');
+			bus.emitOp('shell.setPref', { partition, key, value });
 		},
 		subscribe(cb) {
 			subs.add(cb);
-			return () => { subs.delete(cb); };
+			return () => {
+				subs.delete(cb);
+			};
 		},
 		ready,
 	};
+	return { store, dispose: off };
+}
+
+/** A realm's per-partition prefs stores, created on demand. */
+export interface IPrefsHub {
+	/** The mirrored store for one partition (cached per name). */
+	partition(name: string): PrefsStore;
+	/** Drops every subscription this hub opened. */
+	dispose(): void;
+}
+
+/**
+ * A realm's prefs hub: one mirrored store per partition, created on demand
+ * and cached.
+ *
+ * A realm hosts more than one partition — its own chrome reads `shell`, and
+ * every tool it mounts reads `app:<id>` (or `preview:<id>`). Each gets its
+ * own topic; the hub keeps them from being subscribed twice.
+ *
+ * @param bus - The realm's connection manager.
+ * @returns The hub, plus a disposer that drops every subscription.
+ */
+/** This realm's hub (see {@link realmPrefsHub}). */
+let realmHub: IPrefsHub | null = null;
+
+/**
+ * THE prefs hub for this realm — one per page/webview, created over the
+ * realm's bus on first use.
+ *
+ * Every consumer shares it, so a partition has exactly ONE mirrored store
+ * and one subscription no matter how many components read it. Before this
+ * existed each host built its own hub (and the dev-tool strip kept a third
+ * store of its own), which meant several mirrors of the same partition
+ * racing to answer the same question.
+ *
+ * Never dispose this from a component: it belongs to the realm, not to
+ * whoever happened to read prefs first. `createPrefsHub` stays for the
+ * cases that genuinely need an isolated hub (tests, a second bus).
+ *
+ * @param bus - The realm's bus; used only on the first call.
+ * @returns The realm's hub.
+ */
+export function realmPrefsHub(bus: IPrefsBus): IPrefsHub {
+	if (!realmHub) realmHub = createPrefsHub(bus);
+	return realmHub;
+}
+
+export function createPrefsHub(bus: IPrefsBus): IPrefsHub {
+	const stores = new Map<string, { store: PrefsStore; dispose(): void }>();
 	return {
-		store,
-		seed(next) {
-			values = { ...next };
-			resolveReady();
-			notify();
+		partition(name) {
+			let entry = stores.get(name);
+			if (!entry) {
+				entry = createMirroredPrefsStore(bus, name);
+				stores.set(name, entry);
+			}
+			return entry.store;
 		},
-		apply(key, value) {
-			values = { ...values, [key]: value };
-			notify();
+		dispose() {
+			for (const entry of stores.values()) entry.dispose();
+			stores.clear();
 		},
 	};
 }

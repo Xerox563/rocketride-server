@@ -330,15 +330,15 @@ function createWorkspaceBackend(): IVirtualFileSystem {
 		 * per 256 paths instead of one per file). Same text contract as
 		 * read(); unreadable entries are omitted.
 		 */
-		async readMany(paths: string[]): Promise<Map<string, unknown>> {
+		async readMany(paths: string[]): Promise<Record<string, unknown>> {
 			const client = requireClient();
-			const out = new Map<string, unknown>();
+			const out: Record<string, unknown> = {};
 			const decoder = new TextDecoder();
 			for (let i = 0; i < paths.length; i += 256) {
 				const chunk = paths.slice(i, i + 256);
 				const results = await client.fsReadMany(chunk.map((p) => toStorePath(parseVirtualPath(p) as VirtualPath)));
 				results.forEach((entry, idx) => {
-					if (entry.ok && entry.data) out.set(chunk[idx], decoder.decode(entry.data));
+					if (entry.ok && entry.data) out[chunk[idx]] = decoder.decode(entry.data);
 				});
 			}
 			return out;
@@ -432,7 +432,7 @@ let builtScopeKey: string | null = null;
 async function stashForScopeSwitch(outgoing: Workspace): Promise<void> {
 	const view = outgoing.view;
 	try {
-		view.setWriteThrough(false);
+		void view.setWriteThrough(false);
 		for (const path of view.dirtyPaths()) {
 			try {
 				// step: read serves the dirty overlay (the live buffer) — the
@@ -494,11 +494,21 @@ export function createWorkspace(options: { hostAppId: string; autoCommit: boolea
 		// decided before the restored pending state is known. Staging is
 		// namespaced per scope: each team's (and the user tree's) pending
 		// state rehydrates only into its own workspace.
-		const view = new StagedFileSystem(base, new StagingStore(options.hostAppId, scopeKey), { writeThrough: false });
+		const view = new StagedFileSystem(base, new StagingStore(options.hostAppId, scopeKey), {
+			writeThrough: false,
+			// step: staged mutations announce on the SAME bus as physical
+			// writes — manual mode's saves reach every onFsChange consumer
+			// (dev preview, rescans) exactly like write-through saves do.
+			// Write-through delegates to the backend, which announces itself.
+			onMutate: (p, origin) => {
+				const vp = parseVirtualPath(p);
+				if (vp) emitFsChange(toStorePath(vp), origin ?? DEFAULT_WRITE_ORIGIN);
+			},
+		});
 		await view.whenReady();
 		const pendingBlocksAuto = options.autoCommit && view.hasPendingChanges();
 		const effectiveAuto = options.autoCommit && !pendingBlocksAuto;
-		if (effectiveAuto) view.setWriteThrough(true);
+		if (effectiveAuto) void view.setWriteThrough(true);
 		const policy = new CommitPolicy(view, effectiveAuto);
 		workspace = { view, policy, pendingBlocksAuto };
 		return workspace;

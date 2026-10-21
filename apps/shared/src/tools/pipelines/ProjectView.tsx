@@ -23,7 +23,7 @@
  * player, and DVR session (sorted A→Z by source name).
  */
 
-import React, { useState, useCallback, useRef, useMemo, useEffect, ComponentProps, CSSProperties, ReactNode } from 'react';
+import React, { useState, useCallback, useRef, useMemo, useEffect, CSSProperties, ReactNode } from 'react';
 
 import { TabPanel } from 'shell';
 import { ContentHeader } from 'shell';
@@ -31,6 +31,8 @@ import { TabControl } from 'shell';
 import type { ViewMenu } from 'shell';
 import CanvasPanel from 'shared/tools/pipelines/panels/design/canvas';
 import { PrefsProvider, type IPrefsApi } from 'shell';
+import type { PrefsStore } from 'shell';
+import { AppStateProvider, type IAppStateApi } from 'shell';
 import { commonStyles } from 'shell';
 import { OAUTH_ROOT_URL } from 'shell';
 
@@ -45,9 +47,7 @@ import type { ProjectViewMode, ViewState, TaskStatus } from './types';
 import { DeployTab } from './panels/deploy';
 import type { IPipelineDeploy } from './panels/deploy';
 import { TASK_STATE } from './types';
-import { writeProjectPreference } from './utils/prefs';
 
-const CLOUD_CANVAS_PROMPT_DISMISSED_KEY = 'cloudCanvasPromptDismissed';
 
 // =============================================================================
 // PROPS
@@ -87,8 +87,11 @@ export interface IProjectViewProps {
 	isNew?: boolean;
 	/** Initial view state (mode, flowViewMode, viewport). Used as starting values; ProjectView manages its own local view state after mount. */
 	initialViewState?: ViewState;
-	/** Initial user preferences. Used as starting values; ProjectView manages its own local prefs after mount. */
-	initialPrefs?: Record<string, unknown>;
+	/** The editor's PREFERENCES — one value for the user, everywhere: drawer
+	 *  widths and the Cloud-prompt dismissal. Per-document state does NOT
+	 *  live here; it rides this view's own view state (see docViewState.tsx).
+	 *  Absent = preferences do not persist in this host. */
+	prefs?: PrefsStore;
 	/** Called when the user edits the pipeline in the canvas. */
 	onContentChanged?: (project: any) => void;
 	/** Called to validate a pipeline. Host returns validation result as a Promise. */
@@ -104,8 +107,6 @@ export interface IProjectViewProps {
 	onPipelineAction?: (action: 'run' | 'stop' | 'restart', source?: string) => void;
 	/** Called when view state changes (mode, flowViewMode, viewport). */
 	onViewStateChange?: (viewState: ViewState) => void;
-	/** Called when one user preference changes (e.g. panel widths, toggles). */
-	onPrefsChange?: (prefs: Record<string, unknown>) => void;
 	/** Called when the user clicks an external link in the canvas. */
 	onOpenLink?: (url: string, displayName?: string) => void;
 	/** Opens the host's RocketRide Cloud setup flow. */
@@ -178,24 +179,6 @@ const styles = {
 		overflow: 'hidden',
 		backgroundColor: 'var(--rr-bg-default)',
 	} as CSSProperties,
-	disconnectOverlay: {
-		...commonStyles.modalOverlay,
-		backdropFilter: 'blur(8px)',
-		WebkitBackdropFilter: 'blur(8px)',
-		zIndex: 1000,
-	} as CSSProperties,
-	disconnectButton: {
-		padding: '14px 40px',
-		fontSize: 'var(--rr-font-size-h4)',
-		fontWeight: 700,
-		fontFamily: 'var(--rr-font-family)',
-		color: '#ffffff',
-		backgroundColor: 'transparent',
-		border: '2px solid rgba(255, 255, 255, 0.7)',
-		borderRadius: 6,
-		cursor: 'default',
-		letterSpacing: '0.05em',
-	} as CSSProperties,
 	canvasPadding: {
 		padding: 2,
 		minHeight: 0,
@@ -257,7 +240,10 @@ function migrateViewMode(mode: string | undefined): ProjectViewMode {
 // COMPONENT
 // =============================================================================
 
-const ProjectView: React.FC<IProjectViewProps> = ({ project, documentTitle, servicesJson, isConnected, cloudConnectionConfigured, isSubscribed = true, statusMap, serverHost = '', isDirty = false, isNew = false, initialViewState, initialPrefs, onContentChanged, onValidate, getNodeSchema, onPipelineAction, onViewStateChange, onPrefsChange, onOpenLink, onOpenCloudSetup, oauth2RootUrl = OAUTH_ROOT_URL, oauthReturnUrl, onOpenExternal, pendingOAuthTokens, clearPendingOAuthTokens, onSave, onExport, isReadonly = false, envKeys, onMissingEnvVars, liveLogEvents = [], openEventStream, fetchTimeline, deploy }) => {
+/** The prefs key behind the Cloud prompt's "Don't show again". */
+const CLOUD_CANVAS_PROMPT_DISMISSED_KEY = 'cloudCanvasPromptDismissed';
+
+const ProjectView: React.FC<IProjectViewProps> = ({ project, documentTitle, servicesJson, isConnected, cloudConnectionConfigured, isSubscribed = true, statusMap, serverHost = '', isDirty = false, isNew = false, initialViewState, prefs, onContentChanged, onValidate, getNodeSchema, onPipelineAction, onViewStateChange, onOpenLink, onOpenCloudSetup, oauth2RootUrl = OAUTH_ROOT_URL, oauthReturnUrl, onOpenExternal, pendingOAuthTokens, clearPendingOAuthTokens, onSave, onExport, isReadonly = false, envKeys, onMissingEnvVars, liveLogEvents = [], openEventStream, fetchTimeline, deploy }) => {
 	// --- Local view state (initialized from props, managed locally) -----------
 
 	const [viewState, setViewState] = useState<ViewState>(() => ({
@@ -268,22 +254,11 @@ const ProjectView: React.FC<IProjectViewProps> = ({ project, documentTitle, serv
 		viewport: initialViewState?.viewport,
 	}));
 
-	const [prefs, setPrefs] = useState<Record<string, unknown>>(() => initialPrefs ?? {});
-	useEffect(() => {
-		if (!initialPrefs) return;
-		setPrefs((prev) => {
-			const next = { ...prev, ...initialPrefs };
-			const hasChanged = Object.keys(next).length !== Object.keys(prev).length || Object.keys(next).some((key) => next[key] !== prev[key]);
-			return hasChanged ? next : prev;
-		});
-	}, [initialPrefs]);
 
 	// --- Stable callback refs ------------------------------------------------
 
 	const onViewStateChangeRef = useRef(onViewStateChange);
 	onViewStateChangeRef.current = onViewStateChange;
-	const onPrefsChangeRef = useRef(onPrefsChange);
-	onPrefsChangeRef.current = onPrefsChange;
 
 	// --- Extract source components from project ------------------------------
 
@@ -320,24 +295,42 @@ const ProjectView: React.FC<IProjectViewProps> = ({ project, documentTitle, serv
 		});
 	}, []);
 
-	// The ONE prefs accessor the canvas — and every DetailPanel inside it — reads
-	// and writes through, handed down via <PrefsProvider> below. getPref reads the
-	// local prefs bag; setPref merges a key locally and sends only that key to the
-	// host (onPrefsChange → useWorkspace on web / the extension host in VS Code).
+	// The workspace's TWO accessors, both handed down as providers below (see
+	// the shell's AppStateContext for why there are two).
 	//
-	// getPref reads through a ref so prefsApi keeps a STABLE identity across pref
-	// writes: memoizing on [prefs] would hand FlowPreferences a fresh getPref on
-	// every toolbar/view/width write, re-running its layout-read effect and
-	// churning the canvas. The ref always holds the latest prefs, so reactivity is
-	// preserved (prefs state lives here and re-renders the subtree).
-	const prefsRef = useRef(prefs);
-	prefsRef.current = prefs;
+	// PREFERENCES — one value for the user, everywhere. Drawer widths (via
+	// DetailPanel's persistKey) and the Cloud-prompt dismissal. Straight to
+	// the host's prefs store: reads are synchronous off the realm's mirrored
+	// copy, writes send ONE key to the workspace manager.
 	const prefsApi = useMemo<IPrefsApi>(
 		() => ({
-			getPref: (key) => prefsRef.current?.[key],
-			setPref: (key, value) => writeProjectPreference(setPrefs, onPrefsChangeRef.current, key, value),
+			getPref: (key) => prefs?.get(key),
+			setPref: (key, value) => prefs?.set(key, value),
 		}),
-		[]
+		[prefs]
+	);
+	// Re-render when any realm changes a pref in this partition.
+	const [, bumpPrefs] = useState(0);
+	useEffect(() => prefs?.subscribe(() => bumpPrefs((n) => n + 1)), [prefs]);
+
+	// APP STATE — the app's own state, scoped to THIS document. The slice is
+	// the view state this component already owns and already reports upward;
+	// the host persists it (Documents layers per-editor state on appState on
+	// the web; the VS Code host writes the same blob keyed by document URI).
+	//
+	// Reads go through a ref so the accessor keeps a STABLE identity across
+	// writes: memoizing on [viewState] would hand FlowPreferences a fresh
+	// getter on every toolbar or layout write, re-running its read effect and
+	// churning the canvas. The ref always holds the latest state, so
+	// reactivity is preserved (viewState lives here and re-renders).
+	const viewStateRef = useRef(viewState);
+	viewStateRef.current = viewState;
+	const appStateApi = useMemo<IAppStateApi>(
+		() => ({
+			getAppState: (key) => (viewStateRef.current as unknown as Record<string, unknown>)[key],
+			setAppState: (key, value) => updateViewState({ [key]: value } as Partial<ViewState>),
+		}),
+		[updateViewState]
 	);
 
 	const [cloudPromptDismissedForActivation, setCloudPromptDismissedForActivation] = useState(false);
@@ -555,6 +548,7 @@ const ProjectView: React.FC<IProjectViewProps> = ({ project, documentTitle, serv
 			content: (
 				<div style={styles.canvasPadding}>
 					<PrefsProvider value={prefsApi}>
+						<AppStateProvider value={appStateApi}>
 						{project && (
 							<CanvasPanel
 								oauth2RootUrl={oauth2RootUrl}
@@ -589,6 +583,7 @@ const ProjectView: React.FC<IProjectViewProps> = ({ project, documentTitle, serv
 								envKeys={envKeys}
 							/>
 						)}
+						</AppStateProvider>
 					</PrefsProvider>
 				</div>
 			),
@@ -631,13 +626,6 @@ const ProjectView: React.FC<IProjectViewProps> = ({ project, documentTitle, serv
 			<div style={styles.pageBody}>
 				<TabPanel panels={panels} activeId={activeMode} />
 			</div>
-			{!isConnected && (
-				<div style={styles.disconnectOverlay}>
-					<button type="button" style={styles.disconnectButton} disabled>
-						[ Disconnected ]
-					</button>
-				</div>
-			)}
 		</div>
 	);
 };

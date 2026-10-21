@@ -316,7 +316,12 @@ export class ConnectionManager implements IConnectionManager {
 	private readonly retainedRegistry = createRetainedRegistry();
 	private retainedPort: IRetainedPort = localRetainedPort(this.retainedRegistry);
 	/** Local subscriptions, re-pointed wholesale when the port swaps. */
-	private readonly topicSubs = new Map<string, { cbs: Set<RetainedSubscriber>; off: () => void }>();
+	// `last` caches the newest snapshot this realm has SEEN for the topic, so
+	// a subscriber joining an already-watched topic replays off it. Without
+	// that cache the port's replay — which fires once, when the port
+	// subscription is created — reaches only the FIRST local subscriber, and
+	// every later one waits for an edge that may never come.
+	private readonly topicSubs = new Map<string, { cbs: Set<RetainedSubscriber>; off: () => void; last?: { snapshot: unknown } }>();
 
 	/**
 	 * User-intent control events that must not be silently dropped if emitted
@@ -1663,12 +1668,24 @@ export class ConnectionManager implements IConnectionManager {
 	public subscribe(topic: string, cb: RetainedSubscriber): () => void {
 		let entry = this.topicSubs.get(topic);
 		if (!entry) {
-			const cbs = new Set<RetainedSubscriber>();
-			entry = { cbs, off: () => {} };
+			entry = { cbs: new Set<RetainedSubscriber>(), off: () => {} };
 			this.topicSubs.set(topic, entry);
-			entry.off = this.retainedPort.subscribe(topic, (snapshot) => this.fanTopic(cbs, snapshot));
+			entry.off = this.watchTopic(topic, entry);
 		}
 		entry.cbs.add(cb);
+		// LATE JOINER on a topic already watched here: the port replayed to
+		// whoever opened the subscription, not to this callback. Replay off
+		// the cache — async, matching the port's own discipline, and only if
+		// the subscription is still live. A joiner that arrives before that
+		// first replay has no cache yet and needs none: it is already in
+		// `cbs`, so the port's replay fans to it too.
+		if (entry.last) {
+			const { snapshot } = entry.last;
+			const joined = entry;
+			queueMicrotask(() => {
+				if (joined.cbs.has(cb)) this.fanTopic(new Set([cb]), snapshot);
+			});
+		}
 		return () => {
 			const current = this.topicSubs.get(topic);
 			if (!current) return;
@@ -1704,8 +1721,17 @@ export class ConnectionManager implements IConnectionManager {
 		this.retainedPort = port;
 		for (const [topic, entry] of this.topicSubs) {
 			entry.off();
-			entry.off = port.subscribe(topic, (snapshot) => this.fanTopic(entry.cbs, snapshot));
+			entry.off = this.watchTopic(topic, entry);
 		}
+	}
+
+	/** Opens the port subscription for one topic entry, caching each snapshot
+	 *  it delivers so late joiners can replay (see topicSubs). */
+	private watchTopic(topic: string, entry: { cbs: Set<RetainedSubscriber>; off: () => void; last?: { snapshot: unknown } }): () => void {
+		return this.retainedPort.subscribe(topic, (snapshot) => {
+			entry.last = { snapshot };
+			this.fanTopic(entry.cbs, snapshot);
+		});
 	}
 
 	/** Delivers one snapshot to a topic's local subscribers (throw-isolated). */

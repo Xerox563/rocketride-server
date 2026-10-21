@@ -283,10 +283,15 @@ const HomeApp: React.FC<ShellAppProps> = ({ identity }) => {
 		if (prefs.theme !== target) setTheme(target);
 	}, [identity, prefs.theme, setTheme]);
 
-	// Filter out this app from the list — don't show ourselves
+	// The desktop rule (one rule, both editions): show what is ON THE
+	// DESKTOP. OSS reports every server app onDesktop (there is no desktop
+	// concept — the server inventory IS the desktop), SaaS reports the
+	// user's entitlements; a probe-only entry (logged out) carries no flag
+	// and stays visible as the landing grid. Self is filtered — a launcher,
+	// not launchable.
 	const apps = useMemo(
 		() => appManifest
-			.filter((a) => a.id !== 'rocketride.hello')
+			.filter((a) => a.id !== 'rocketride.hello' && a.onDesktop !== false)
 			.sort((a, b) => a.name.localeCompare(b.name)),
 		[appManifest],
 	);

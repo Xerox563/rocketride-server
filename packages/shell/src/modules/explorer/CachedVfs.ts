@@ -340,20 +340,20 @@ export class CachedVfs implements IVirtualFileSystem {
 	 * @param paths - Relative file paths.
 	 * @returns Map of path to content for every readable path.
 	 */
-	async readMany(paths: string[]): Promise<Map<string, unknown>> {
-		const out = new Map<string, unknown>();
+	async readMany(paths: string[]): Promise<Record<string, unknown>> {
+		const out: Record<string, unknown> = {};
 		const misses: string[] = [];
 		for (const path of paths) {
 			const overlay = this.overlays.get(path);
-			if (overlay?.isDirty()) { out.set(path, overlay.getContent()); continue; }
-			if (this.contents.has(path)) { out.set(path, this.contents.get(path)); continue; }
+			if (overlay?.isDirty()) { out[path] = overlay.getContent(); continue; }
+			if (this.contents.has(path)) { out[path] = this.contents.get(path); continue; }
 			misses.push(path);
 		}
 		if (misses.length === 0) return out;
 		if (this.backend.readMany) {
-			for (const [path, content] of await this.backend.readMany(misses)) {
+			for (const [path, content] of Object.entries(await this.backend.readMany(misses))) {
 				this.contents.set(path, content);
-				out.set(path, content);
+				out[path] = content;
 			}
 			return out;
 		}
@@ -361,7 +361,7 @@ export class CachedVfs implements IVirtualFileSystem {
 			try {
 				const content = await this.backend.read(path);
 				this.contents.set(path, content);
-				out.set(path, content);
+				out[path] = content;
 			} catch { /* unreadable — omitted by contract */ }
 		}));
 		return out;

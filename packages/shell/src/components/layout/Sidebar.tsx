@@ -41,7 +41,10 @@ import { RocketRideMark } from '../RocketRideMark';
 import { SidebarCollapsedProvider } from '../sidebar-menu/SidebarCollapsedContext';
 import { SidebarActiveViewProvider } from '../sidebar-menu/SidebarActiveViewContext';
 import type { SidebarActiveView } from '../sidebar-menu/SidebarActiveViewContext';
-import { SidebarViewStrip, rememberedWorkbench, rememberWorkbench, resolveActiveView, viewTitleStyle } from './SidebarViewStrip';
+import { SidebarViewStrip, resolveActiveView, viewTitleStyle } from './SidebarViewStrip';
+import { realmPrefsHub, typedPrefs, usePref } from '../workspace/prefsStore';
+import type { SidebarPrefsMap } from '../../workspace/devToolPins';
+import { appPartition } from '../../workspace/workspaceStore';
 import { TabPanel } from '../tab-panel/TabPanel';
 import type { ITabPanelPanel } from '../tab-panel/TabPanel';
 import { useHostChromeState } from './HostChromeContext';
@@ -458,18 +461,20 @@ const Sidebar: React.FC<SidebarProps> = ({ themeConfig: _themeConfig, account, h
 	// SAME remembered per-app selection — a rendering switch on the compact
 	// media query, never a different sidebar with its own switcher.
 	const views: SidebarViewContainer[] = (sidebarViews ?? []).slice().sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-	const [drawerViewId, setDrawerViewId] = useState(() => rememberedWorkbench(activeAppId).view ?? '');
-	// Unlike the workbench (keyed by app id in ShellLayout) this frame stays
-	// mounted across app switches, so the stored selection is re-read here.
-	useEffect(() => {
-		setDrawerViewId(rememberedWorkbench(activeAppId).view ?? '');
-	}, [activeAppId]);
+	// The APP's own partition — same store the workbench frame reads, so the
+	// two chromes cannot disagree about which container is selected.
+	const drawerPrefs = useMemo(
+		() => typedPrefs<SidebarPrefsMap>(realmPrefsHub(ConnectionManager.getInstance()).partition(appPartition(activeAppId))),
+		[activeAppId],
+	);
+	const drawerViewId = usePref(drawerPrefs, 'sidebarActiveView') ?? '';
+	// No per-app re-read: the selection is ONE pref the store notifies on, so
+	// this frame and the workbench cannot drift apart or go stale.
 	const activeDrawerView = resolveActiveView(views, drawerViewId);
-	/** Activate a container — the same memory the workbench reads/writes. */
+	/** Activate a container — the same pref the workbench reads/writes. */
 	const selectDrawerView = useCallback((id: string) => {
-		setDrawerViewId(id);
-		rememberWorkbench(activeAppId, { view: id });
-	}, [activeAppId]);
+		drawerPrefs.set('sidebarActiveView', id);
+	}, [drawerPrefs]);
 	const drawerViewHandle = useMemo<SidebarActiveView>(() => ({
 		activeViewId: activeDrawerView?.id ?? '',
 		setActiveView: selectDrawerView,

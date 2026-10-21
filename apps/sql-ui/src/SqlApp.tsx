@@ -336,7 +336,8 @@ export const SqlDevTool: React.FC<DevToolProps> = ({ peer, channel, docKey, docu
 	// enablement flag is the host-published `host:connection` system topic.
 	const toolChannel = useMemo(() => channel ?? createToolChannel(peer), [channel, peer]);
 	const call = useMemo(() => createToolController<SqlOps>(peer), [peer]);
-	const engineReady = useConnectionReady(toolChannel);
+	// Tri-state collapsed at the gate: "no snapshot yet" disables like false.
+	const engineReady = useConnectionReady(toolChannel) === true;
 	const env = useMemo(() => createRemoteSqlEnv(call, engineReady), [call, engineReady]);
 
 	// The connection editor rides its own docKey family ('edit:…'); every
@@ -432,7 +433,7 @@ const SqlAppReady: React.FC<{ docs: Documents }> = ({ docs }) => {
 								isActive={state.activeGroupId === groupId}
 								canClose={canCloseGroups}
 								onSplit={(gid, dir) => docs.splitGroupWithDocument(gid, dir)}
-								onCloseGroup={(gid) => docs.closeGroup(gid)}
+								onCloseGroup={(gid) => { void docs.requestCloseGroup(gid); }}
 							/>
 
 							{/* Editor content — all editors stay mounted; visibility

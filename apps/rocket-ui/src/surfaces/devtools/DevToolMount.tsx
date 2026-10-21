@@ -21,51 +21,27 @@
 // SOFTWARE.
 
 // =============================================================================
-// DEV-TOOL MOUNT — mounts a tool's devToolFrame or devToolSidebar in-shell
+// DEV-TOOL MOUNT — this host's descriptor source for the shared tool mount
 // =============================================================================
 //
-// The rocket-ui counterpart of the VS Code extension's DevToolWebview (frame)
-// and DevToolSidebarMount (sidebar) — far smaller here because this host IS
-// an MF host already: the tool's descriptor loads through the workspace's
-// standard app loading (useWorkspace().loadApp), sharing the shell/react
-// singletons and the one authenticated client. No manual federation init, no
-// CSP management, no second SDK connection.
+// The MOUNT itself is shared (tools/core ToolMount): builtin resolution,
+// slot selection, DevToolProps wiring and every status state live there, so
+// this host cannot hold a different opinion about them. What belongs here
+// is the one genuinely host-specific fact — HOW A DESCRIPTOR IS OBTAINED.
+//
+// In a framework root that is the shell's own app loader
+// (useWorkspace().loadApp): the remotes the bootstrap registered, the
+// shared shell/react singletons, one authenticated client. No manual
+// federation init, no CSP management, no second SDK connection.
 // =============================================================================
 
 import React, { useEffect, useMemo } from 'react';
-import type { CSSProperties } from 'react';
-import { activeDocKeyFor, ConnectionManager, HOST_CONNECTION_TOPIC, toolDocUri, useShellConnection, useWorkspace } from 'shell';
-import { getBuiltinTools } from 'shared/tools/core';
+import { activeDocKeyFor, toolDocUri, useShellConnection, useWorkspace } from 'shell';
+import { isBuiltinTool, ToolMount } from 'shared/tools/core';
+import type { ToolDescriptorSource } from 'shared/tools/core';
 import type { DevToolProps, Documents } from 'shell';
 import { getFramePeer, getSidebarPeer, getToolChannel } from './peer';
 import { getDocs } from '../../docs';
-
-// =============================================================================
-// STYLES
-// =============================================================================
-
-const styles = {
-	/** Bounded flex host: the tool fills it and scrolls internally. */
-	host: {
-		flex: 1,
-		minHeight: 0,
-		minWidth: 0,
-		display: 'flex',
-		flexDirection: 'column',
-	} as CSSProperties,
-	/** Centered status message (loading / error / disconnected). */
-	status: {
-		flex: 1,
-		display: 'flex',
-		alignItems: 'center',
-		justifyContent: 'center',
-		textAlign: 'center',
-		padding: '0 24px',
-		color: 'var(--rr-text-secondary)',
-		fontSize: 13,
-		fontFamily: 'var(--rr-font-family)',
-	} as CSSProperties,
-};
 
 // =============================================================================
 // COMPONENT
@@ -85,18 +61,17 @@ export interface DevToolMountProps {
 }
 
 /**
- * Mounts one surface of a dev tool. Loads the tool's AppDescriptor through
- * the workspace (idempotent; shared with every other consumer of the app),
- * then renders `devToolFrame` or `devToolSidebar` with DevToolProps — the
- * live shell client and the in-memory peer side matching the slot.
+ * Resolves this host's descriptor for a tool and hands it to {@link ToolMount}.
+ *
+ * @param props - See {@link DevToolMountProps}.
+ * @returns The mounted tool surface.
  */
 const DevToolMount: React.FC<DevToolMountProps> = ({ appId, name, slot, docKey }) => {
 	const { loadedApps, loadApp, appLoadErrors } = useWorkspace();
 	const { client, isConnected } = useShellConnection();
 
-	// BUILTIN tools resolve from the static registry — no MF load, no
-	// workspace descriptor; a store tool can never shadow a builtin id.
-	const builtin = getBuiltinTools().find((t) => t.id === appId);
+	// Builtins never load — the shared mount resolves them from the registry.
+	const builtin = isBuiltinTool(appId);
 
 	// Kick the descriptor load; loadApp no-ops when already loaded/loading.
 	useEffect(() => {
@@ -112,36 +87,21 @@ const DevToolMount: React.FC<DevToolMountProps> = ({ appId, name, slot, docKey }
 		close: (key: string) => getDocs()?.discardDocument(toolDocUri(appId, key)),
 	}), [appId]);
 
-	// The HOST owns the `host:connection` system topic (frames derive their
-	// enablement from it; no tool publishes it). ONE retained topic for the
-	// whole framework now — every frame peer subscribes it and forwards it as
-	// the channel state message tools already read (useConnectionReady).
-	// Per-mount publishes of the same value are idempotent overwrites.
-	useEffect(() => {
-		ConnectionManager.getInstance().publish(HOST_CONNECTION_TOPIC, { connected: isConnected });
-	}, [isConnected]);
+	// NOTE: the `host:connection` system topic is published by the HOST at
+	// registration time (registerRocketHostOps — level-driven, re-published
+	// on every connection edge), NOT here: a per-mount effect keyed on
+	// [isConnected] cannot repair a stale retained value when its own hook
+	// value never changes, which stranded tools on false while connected.
 
-	const label = name ?? appId;
 	const descriptor = loadedApps[appId];
 	const loadError = appLoadErrors[appId];
+	const source = useMemo<ToolDescriptorSource>(() => {
+		if (loadError) return { status: 'error', error: loadError };
+		if (!descriptor) return { status: 'loading' };
+		return { status: 'ready', descriptor };
+	}, [descriptor, loadError]);
 
-	if (!client || !isConnected) {
-		return <div style={styles.status}>Connect to a RocketRide server to open {label}.</div>;
-	}
-	if (!builtin && loadError) {
-		return <div style={styles.status}>Could not load {label}: {loadError}</div>;
-	}
-	if (!builtin && !descriptor) {
-		return <div style={styles.status}>Loading {label}…</div>;
-	}
-
-	const Component = builtin
-		? (slot === 'frame' ? builtin.frame : builtin.sidebar)
-		: (slot === 'frame' ? descriptor?.devToolFrame : descriptor?.devToolSidebar);
-	if (!Component) {
-		return <div style={styles.status}>{label} does not declare a {slot === 'frame' ? 'devToolFrame' : 'devToolSidebar'}.</div>;
-	}
-
+	const unavailable = !client || !isConnected ? `Connect to a RocketRide server to open ${name ?? appId}.` : null;
 	const peer = slot === 'frame' ? getFramePeer(appId) : getSidebarPeer(appId);
 	const channel = getToolChannel(appId, slot);
 
@@ -149,45 +109,36 @@ const DevToolMount: React.FC<DevToolMountProps> = ({ appId, name, slot, docKey }
 	// activeDocKey — host-tracked, exactly like the VS Code extension. The
 	// inner component exists so the Documents store hook is unconditional.
 	const docs = getDocs();
+	const shared = { appId, slot, peer, channel, documents, source, unavailable, ...(name !== undefined ? { name } : {}) };
 	if (slot === 'sidebar' && docs) {
-		return (
-			<div style={styles.host}>
-				<SidebarWithActiveDoc docs={docs} appId={appId} Component={Component} peer={peer} channel={channel} documents={documents} />
-			</div>
-		);
+		return <SidebarWithActiveDoc docs={docs} mount={shared} />;
 	}
 
-	return (
-		<div style={styles.host}>
-			<Component peer={peer} channel={channel} documents={documents} {...(docKey !== undefined ? { docKey } : {})} />
-		</div>
-	);
+	return <ToolMount {...shared} {...(docKey !== undefined ? { docKey } : {})} />;
 };
 
 /** Props for {@link SidebarWithActiveDoc}. */
 interface ISidebarWithActiveDocProps {
 	docs: Documents;
-	appId: string;
-	Component: React.ComponentType<DevToolProps>;
-	peer: DevToolProps['peer'];
-	channel: DevToolProps['channel'];
-	documents: NonNullable<DevToolProps['documents']>;
+	mount: Omit<React.ComponentProps<typeof ToolMount>, 'activeDocKey' | 'docKey'>;
 }
 
 /**
- * Renders a tool's sidebar (controller) with the workbench's fronted tool
+ * Mounts a tool's sidebar (controller) with the workbench's fronted tool
  * document as `activeDocKey`: the active editor's `tool:<appId>/<docKey>`
  * URI maps to its key, the generic `tool:<appId>` frame maps to '', and any
  * other document — another tool, a pipeline, a file — maps to null so the
  * controller clears its selection.
+ *
+ * @param props - See {@link ISidebarWithActiveDocProps}.
+ * @returns The mounted sidebar.
  */
-const SidebarWithActiveDoc: React.FC<ISidebarWithActiveDocProps> = ({ docs, appId, Component, peer, channel, documents }) => {
+const SidebarWithActiveDoc: React.FC<ISidebarWithActiveDocProps> = ({ docs, mount }) => {
 	const state = docs.useStore();
 	const group = state.groups[state.activeGroupId];
 	const editorId = group?.editorIds[group.activeEditorIndex];
 	const uri = editorId ? state.editors[editorId]?.documentUri : undefined;
-	const activeDocKey = activeDocKeyFor(uri, appId);
-	return <Component peer={peer} channel={channel} documents={documents} activeDocKey={activeDocKey} />;
+	return <ToolMount {...mount} activeDocKey={activeDocKeyFor(uri, mount.appId)} />;
 };
 
 export default DevToolMount;

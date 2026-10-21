@@ -7,18 +7,21 @@
  * DevToolReadmeWebview — the dev-tool details page as a shell bus realm.
  *
  * The tool's identity arrives stamped in the served HTML (`data-rr-args`);
- * everything else is mirror + ops: catalog facts off the mirrored
- * accountInfo (apps list), connection state off the mirrored status, the
- * pinned set via `host.devtools.installed` + the `changed` push, and
- * Install/Remove as fire-and-forget `host.devtools.*` ops. Icons are plain
- * engine URLs (base = the mirrored server HTTP URL).
+ * the catalog row comes from the SERVER — the shared fetch over the
+ * brokered `client.app.list` op, the same call every surface makes (never
+ * the account list, which on SaaS is the user's DESKTOP and cannot name a
+ * tool they have not gotten yet). Connection state off the mirrored
+ * status, the pinned set via `host.devtools.installed` + the `changed`
+ * push, Install/Remove as fire-and-forget `host.devtools.*` ops. Icons are
+ * engine URLs; the page CSP admits the engine origin.
  */
 
 import React, { useEffect, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { ConnectionManager } from 'shell';
-import type { ConnectResult } from 'rocketride';
 import { ToolDetailsView } from 'shared/tools/core/chrome/ToolDetailsView';
+import { fetchDevToolCatalog } from 'shared/tools/core/devToolCatalog';
+import type { AppManifestEntry } from 'shell';
 
 const statusStyle: CSSProperties = {
 	position: 'fixed',
@@ -32,17 +35,7 @@ const statusStyle: CSSProperties = {
 	backgroundColor: 'var(--rr-bg-default)',
 };
 
-/** One account-payload app row, as this page reads it. */
-interface IAppRow {
-	id: string;
-	name: string;
-	version?: string;
-	publisher?: string;
-	description?: string;
-	categories?: string[];
-	icon?: string;
-	readme?: string;
-}
+
 
 /** The page's open identity, stamped by the host into the served HTML. */
 function stampedAppId(): string {
@@ -58,14 +51,20 @@ const DevToolReadmeWebview: React.FC = () => {
 	const cm = ConnectionManager.getInstance();
 	const appId = stampedAppId();
 
-	const [account, setAccount] = useState<ConnectResult | null>(() => cm.getAccountInfo() ?? null);
+	const [catalog, setCatalog] = useState<AppManifestEntry[] | null>(null);
 	const [connected, setConnected] = useState(() => cm.isConnected());
 	const [installedIds, setInstalledIds] = useState<string[] | null>(null);
 
 	useEffect(() => {
+		const refresh = (): void => {
+			setConnected(cm.isConnected());
+			if (!cm.isConnected()) return;
+			void fetchDevToolCatalog(cm).then(setCatalog, () => setCatalog((prev) => prev ?? []));
+		};
+		refresh();
 		const offs = [
-			cm.on('shell:accountUpdate', (data) => setAccount(data)),
-			cm.on('shell:statusChange', () => setConnected(cm.isConnected())),
+			cm.on('shell:statusChange', refresh),
+			cm.on('shell:accountUpdate', refresh),
 			cm.handle('host.devtools.changed', (p) => setInstalledIds((p as { ids: string[] }).ids)),
 		];
 		void cm.request('host.devtools.installed', {} as never).then(
@@ -76,15 +75,14 @@ const DevToolReadmeWebview: React.FC = () => {
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, []);
 
-	const apps = (account?.apps ?? []) as IAppRow[];
-	const row = connected ? apps.find((a) => a?.id === appId) : undefined;
+	const row = connected ? catalog?.find((a) => a?.id === appId) : undefined;
 
-	if (installedIds === null || !row) {
-		return <div style={statusStyle}>{installedIds === null ? 'Loading…' : connected ? 'This tool is no longer available on the server.' : 'Connect to a RocketRide server to view this tool.'}</div>;
+	if (installedIds === null || (connected && catalog === null) || !row) {
+		return <div style={statusStyle}>{installedIds === null || catalog === null ? 'Loading…' : connected ? 'This tool is no longer available on the server.' : 'Connect to a RocketRide server to view this tool.'}</div>;
 	}
 
-	// Engine-served icons are root-relative in the catalog; resolve against
-	// the mirrored server HTTP base.
+	// Engine-served icons are root-relative in the catalog; the page CSP
+	// admits the engine origin.
 	const base = (cm.getHttpUrl() || '').replace(/\/$/, '');
 	const iconUrl = row.icon ? (row.icon.startsWith('/') && base ? `${base}${row.icon}` : row.icon) : undefined;
 

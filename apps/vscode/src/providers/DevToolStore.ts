@@ -6,29 +6,40 @@
 /**
  * DevToolStore — the pinned dev-tools list, per workspace.
  *
- * A thin wrapper over `context.workspaceState` (the GridConfigStore pattern):
- * one key holding the ordered app-id list a user has added to the sidebar's
- * tool tabs. Pinning is deliberately workspace-local — not server desktop
- * membership — so each workspace keeps its own tool set.
+ * A thin wrapper over ONE key in the `shell` prefs partition: the ordered
+ * app-id list a user has added to the sidebar's tool tabs. The host reads the
+ * workspace manager directly (it IS the manager's process); webviews see the
+ * same key through the mirror.
  */
 
 import * as vscode from 'vscode';
-import { getLogger } from '../shared/util/output';
-import { readPref, writePref } from './PrefsBag';
+// Deep import on purpose — ext-host-safe .ts leaf (see busHost.ts).
+import { appPartition } from 'shell/src/workspace/workspaceStore';
+import { PIPE_BUILDER_APP_ID } from '../shared/types';
+import type { WorkspaceStore } from 'shell/src/workspace/workspaceStore';
+import { readDevToolPins, storeToolIds, DEV_TOOL_PINS_KEY } from 'shell/src/workspace/devToolPins';
 
-/** The system prefs key holding the pinned tool ids (ShellPrefsMap). */
-const PINS_KEY = 'devToolPins';
+// The ONE toolbar list (workspace/devToolPins): order AND tool set in one
+// array, `builtin.<id>` for what the bundle carries and a bare app id for a
+// store tool. This store speaks STORE TOOL IDS, so it reads the store
+// entries out and writes them back into their slots.
+
 
 export class DevToolStore {
 	/** Fires after every successful add/remove. */
 	private changeEmitter = new vscode.EventEmitter<void>();
 	public readonly onDidChange = this.changeEmitter.event;
 
-	constructor(private context: vscode.ExtensionContext) {}
+	constructor(private prefs: WorkspaceStore) {}
 
-	/** The pinned tool app ids, in pin order. */
+	/** The pinned STORE tool app ids, in toolbar order. */
 	public getAll(): string[] {
-		return readPref<string[]>(this.context, PINS_KEY) ?? [];
+		return storeToolIds(this.readList());
+	}
+
+	/** The whole toolbar list (builtins included). */
+	private readList(): string[] {
+		return readDevToolPins(this.prefs.prefsFor(appPartition(PIPE_BUILDER_APP_ID)));
 	}
 
 	/**
@@ -37,12 +48,10 @@ export class DevToolStore {
 	 * @param appId - The tool's app id.
 	 */
 	public add(appId: string): void {
-		const current = this.getAll();
-		if (current.includes(appId)) return;
-		writePref(this.context, PINS_KEY, [...current, appId], 'workspace').then(
-			() => this.changeEmitter.fire(),
-			(err: unknown) => getLogger().error(`[DevToolStore] Failed to persist add: ${err}`),
-		);
+		const list = this.readList();
+		if (list.includes(appId)) return;
+		this.prefs.setPref(appPartition(PIPE_BUILDER_APP_ID), DEV_TOOL_PINS_KEY, [...list, appId]);
+		this.changeEmitter.fire();
 	}
 
 	/**
@@ -51,12 +60,14 @@ export class DevToolStore {
 	 * @param appId - The tool's app id.
 	 */
 	public remove(appId: string): void {
-		const current = this.getAll();
-		if (!current.includes(appId)) return;
-		writePref(this.context, PINS_KEY, current.filter((id) => id !== appId), 'workspace').then(
-			() => this.changeEmitter.fire(),
-			(err: unknown) => getLogger().error(`[DevToolStore] Failed to persist remove: ${err}`),
+		const list = this.readList();
+		if (!list.includes(appId)) return;
+		this.prefs.setPref(
+			appPartition(PIPE_BUILDER_APP_ID),
+			DEV_TOOL_PINS_KEY,
+			list.filter((id) => id !== appId),
 		);
+		this.changeEmitter.fire();
 	}
 
 	/** Disposes the change emitter. */

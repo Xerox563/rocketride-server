@@ -11,7 +11,7 @@
  * shell:cloudAuth / shell:account), the strip's tool rows off retained
  * devtools:rows, the fronted tool document off retained devtools:activeDoc,
  * host-driven selection off the sidebar:modeSelect signal, diagnostics off
- * the pipeline:sourceDiagnostics signal, prefs over host.prefs.*, actions
+ * the pipeline:sourceDiagnostics signal, prefs over the mirror, actions
  * over host.* emitOps, and workspace FS over host.fs.*. The only remaining
  * postMessage is sidebar:command (+ the view:ready boot marker).
  *
@@ -28,10 +28,12 @@ import '../../../themes/rocketride-vscode.css';
 import './sidebar.css';
 
 import { SidebarChrome, ToolPanel } from 'shared/tools/core/chrome/SidebarChrome';
-import { ToolHostProvider } from 'shared/tools/core';
+import { ToolHostProvider, useArmedToolPeers } from 'shared/tools/core';
 import { useToolStrip } from 'shared/tools/core/chrome/useToolStrip';
 import type { BuiltinToolServices } from 'shared/tools/core';
-import { ConnectionManager, SidebarFooter, createBridgedPrefsStore, createSidebarBusPeer } from 'shell';
+import { ConnectionManager, SidebarFooter, realmPrefsHub, createSidebarBusPeer, createWorkspaceFs } from 'shell';
+import { appPartition } from 'shell/src/workspace/workspaceStore';
+import { applyContainerOrder, containerIdOf, readDevToolPins, DEV_TOOL_PINS_KEY } from 'shell/src/workspace/devToolPins';
 import { registerBuiltinTools } from 'shared/tools/builtins';
 import { pushSourceDiagnostics } from 'shared/tools/pipelines/diagnostics';
 import type { ConnectionInfo, SidebarMode, ToolTab } from 'shared/tools/core/chrome/types';
@@ -39,7 +41,7 @@ import { useMessaging } from '../hooks/useMessaging';
 import { DevToolSidebarMount } from './DevToolSidebarMount';
 import type { DevToolHostInfo } from './DevToolSidebarMount';
 import type { SidebarHostToWebview, SidebarWebviewToHost } from './messages';
-import { createBusWorkspaceFs } from './svcFsClient';
+
 import { buildFooterMenuItems } from './footerMenu';
 import { isAppSubscribed } from 'shared/utils/subscriptionGate';
 import { PIPE_BUILDER_APP_ID } from '../../../shared/types';
@@ -75,21 +77,16 @@ const SidebarViewWebview: React.FC = () => {
 	// Entries, tasks, and the MY APPS list live in the TOOLS now (shared
 	// tools/pipelines, tools/appdev) — this webview only provides services.
 
-	// Builtin tools the user DISABLED (host-persisted; seeded by stripSeed).
-	const [disabledBuiltins, setDisabledBuiltins] = useState<string[]>([]);
+	// The one toolbar list: order AND which builtins are enabled.
+	const [pins, setPins] = useState<string[]>([]);
 
 	// ── Pinned dev tools (icon tabs on the mode strip) + the catalog ───────
 	const [tools, setTools] = useState<ToolTab[]>([]);
-	const [availableTools, setAvailableTools] = useState<ToolTab[]>([]);
 	// Persisted strip order (modes + tool tabs); seeded from the host, set
 	// optimistically on drag.
 	const [tabOrder, setTabOrder] = useState<string[]>([]);
 	const [devToolHost, setDevToolHost] = useState<DevToolHostInfo | null>(null);
 	const [sidebarMode, setSidebarMode] = useState<SidebarMode>('apps');
-	// Tools whose sidebar mount has been ACTIVATED — a tool pane loads its
-	// remote only once its tab has been selected (user click, or host focus
-	// sync from its frame panel); never merely because the tool is pinned.
-	const [activatedTools, setActivatedTools] = useState<ReadonlySet<string>>(new Set());
 	// The editor's fronted tool document (host-tracked). undefined = no
 	// signal received yet (mounts fall back to their own state); appId null
 	// = a non-tool tab is fronted.
@@ -123,9 +120,9 @@ const SidebarViewWebview: React.FC = () => {
 	sendRef.current = sendMessage;
 
 	// ── Workspace-FS capability ─────────────────────────────────────────────
-	// The ToolWorkspaceFs the shared tool code runs against — host.fs.* ops
+	// The WorkspaceFs the shared tool code runs against — host.fs.* ops
 	// (the bus correlates) + the realm-registered sidebar.fs.event push.
-	const workspaceFs = useMemo(() => createBusWorkspaceFs(), []);
+	const workspaceFs = useMemo(() => createWorkspaceFs(ConnectionManager.getInstance()), []);
 
 	// ── Tool peers (bus-carried) ────────────────────────────────────────────
 	// Stable sidebar-side peers per tool, riding the bus's retained/signal
@@ -143,35 +140,34 @@ const SidebarViewWebview: React.FC = () => {
 		};
 	}, []);
 
-	// This realm's prefs backend: a hydrate-once bridged store over the bus —
-	// `host.prefs.snapshot` seeds it (resolving its `ready`), writes ride
-	// `host.prefs.set` (the same ops the account and pipeline pages use).
-	// Per-tool partitions are carved off it in the builtin strip items.
-	const prefsBridge = useMemo(() => createBridgedPrefsStore((key, value, scope) => ConnectionManager.getInstance().emitOp('host.prefs.set', { key, value, scope } as never)), []);
+	// This realm's prefs hub: ONE mirrored store per partition off the
+	// workspace manager. The shell partition carries the strip's own state
+	// (mode, order, disabled builtins); each builtin tool gets its own
+	// `app:<id>` partition, carved off the same hub in useToolStrip.
+	const prefsHub = useMemo(() => realmPrefsHub(ConnectionManager.getInstance()), []);
+	// The PIPE BUILDER's app partition — the same one rocket-ui reads. This
+	// sidebar is that app's surface in another host, not a separate app, so
+	// its toolbar arrangement is one piece of state shared between them.
+	const shellPrefs = useMemo(() => prefsHub.partition(appPartition(PIPE_BUILDER_APP_ID)), [prefsHub]);
+	useEffect(() => prefsHub.dispose, [prefsHub]);
 	useEffect(() => {
-		void ConnectionManager.getInstance()
-			.request('host.prefs.snapshot', {} as never)
-			.then((values) => {
-				const snap = (values ?? {}) as Record<string, unknown>;
-				prefsBridge.seed(snap);
-				// The strip prefs ride the same bag: the persisted mode (seed
-				// once — a user selection made before the snapshot landed must
-				// not be reverted), the strip order, and the disabled builtins.
-				const mode = snap['sidebarMode'];
-				if (typeof mode === 'string' && !sidebarModeSeededRef.current) {
-					sidebarModeSeededRef.current = true;
-					setSidebarMode(mode as SidebarMode);
-				}
-				const order = snap['sidebarTabOrder'];
-				if (Array.isArray(order)) setTabOrder(order as string[]);
-				const disabled = snap['disabledBuiltins'];
-				if (Array.isArray(disabled)) setDisabledBuiltins(disabled as string[]);
-			})
-			.catch(() => {
-				/* snapshot unavailable — defaults stand */
-			});
-		// eslint-disable-next-line react-hooks/exhaustive-deps -- one hydration per realm
-	}, []);
+		// The strip prefs ride the shell partition. The mode is seeded ONCE —
+		// a user selection made before the first snapshot landed must not be
+		// reverted by it.
+		const apply = (): void => {
+			const snap = shellPrefs.snapshot();
+			const mode = snap['sidebarMode'];
+			if (typeof mode === 'string' && !sidebarModeSeededRef.current) {
+				sidebarModeSeededRef.current = true;
+				setSidebarMode(mode as SidebarMode);
+			}
+			// ONE list for the toolbar: order AND tool set (workspace/devToolPins).
+			setTabOrder(readDevToolPins(snap).map(containerIdOf));
+			setPins(readDevToolPins(snap));
+		};
+		apply();
+		return shellPrefs.subscribe(apply);
+	}, [shellPrefs]);
 
 	// Host-driven strip state over the bus: the fronted tool document
 	// (RETAINED — replay covers a freshly booted webview; both-null is the
@@ -224,15 +220,13 @@ const SidebarViewWebview: React.FC = () => {
 			cm.on('shell:statusChange', () => {
 				setDevToolHost(cm.isConnected() ? { engineHttpUrl: (cm.getHttpUrl() || 'http://localhost:5565').replace(/\/$/, '') } : null);
 			}),
-			// The strip's tool rows + the dev-tool catalog (RETAINED — the
-			// cached seed replays into any fresh webview, the slow compose
-			// replaces it in place; a snapshot without `available` keeps the
-			// last catalog instead of wiping the Modules list).
+			// The strip's tool rows (RETAINED — the cached seed replays into
+			// any fresh webview; the slow compose replaces it in place). The
+			// PICKER list does not ride this: the panel asks the server
+			// itself (see the catalog effect below).
 			cm.subscribe('devtools:rows', (snap) => {
-				const rows = snap as { tools?: ToolTab[]; available?: ToolTab[] } | undefined;
-				if (!rows?.tools) return;
-				setTools(rows.tools);
-				if (rows.available) setAvailableTools(rows.available);
+				const rows = snap as { tools?: ToolTab[] } | undefined;
+				if (rows?.tools) setTools(rows.tools);
 			}),
 			cm.subscribe('devtools:activeDoc', (snap) => {
 				const d = snap as { appId: string | null; docKey: string | null } | undefined;
@@ -318,14 +312,6 @@ const SidebarViewWebview: React.FC = () => {
 		isSubscribed: subscribed,
 	}), [workspaceFs, openPage, onOpenFile, onSourceAction, onOpenUnknownTask, subscribed]);
 
-	/** Flips one builtin's enabled state (optimistic; persisted as a pref). */
-	const onToggleBuiltin = useCallback((id: string, enabled: boolean) => {
-		setDisabledBuiltins((prev) => {
-			const next = enabled ? prev.filter((d) => d !== id) : [...prev.filter((d) => d !== id), id];
-			ConnectionManager.getInstance().emitOp('host.prefs.set', { key: 'disabledBuiltins', value: next, scope: 'workspace' } as never);
-			return next;
-		});
-	}, []);
 
 	// Shared builtin-strip glue: items (with per-tool scoped prefs), store
 	// rows, and the activation/deactivation discipline. Builtins have no
@@ -334,11 +320,15 @@ const SidebarViewWebview: React.FC = () => {
 	const revealTool = useCallback((toolId: string) => {
 		ConnectionManager.getInstance().emitOp('host.devtools.reveal', { appId: toolId } as never);
 	}, []);
-	const { builtinItems, builtinStoreRows, focusTool: onFocusTool, deactivateReplacedTab, announceBuiltinSelected } = useToolStrip({
+	const { builtinItems, builtinStoreRows, toggleBuiltin, focusTool: onFocusTool, deactivateReplacedTab, announceBuiltinSelected } = useToolStrip({
 		host: 'vscode',
 		services: toolServices,
-		prefsStore: prefsBridge.store,
-		disabledBuiltins,
+		prefsHub,
+		pins,
+		onPinsChange: (next: string[]) => {
+			setPins(next);              // optimistic; the mirror confirms
+			shellPrefs.set(DEV_TOOL_PINS_KEY, next);
+		},
 		revealTool,
 	});
 
@@ -370,22 +360,16 @@ const SidebarViewWebview: React.FC = () => {
 		ConnectionManager.getInstance().emitOp('host.devtools.readme', { appId: toolId } as never);
 	}, []);
 
-	/** Drag-reorder → apply optimistically, persist as a workspace pref. */
+	/** Drag-reorder → apply optimistically, persist into the one toolbar list.
+	 *  Entries this chrome never declared keep their slot. */
 	const onReorderTabs = useCallback((orderedIds: string[]) => {
 		setTabOrder(orderedIds);
-		ConnectionManager.getInstance().emitOp('host.prefs.set', { key: 'sidebarTabOrder', value: orderedIds, scope: 'workspace' } as never);
+		const current = readDevToolPins(shellPrefs.snapshot());
+		shellPrefs.set(DEV_TOOL_PINS_KEY, applyContainerOrder(orderedIds, current));
 	}, []);
 
-	// Lazy activation: a tool's sidebar mount loads only once its tab has been
-	// selected — by the user, or by the host syncing focus from the tool's
-	// frame panel (modeUpdate). Activation is sticky for the document's
-	// lifetime so TabPanel's keep-mounted semantics preserve its state.
-	useEffect(() => {
-		if (!sidebarMode.startsWith('tool:')) return;
-		const id = sidebarMode.slice('tool:'.length);
-		setActivatedTools((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
-	}, [sidebarMode]);
-
+	// Arm this realm's sidebar-side peers before any frame traffic arrives.
+	useArmedToolPeers(useMemo(() => tools.map((t) => t.id), [tools]), sidebarPeers);
 	/** Stable documents API for one tool's sidebar mount — opens/closes the
 	 *  tool's per-document editor panels (e.g. one per database connection)
 	 *  through the extension host. One object per tool, like the peers. */
@@ -408,8 +392,10 @@ const SidebarViewWebview: React.FC = () => {
 	const renderToolPanel = useCallback((id: string): React.ReactNode => {
 		const tool = tools.find((t) => t.id === id);
 		if (!tool) return null;
+		// The card is the fallback for a tool that declares no devToolSidebar
+		// — NOT a lazy-mount placeholder: SidebarChrome decides whether this
+		// panel is built at all, and only calls here once it is.
 		const card = <ToolPanel tool={tool} onOpen={onOpenTool} onRemove={onRemoveTool} />;
-		if (!activatedTools.has(id)) return card;
 		// Host-tracked selection for THIS tool: its fronted docKey, null when
 		// another tab is fronted, undefined before any signal arrived.
 		const activeDocKey = activeToolDoc === undefined ? undefined : (activeToolDoc.appId === id ? activeToolDoc.docKey : null);
@@ -423,7 +409,7 @@ const SidebarViewWebview: React.FC = () => {
 				fallback={card}
 			/>
 		);
-	}, [tools, devToolHost, activatedTools, activeToolDoc, sidebarPeers, getDocumentsApi, onOpenTool, onRemoveTool]);
+	}, [tools, devToolHost, activeToolDoc, sidebarPeers, getDocumentsApi, onOpenTool, onRemoveTool]);
 
 	// The TRUE previous mode, mirrored from state so externally applied
 	// changes (modeUpdate, stripSeed) update it silently — only a chrome
@@ -443,7 +429,7 @@ const SidebarViewWebview: React.FC = () => {
 			// this click must not revert it.
 			sidebarModeSeededRef.current = true;
 			setSidebarMode(mode);
-			ConnectionManager.getInstance().emitOp('host.prefs.set', { key: 'sidebarMode', value: mode, scope: 'workspace' } as never);
+			shellPrefs.set('sidebarMode', mode);
 		},
 		[deactivateReplacedTab, announceBuiltinSelected]
 	);
@@ -485,7 +471,7 @@ const SidebarViewWebview: React.FC = () => {
 
 	return (
 		<ToolHostProvider value={toolServices}>
-			<SidebarChrome items={builtinItems} footerSlot={footerSlot} sidebarMode={sidebarMode} onSidebarModeChange={onSidebarModeChange} toolTabs={{ tools, available: availableTools, onOpenTool, onFocusTool, onShowTool, onRemoveTool, onRefreshTools, renderToolPanel, builtins: builtinStoreRows, onToggleBuiltin }} tabOrder={tabOrder} onReorderTabs={onReorderTabs} />
+			<SidebarChrome items={builtinItems} footerSlot={footerSlot} sidebarMode={sidebarMode} onSidebarModeChange={onSidebarModeChange} toolTabs={{ tools, onOpenTool, onFocusTool, onShowTool, onRemoveTool, onRefreshTools, renderToolPanel, builtins: builtinStoreRows, onToggleBuiltin: toggleBuiltin }} tabOrder={tabOrder} onReorderTabs={onReorderTabs} />
 		</ToolHostProvider>
 	);
 };

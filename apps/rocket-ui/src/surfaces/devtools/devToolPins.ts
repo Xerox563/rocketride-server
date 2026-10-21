@@ -21,34 +21,45 @@
 // SOFTWARE.
 
 // =============================================================================
-// DEV-TOOL PINS — the pinned tool list and strip order, workspace-prefs backed
+// DEV-TOOL PINS — the strip's membership and order, shell-partition backed
 // =============================================================================
 //
-// The browser counterpart of the VS Code extension's DevToolStore
-// (workspaceState 'rr.devTools' / 'rr.sidebarTabOrder'): which dev tools the
-// user pinned and how the mode strip is ordered, persisted in the workspace
-// prefs bag so both the sidebar and the rail (RocketApp's sidebarViews) read
-// ONE source of truth through useWorkspace(). No icon/meta cache is needed
-// here — the server app manifest is in memory from boot.
+// THREE INDEPENDENT LAYERS (settled 2026-10-19; see
+// shared/tools/core/devToolCatalog.ts for the full doctrine):
+//
+//   CATALOG  what the caller can reach  — rrext_app list, fetched here
+//   DESKTOP  what the user has GOT      — the store surface's business,
+//                                         never consulted by the strip
+//   STRIP    this workspace's sidebar   — the pins + order below
+//
+// Pins and order live in the SHELL PARTITION of the workspace prefs — the
+// same bag VS Code's DevToolStore writes — so both hosts read one strip per
+// server workspace, and the list cannot change underfoot when the active
+// app switches (the old home, the active app's bag, did exactly that).
+//
+// The pinned TABS still resolve against the login manifest (appManifest):
+// a tab must be loadable this session, and the manifest is the loadable
+// set. The PICKER list is the fetched catalog — a reachable tool that is
+// not yet loadable may be pinned; its tab mounts once the manifest carries
+// it (the same tolerance VS Code's bare-row fallback gives).
 // =============================================================================
 
-import { useCallback, useMemo } from 'react';
-import { useWorkspace } from 'shell';
-import type { AppManifestEntry } from 'shell';
+import { useCallback, useMemo, useSyncExternalStore } from 'react';
+import { ConnectionManager, realmPrefsHub, useWorkspace } from 'shell';
+import type { AppManifestEntry, PrefsStore } from 'shell';
+import { applyContainerOrder, containerIdOf, readDevToolPins, storeToolIds, DEV_TOOL_PINS_KEY } from 'shell/src/workspace/devToolPins';
+import { appPartition } from 'shell/src/workspace/workspaceStore';
+import { fetchDevToolCatalog } from 'shared/tools/core/devToolCatalog';
 import type { ToolTab } from 'shared/tools/core/chrome/types';
 
-/** Workspace-prefs key: pinned tool app ids, in pin order. */
-const PINS_KEY = 'devToolPins';
-/** Workspace-prefs key: the mode strip's tab order (mode + `tool:` ids). */
-const TAB_ORDER_KEY = 'sidebarTabOrder';
 
 /** A manifest entry's dev-tool membership (`categories` contains 'devTool'). */
 export function isDevTool(entry: AppManifestEntry): boolean {
 	return (entry.categories ?? []).some((c) => String(c).toLowerCase() === 'devtool');
 }
 
-/** Maps a manifest entry to the shared sidebar's ToolTab row shape. */
-export function toToolTab(entry: AppManifestEntry): ToolTab {
+/** Maps a manifest/catalog entry to the shared sidebar's ToolTab row shape. */
+export function toToolTab(entry: Pick<AppManifestEntry, 'id' | 'name' | 'icon' | 'version' | 'description' | 'moduleId' | 'registryVersion'>): ToolTab {
 	return {
 		id: entry.id,
 		name: entry.name,
@@ -60,46 +71,101 @@ export function toToolTab(entry: AppManifestEntry): ToolTab {
 	};
 }
 
+// ── The strip's prefs ───────────────────────────────────────────────────────
+// The REALM's hub owns one mirrored store per partition; this is the ACTIVE
+// APP's — the toolbar is app state, kept in that app's workspace file, not
+// in global.json (which is for what the shell itself is).
+function appPrefsStore(appId: string): PrefsStore {
+	return realmPrefsHub(ConnectionManager.getInstance()).partition(appPartition(appId));
+}
+
+// ── The catalog: one page-level fetch, refreshed on account change ──────────
+// A tiny external store rather than per-hook state so N consumers share one
+// in-flight request and one entries array (stable identity between loads).
+const catalogStore = {
+	entries: null as AppManifestEntry[] | null,
+	subs: new Set<() => void>(),
+	inFlight: false,
+	wired: false,
+};
+
+async function refreshCatalog(): Promise<void> {
+	if (catalogStore.inFlight) return;
+	const cm = ConnectionManager.getInstance();
+	if (!cm.isConnected()) return;
+	catalogStore.inFlight = true;
+	try {
+		// The brokered op — resolves locally here in the root, exactly the
+		// call every webview realm makes. One path.
+		catalogStore.entries = await fetchDevToolCatalog(cm);
+		for (const cb of [...catalogStore.subs]) cb();
+	} catch {
+		/* transient — the next connect/account event refetches */
+	} finally {
+		catalogStore.inFlight = false;
+	}
+}
+
+/** Idempotent: the first caller wires the refresh triggers for the page. */
+function wireCatalog(): void {
+	if (catalogStore.wired) return;
+	catalogStore.wired = true;
+	const cm = ConnectionManager.getInstance();
+	// Account changes move the reachable set (@me/@team rows, new publishes
+	// pushed via apaevt_account); connects establish it.
+	cm.on('shell:connected', () => void refreshCatalog());
+	cm.on('shell:accountUpdate', () => void refreshCatalog());
+	void refreshCatalog();
+}
+
+function subscribeCatalog(cb: () => void): () => void {
+	catalogStore.subs.add(cb);
+	return () => {
+		catalogStore.subs.delete(cb);
+	};
+}
+const catalogSnapshot = (): AppManifestEntry[] | null => catalogStore.entries;
+
 /** What {@link useDevToolPins} returns. */
 export interface DevToolPins {
-	/** Pinned tool app ids, in pin order. */
+	/** The RAW toolbar list — order AND enablement in one array. */
+	list: string[];
+	/** Persists a new toolbar list. */
+	setList: (next: string[]) => void;
+	/** STORE tool app ids in the list, in order — what needs loading. */
 	pins: string[];
-	/** The strip's persisted tab order (mode ids and `tool:<appId>` ids). */
+	/** The same list as chrome container ids — the toolbar order. */
 	tabOrder: string[];
-	/** The full dev-tool catalog from the server manifest, sorted by name. */
-	catalog: AppManifestEntry[];
-	/** Pinned tools resolved against the catalog, as ToolTab rows. */
+	/** The reachable dev-tool catalog (rrext_app list), manifest-shaped;
+	 *  null until the first fetch resolves (surfaces render Loading). */
+	catalog: AppManifestEntry[] | null;
+	/** Pinned tools resolved against the login manifest, as ToolTab rows. */
 	pinnedTools: ToolTab[];
-	/** Pins a tool (no-op when already pinned). */
+	/** Pins a tool at the END of the strip (no-op when already pinned). */
 	pin: (appId: string) => void;
-	/** Unpins a tool. */
+	/** Unpins a tool — the strip only; never a desktop verb. */
 	unpin: (appId: string) => void;
 	/** Persists a new strip order. */
 	setTabOrder: (orderedIds: string[]) => void;
 }
 
 /**
- * The pinned dev tools, strip order, and catalog — one hook, prefs-backed.
- * Every consumer (sidebar content, rail containers, readme page) re-renders
- * through the workspace context when any of them changes a pin.
+ * The pinned dev tools, strip order, and catalog — one hook. Every consumer
+ * (sidebar content, rail containers, readme page) re-renders through the
+ * shared stores when any of them changes a pin.
  */
 export function useDevToolPins(): DevToolPins {
-	const { prefs, updatePrefs, appManifest } = useWorkspace();
+	const { appManifest, activeAppId } = useWorkspace();
+	wireCatalog();
 
-	const pins = useMemo<string[]>(() => {
-		const raw = prefs?.[PINS_KEY];
-		return Array.isArray(raw) ? raw.filter((v): v is string => typeof v === 'string') : [];
-	}, [prefs]);
+	const store = appPrefsStore(activeAppId);
+	const prefsSnap = useSyncExternalStore(store.subscribe, store.snapshot, store.snapshot);
+	const catalog = useSyncExternalStore(subscribeCatalog, catalogSnapshot, catalogSnapshot);
 
-	const tabOrder = useMemo<string[]>(() => {
-		const raw = prefs?.[TAB_ORDER_KEY];
-		return Array.isArray(raw) ? raw.filter((v): v is string => typeof v === 'string') : [];
-	}, [prefs]);
-
-	const catalog = useMemo(
-		() => appManifest.filter(isDevTool).slice().sort((a, b) => a.name.localeCompare(b.name)),
-		[appManifest],
-	);
+	// ONE list: the toolbar order AND the tool set (workspace/devToolPins).
+	const list = useMemo<string[]>(() => readDevToolPins(prefsSnap), [prefsSnap]);
+	const pins = useMemo<string[]>(() => storeToolIds(list), [list]);
+	const tabOrder = useMemo<string[]>(() => list.map(containerIdOf), [list]);
 
 	// Pins resolve against the manifest; an id the server no longer lists is
 	// kept OUT of the rows (nothing to mount) but stays in the pin list so it
@@ -111,17 +177,23 @@ export function useDevToolPins(): DevToolPins {
 	}, [pins, appManifest]);
 
 	const pin = useCallback((appId: string) => {
-		if (pins.includes(appId)) return;
-		updatePrefs({ [PINS_KEY]: [...pins, appId] });
-	}, [pins, updatePrefs]);
+		if (list.includes(appId)) return;
+		store.set(DEV_TOOL_PINS_KEY, [...list, appId]);
+	}, [list, store]);
 
 	const unpin = useCallback((appId: string) => {
-		updatePrefs({ [PINS_KEY]: pins.filter((id) => id !== appId) });
-	}, [pins, updatePrefs]);
+		store.set(DEV_TOOL_PINS_KEY, list.filter((id) => id !== appId));
+	}, [list, store]);
+
+	// The chrome hands back ITS container ids; entries it never declared keep
+	// their slot (a store tool the server has not listed this session).
+	const setList = useCallback((next: string[]) => {
+		store.set(DEV_TOOL_PINS_KEY, next);
+	}, [store]);
 
 	const setTabOrder = useCallback((orderedIds: string[]) => {
-		updatePrefs({ [TAB_ORDER_KEY]: orderedIds });
-	}, [updatePrefs]);
+		store.set(DEV_TOOL_PINS_KEY, applyContainerOrder(orderedIds, list));
+	}, [list, store]);
 
-	return { pins, tabOrder, catalog, pinnedTools, pin, unpin, setTabOrder };
+	return { list, setList, pins, tabOrder, catalog, pinnedTools, pin, unpin, setTabOrder };
 }

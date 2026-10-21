@@ -78,7 +78,7 @@ export interface IWorkspaceFileSystem extends IVirtualFileSystem {
 	 * @param paths - Paths to read.
 	 * @returns Map of path to content; unreadable paths are omitted.
 	 */
-	readMany(paths: string[]): Promise<Map<string, unknown>>;
+	readMany(paths: string[]): Promise<Record<string, unknown>>;
 
 	/**
 	 * The type of a path, consulting the backend when the cached inventory

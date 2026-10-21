@@ -71,7 +71,7 @@ import TidyIcon from 'shared/assets/icons/TidyIcon';
 
 import { INodeType } from '../types';
 import { useFlowProject } from '../context/FlowProjectContext';
-import { usePrefs } from 'shell';
+import { useAppState } from 'shell';
 import { isInVSCode } from 'shell';
 import { useAutoLayout } from '../hooks/useAutoLayout';
 import { useTemplateInstantiator } from '../hooks/useTemplateInstantiator';
@@ -214,16 +214,17 @@ export default function Canvas({ cloudPromptDismissed, onDismissCloudPrompt, onD
 	// --- Canvas state from context -----------------------------------------
 	const { navigationMode, setNavigationMode, isReadonly, isLocked, toggleLock, projectLayout } = useFlowPreferences();
 
-	// The one shared prefs accessor — the same getPref/setPref every app uses.
-	const { getPref, setPref } = usePrefs();
-
-	// --- Floating toolbar position (persisted via workspace prefs) ----------
-	const toolbarPosition = getPref('toolbarPosition') as IToolbarPosition | undefined;
+	// --- Floating toolbar position — APP STATE, per document ----------------
+	// Not a preference: dragging the toolbar in one pipeline must not move it
+	// in every other one. The accessor is scoped to the active document by
+	// whoever provides it (Documents layers per-document on appState).
+	const { getAppState, setAppState } = useAppState();
+	const toolbarPosition = getAppState('toolbarPosition') as IToolbarPosition | undefined;
 	const handleToolbarPositionChange = useCallback(
 		(pos: IToolbarPosition) => {
-			setPref('toolbarPosition', pos);
+			setAppState('toolbarPosition', pos);
 		},
-		[setPref]
+		[setAppState]
 	);
 
 	const { onUndo, onRedo, onViewportChange, isDirty, isNew, onSave, onExport, initialViewport, isConnected, cloudConnectionConfigured, onOpenCloudSetup } = useFlowProject();

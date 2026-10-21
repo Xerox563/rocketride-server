@@ -35,6 +35,20 @@ export type { TraceEvent, TraceRow, TraceLevel } from 'shared/components/trace/t
 // =============================================================================
 
 /** View state — per-view UI state (mode, flowViewMode, viewport). */
+/**
+ * The workspace partition the pipeline editor owns. It is a built-in TOOL, so
+ * its state lives in the tool's own partition — not in the shell bag, and not
+ * in the bag of whatever pipeline happens to be open. Both halves are used:
+ *
+ *   prefs    — the cloud-prompt dismissal. The ONE genuine preference here:
+ *              "Don't show again" means never, anywhere.
+ *   appState — per-DOCUMENT view state, keyed by document URI (page, flow
+ *              view, viewport, toolbar position, navigation mode, canvas
+ *              layout). Moving the toolbar in one pipeline must not move it
+ *              in all of them, which makes these view state, not prefs.
+ */
+export const PIPELINE_PARTITION = 'app:rocketride.pipeBuilder';
+
 export interface ViewState {
 	mode: ProjectViewMode;
 	flowViewMode?: 'pipeline' | 'component';

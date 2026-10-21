@@ -56,31 +56,6 @@ const styles = {
 		fontSize: 13,
 		color: 'var(--rr-text-primary)',
 	} as CSSProperties,
-	/** Full-bleed frosted-glass overlay shown when the shell client is disconnected. */
-	disconnectOverlay: {
-		position: 'absolute',
-		inset: 0,
-		display: 'flex',
-		alignItems: 'center',
-		justifyContent: 'center',
-		backgroundColor: 'rgba(0, 0, 0, 0.45)',
-		backdropFilter: 'blur(8px)',
-		WebkitBackdropFilter: 'blur(8px)',
-		zIndex: 1000,
-	} as CSSProperties,
-	/** Non-interactive status button rendered inside the disconnect overlay. */
-	disconnectButton: {
-		padding: '14px 40px',
-		fontSize: 14,
-		fontWeight: 700,
-		fontFamily: 'var(--rr-font-family)',
-		color: 'var(--rr-fg-button)',
-		backgroundColor: 'transparent',
-		border: '2px solid rgba(255, 255, 255, 0.7)',
-		borderRadius: 6,
-		cursor: 'default',
-		letterSpacing: '0.05em',
-	} as CSSProperties,
 	/**
 	 * Fills the space below the top TabControl strip; TabPanel's
 	 * 100%-height wrapper resolves against this definite flex box.
@@ -415,14 +390,6 @@ const AccountView: React.FC<IAccountViewProps> = (props) => {
 				<TabPanel panels={panels} activeId={section} />
 			</div>
 
-			{/* Frosted-glass overlay with a disabled status button when disconnected. */}
-			{!isConnected && (
-				<div style={styles.disconnectOverlay}>
-					<button type="button" style={styles.disconnectButton} disabled>
-						[ Disconnected ]
-					</button>
-				</div>
-			)}
 		</div>
 	);
 };

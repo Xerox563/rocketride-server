@@ -31,7 +31,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from './shared/util/output';
 import { icons } from './shared/util/icons';
-import { createCatalogueReporter } from './shared/util/catalogueDiagnostic';
+import { createCatalogueReporter } from 'shared/utils/catalogueDiagnostic';
 
 import { ConnectionManager, disconnectCloudConnections } from './connection/connection';
 import { DeployManager } from './connection/deploy-manager';
@@ -50,7 +50,6 @@ import { DevToolStore } from './providers/DevToolStore';
 import { BusHost } from './providers/toolhost/busHost';
 import { registerVscodeOps } from './ops';
 import { registerVscodeDevToolOps } from './ops/devtoolOps';
-import { writePref } from './providers/PrefsBag';
 import { DevToolPanelProvider } from './providers/DevToolPanelProvider';
 // BillingProvider removed — billing is now a tab in AccountProvider
 // AuthProvider removed — auth failures now open the Settings page directly
@@ -195,26 +194,10 @@ async function runMigrations(context: vscode.ExtensionContext): Promise<void> {
 	// New: %PROGRAMDATA%/RocketRide/engine/engine.exe + engine/version.json
 	migrateServiceConfig();
 
-	// Migration 6: Sidebar state into the generic prefs bag ('rr.prefs')
-	// under the ShellPrefsMap system keys — one spelling per concept across
-	// hosts. Workspace-scoped (each workspace migrates on its first open).
-	if (!context.workspaceState.get('sidebarPrefsMigrationDone')) {
-		const moves: Array<[string, string]> = [
-			['rr.devTools', 'devToolPins'],
-			['rr.sidebarTabOrder', 'sidebarTabOrder'],
-			['rr.disabledBuiltins', 'disabledBuiltins'],
-			['rr.sidebarMode', 'sidebarMode'],
-		];
-		for (const [oldKey, newKey] of moves) {
-			const value = context.workspaceState.get(oldKey);
-			if (value !== undefined) {
-				await writePref(context, newKey, value, 'workspace');
-				await context.workspaceState.update(oldKey, undefined);
-				logger.output(`${icons.info} Migrated ${oldKey} -> prefs.${newKey}`);
-			}
-		}
-		await context.workspaceState.update('sidebarPrefsMigrationDone', true);
-	}
+	// NOTE: the old "migration 6" (Memento keys -> the local prefs bag) is
+	// gone with the bag itself. Prefs now live in the server-side workspace,
+	// and existing local values are deliberately NOT carried across — users
+	// reset to defaults once.
 }
 
 /**
@@ -297,8 +280,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				progress.report({ increment: 50, message: 'Creating tree providers...' });
 
 				// Pinned dev-tools store — created before the sidebar (which
-				// renders the tool tabs) and shared with the picker below —
-				const devTools = new DevToolStore(context);
+				// renders the tool tabs) and shared with the picker below — is
+				// constructed after the bus root, which owns the prefs store it
+				// reads its pins from.
 				const engineConnection = ConnectionManager.getInstance();
 
 				// SHELL BUS ROOT: this process owns the engine connection, so
@@ -312,6 +296,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				// settings/cloud/engine family — registers in dependency order
 				// in src/ops. The returned controller is the settings pages'
 				// panel-lifecycle seam (open args, polling, close semantics).
+				const devTools = new DevToolStore(busHost.prefs);
 				const settingsOps = registerVscodeOps(busHost, context);
 				busHost.startMirrors();
 				context.subscriptions.push({ dispose: () => busHost.dispose() });
@@ -472,6 +457,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					title: 'Dev Tool',
 					instanceKey: (args) => (typeof args[0] === 'string' ? args[0] : ''),
 					instanceTitle: (args) => {
+						// Best effort, synchronous (account row, else the raw
+						// id) — the page itself renders from the catalog.
 						const apps = (connectionManager?.getClient()?.getAccountInfo()?.apps ?? []) as Array<{ id: string; name?: string }>;
 						const name = apps.find((a) => a?.id === args[0])?.name ?? String(args[0]);
 						return `Dev Tool: ${name}`;

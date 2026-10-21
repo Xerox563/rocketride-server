@@ -35,6 +35,7 @@ import type { AppManifestEntry, AppDescriptor, AppConfiguration } from '../compo
 // modules reference each other strictly through function calls at runtime,
 // so the import cycle carries no module-evaluation (TDZ) risk.
 import { getAppVersionOverrides, versionedEntryUrl } from './versionOverride';
+import { devBootConfig } from './devGate';
 
 /**
  * Shape of an app entry from the server (rrext_public_probe or ConnectResult).
@@ -500,6 +501,10 @@ export function isDevPreviewPage(): boolean {
  */
 export function previewLockedAppId(): string {
 	try {
+		// Authored preview pages state their identity in the page itself —
+		// no URL, no sessionStorage, no OAuth round-trip concerns.
+		const injected = devBootConfig()?.appId;
+		if (injected) return injected;
 		const params = new URLSearchParams(window.location.search);
 		const fromUrl = params.get('appId') || params.get('appid');
 		if (fromUrl) return fromUrl;

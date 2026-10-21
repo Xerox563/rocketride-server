@@ -34,10 +34,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import type { DevToolProps, ShellAppProps } from 'shell';
-import { ConnectionManager, useShellConnection, useDashboardData, usePolling, AppLayout, createToolChannel, createToolController, typedToolChannel, useConnectionReady, useToolState } from 'shell';
+import { ConnectionManager, usePolling, AppLayout, createToolChannel, createToolController, typedToolChannel, useConnectionReady, useToolState } from 'shell';
+import { useDashboardData } from './monitor/useDashboardData';
 import { commonStyles } from 'shell';
-import { MonitorView } from 'shell';
-import type { DashboardConnection, DashboardTask, ListPageRequest, ListPageResponse, MonitorPageId } from 'shell';
+import MonitorView from './monitor';
+import type { DashboardConnection, DashboardTask, ListPageRequest, ListPageResponse, MonitorPageId } from './monitor';
 import type { IDashboardSnapshot, MonitorOps, MonitorStateMap } from './ops';
 import { MonitorSidebar } from './MonitorSidebar';
 import type { MonitorPeerMessage } from './MonitorSidebar';
@@ -89,7 +90,6 @@ export interface IMonitorSurfaceProps {
  * singleton, which the host has connected before mounting.
  */
 export const MonitorSurface: React.FC<IMonitorSurfaceProps> = ({ page }) => {
-	const { isConnected } = useShellConnection();
 	// Engine access rides the SHELL BUS (brokered client.* ops).
 	const cm = ConnectionManager.getInstance();
 
@@ -145,7 +145,6 @@ export const MonitorSurface: React.FC<IMonitorSurfaceProps> = ({ page }) => {
 			<MonitorView
 				data={data}
 				events={events}
-				isConnected={isConnected}
 				onRefresh={refresh}
 				listConnections={listConnections}
 				listTasks={listTasks}
@@ -233,7 +232,6 @@ export const MonitorDevToolFrame: React.FC<DevToolProps> = ({ peer, channel }) =
 			<MonitorView
 				data={dash.data}
 				events={dash.events}
-				isConnected={ready}
 				onRefresh={refresh}
 				listConnections={listConnections}
 				listTasks={listTasks}

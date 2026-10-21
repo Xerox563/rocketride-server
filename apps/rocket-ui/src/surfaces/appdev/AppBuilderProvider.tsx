@@ -48,13 +48,15 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
-import { useShellConnection, ConnectionManager } from 'shell';
+import { useShellConnection, ConnectionManager, createMirroredPrefsStore, scopedPrefs } from 'shell';
+import { appPartition } from 'shell/src/workspace/workspaceStore';
 import { AppBuilderScreen } from 'shared/tools/appdev/views';
-import type { AppBuilderStage, AppSummary } from 'shared/tools/appdev';
+import type { AppSummary } from 'shared/tools/appdev';
 import { readAppPackage, scanApps } from './session/appStore';
 import { getWorkspaceVfs } from '../workspace/vfs/workspace';
 import type { StoredApp } from './session/appStore';
 import { createWebAppBuilderHost } from './session/webHost';
+import { createDevPreviewPage } from './session/devPreviewPage';
 import { WebDevSession } from './session/devSession';
 
 // =============================================================================
@@ -195,7 +197,35 @@ const AppBuilderProvider: React.FC<{
 	const [reloadSeq, setReloadSeq] = useState(0);
 	const iframeRef = useRef<HTMLIFrameElement | null>(null);
 	const debugWindowRef = useRef<Window | null>(null);
-	const liveUrl = `${window.location.origin}/?appid=${encodeURIComponent(appId)}&rrdev=1`;
+
+	// The preview page is AUTHORED by this builder (blob transport, injected
+	// __rrDevBoot — see devPreviewPage.ts); the legacy ?appid&rrdev=1 URL is
+	// only the fallback when the shell index cannot be fetched. The blob is
+	// revoked when the app (or the builder) goes away — the preview's
+	// lifetime is the builder's lifetime, now visibly so.
+	const legacyUrl = `${window.location.origin}/?appid=${encodeURIComponent(appId)}&rrdev=1`;
+	const [liveUrl, setLiveUrl] = useState<string | null>(null);
+	useEffect(() => {
+		let cancelled = false;
+		let revoke: (() => void) | null = null;
+		void createDevPreviewPage(appId)
+			.then((page) => {
+				if (cancelled) {
+					page.revoke();
+					return;
+				}
+				revoke = page.revoke;
+				setLiveUrl(page.url);
+			})
+			.catch(() => {
+				if (!cancelled) setLiveUrl(legacyUrl);
+			});
+		return () => {
+			cancelled = true;
+			revoke?.();
+			setLiveUrl(null);
+		};
+	}, [appId, legacyUrl]);
 
 	// ── Preview handshake + feed routing ─────────────────────────────────
 	// The embedded (or debug-tab) dev shell posts shell:devReady, waits for
@@ -243,15 +273,25 @@ const AppBuilderProvider: React.FC<{
 		};
 	}, [client, session, appId]);
 
+	// ── App Builder UI prefs ─────────────────────────────────────────────
+	// The app's OWN partition, `appdev`-namespaced so these cannot collide
+	// with the app's runtime prefs. Same mechanism as every other pref —
+	// this host used to keep its own localStorage bag while VS Code kept a
+	// Memento one.
+	const prefsMirror = useMemo(() => createMirroredPrefsStore(ConnectionManager.getInstance(), appPartition(appId)), [appId]);
+	useEffect(() => prefsMirror.dispose, [prefsMirror]);
+	const appdevPrefs = useMemo(() => scopedPrefs(prefsMirror.store, 'appdev'), [prefsMirror]);
+
 	// ── The host adapter ─────────────────────────────────────────────────
 	const host = useMemo(() => {
-		if (!client || !stored) return null;
+		if (!client || !stored || !liveUrl) return null;
 		// hasReviewLadder mirrors the server's account backend: only a server
 		// declaring 'oss' publishes @public directly (same rule as VSCode).
 		const hasReviewLadder = !(client.getAccountInfo()?.capabilities ?? []).includes('oss');
 		return createWebAppBuilderHost({
 			client,
 			appId,
+			prefs: appdevPrefs,
 			folder: stored.folder,
 			hasReviewLadder,
 			previewUrl: liveUrl,
@@ -263,7 +303,7 @@ const AppBuilderProvider: React.FC<{
 				debugWindowRef.current = window.open(liveUrl, '_blank');
 			},
 		});
-	}, [client, stored, appId, liveUrl, session]);
+	}, [client, stored, appId, liveUrl, session, appdevPrefs]);
 
 	// ── Live manifest facts for the header ──────────────────────────────
 	// `stored` stays FROZEN on purpose (the dev-session effect keys on its
@@ -304,19 +344,9 @@ const AppBuilderProvider: React.FC<{
 		};
 	}, [stored, liveMeta]);
 
-	// ── Stage persistence (the per-app host pref bag) ────────────────────
-	const initialStage = useMemo(() => {
-		const persisted = host?.getPref?.('stage');
-		// 'code' is deliberately NOT accepted: the web host dropped the CODE
-		// tab (the Explorer's file tabs are the code surface), and restoring
-		// a pre-drop persisted 'code' stage would land on a tab that no
-		// longer exists — those fall through to the default landing view.
-		return persisted === 'dashboard' || persisted === 'design' || persisted === 'package' || persisted === 'store' || persisted === 'deploy' ? (persisted as AppBuilderStage) : undefined;
-	}, [host]);
-
 	// ── Render ───────────────────────────────────────────────────────────
 	if (!isConnected) return <div style={styles.root}><div style={styles.loading}>Connect to a server to open the App Builder.</div></div>;
-	if (stored === undefined || !host || !app) return <div style={styles.root}><div style={styles.loading}>Loading app&hellip;</div></div>;
+	if (stored === undefined || !host || !app || !liveUrl) return <div style={styles.root}><div style={styles.loading}>Loading app&hellip;</div></div>;
 	if (stored === null) return <div style={styles.root}><div style={styles.loading}>No working copy for &quot;{appId}&quot; in your store.</div></div>;
 
 	return (
@@ -333,10 +363,6 @@ const AppBuilderProvider: React.FC<{
 						}}
 					/>
 				}
-				initialStage={initialStage}
-				onStageChange={(stage) => {
-					host.setPref?.('stage', stage);
-				}}
 			/>
 		</div>
 	);

@@ -755,8 +755,20 @@ class AccountBase(ABC):
         """
         Dispatch an app-family DAP command to the app/marketplace handler.
 
-        The ``rrext_app`` marketplace surface (browse/install/admin/pricing)
-        requires SaaS — OSS raises NotImplementedError. ``rrext_deploy_app`` is
+        The marketplace READ surface (``rrext_app`` list/get) is served on
+        BOTH editions with one shape, so clients never branch per edition:
+        this base implementation answers from the same scope walk the login
+        assembly uses, decorated exactly as OSS login decorates
+        (``appStatus: 'free'``, ``onDesktop: True`` — the catalog and the
+        handshake can never disagree). The desktop WRITES (``desktop_add`` /
+        ``desktop_remove``) are acknowledged as no-ops: OSS has no desktop
+        concept — every app the operator brought onto the server is
+        implicitly on it, so adding is vacuously satisfied and removing is
+        impossible (the tile stays; a UI should not offer Remove where every
+        entry is on the desktop). The rest of the marketplace
+        (``list_mine``/``admin_*``/``pricing_*`` — developer rails, the
+        review ladder, Stripe) is genuinely SaaS-only and raises
+        NotImplementedError. ``rrext_deploy_app`` is
         app deploy control on the shared deployments registry and works on both
         editions, with two subcommands special on OSS: ``developer_status``
         (answered from the session's org — OSS carries the fixed
@@ -796,7 +808,62 @@ class AccountBase(ABC):
             from ai.account.app_deploy import handle_deploy_app
 
             return await handle_deploy_app(conn, request)
-        raise NotImplementedError('App marketplace requires SaaS mode')
+
+        # ── rrext_app: the marketplace surface, OSS emulation ────────────────
+        args = request.get('arguments', {}) or {}
+
+        if sub in ('list', 'get'):
+            # The caller's reachable set — the SAME walk the login assembly
+            # uses (public + the local team/user rails when authenticated;
+            # public only when anonymous), so the picker sees @me/@team rows.
+            info = getattr(conn, '_account_info', None)
+            if info and getattr(info, 'userId', None):
+                # AccountInfo carries ONE org (models.py); the walk wants a
+                # list. The OSS override ignores it (registry-only), so this
+                # exists for signature fidelity, not behaviour.
+                org = getattr(info, 'organization', None)
+                orgs = [org if isinstance(org, dict) else {'id': getattr(org, 'id', 'local')}] if org else []
+                apps = await self.get_apps_for_user(info.userId, orgs)
+            else:
+                apps = await self.get_public_apps()
+            # OSS decoration — identical to the login assembly's, so the
+            # catalog and the handshake agree by construction.
+            for entry in apps:
+                entry['appStatus'] = 'free'
+                entry['onDesktop'] = True
+            # Shell-compatibility narrowing, shape parity with SaaS.
+            shell = args.get('shell')
+            if shell:
+                apps = [a for a in apps if a.get('shells') is None or shell in (a.get('shells') or [])]
+            if sub == 'get':
+                app_id = args.get('appId', '')
+                if not app_id:
+                    return conn.build_error(request, 'appId is required')
+                entry = next((a for a in apps if a.get('id') == app_id), None)
+                if entry is None:
+                    return conn.build_error(request, 'App not found')
+                # No pricing backend on OSS — an empty price list, not an error.
+                return conn.build_response(request, body={'app': entry, 'prices': []})
+            return conn.build_response(request, body={'apps': apps})
+
+        if sub == 'desktop_add':
+            # Vacuously satisfied: everything on an OSS server is on the
+            # desktop already. Acknowledged so shared surfaces need no
+            # edition branch; nothing changes, so no account push follows.
+            app_id = args.get('appId', '')
+            if not app_id:
+                return conn.build_error(request, 'appId is required')
+            return conn.build_response(request, body={'added': True, 'appId': app_id})
+
+        if sub == 'desktop_remove':
+            # Accepted without error by decision (2026-10-19): the desktop IS
+            # the server inventory on OSS — nothing can leave it.
+            app_id = args.get('appId', '')
+            if not app_id:
+                return conn.build_error(request, 'appId is required')
+            return conn.build_response(request, body={'removed': True, 'appId': app_id})
+
+        raise NotImplementedError('App marketplace administration requires SaaS mode')
 
     async def handle_public(self, conn, request):
         """

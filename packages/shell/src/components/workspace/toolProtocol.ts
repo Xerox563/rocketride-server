@@ -155,15 +155,23 @@ export function useToolState<S extends ToolStateMap, E extends ToolEventMap, K e
 
 /**
  * Whether the controller realm's server connection is up, from the retained
- * `host:connection` system topic. False until the snapshot arrives.
+ * `host:connection` system topic — TRI-STATE:
+ *
+ *   true       the host said connected
+ *   false      the host said disconnected
+ *   undefined  no snapshot has arrived — NO IDEA YET
+ *
+ * Absence of a snapshot is never evidence of a negative: render a waiting
+ * state on undefined, never a "disconnected" claim (that lie cost a day).
+ * Boolean gates (`if (!ready)`) keep working — undefined gates like false.
  *
  * @param channel - The mount's channel (raw or typed).
- * @returns Whether the controller realm can reach the server.
+ * @returns The host's connection level, or undefined before the first snapshot.
  */
-export function useConnectionReady(channel: ToolChannel | TypedToolChannel): boolean {
+export function useConnectionReady(channel: ToolChannel | TypedToolChannel): boolean | undefined {
 	const typed = channel as unknown as TypedToolChannel;
 	const snapshot = useToolState(typed, HOST_CONNECTION_TOPIC);
-	return snapshot?.connected === true;
+	return snapshot === undefined ? undefined : snapshot.connected === true;
 }
 
 // =============================================================================

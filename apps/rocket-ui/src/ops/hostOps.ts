@@ -13,7 +13,7 @@
 // implementations are direct browser/SDK calls — no bridging.
 // =============================================================================
 
-import { ConnectionManager, registerOpHandlers } from 'shell';
+import { ConnectionManager, HOST_CONNECTION_TOPIC, registerOpHandlers } from 'shell';
 import type { OpImplTable } from 'shell';
 import { RocketRideClient } from 'rocketride';
 import { assertExternalUrl } from 'shared/ops/hostOps';
@@ -56,9 +56,26 @@ export function registerRocketHostOps(): () => void {
 			}
 			ConnectionManager.getInstance().emit('shell:openOverlay', { id: p.page } as never);
 		},
-		// host.prefs.*: not served here yet (arrives with the page
-		// unification); host.envSlots is a multi-connection (VS Code
-		// dev/deploy) concern.
+		// NOT here: the prefs ops. The WORKSPACE MANAGER serves those (shell
+		// workspace/prefsHost.ts), because it is the single writer and this
+		// module has no handle on it. host.envSlots is a multi-connection
+		// (VS Code dev/deploy) concern.
 	};
+
+	// ── host:connection — the LEVEL-DRIVEN system topic ─────────────────────
+	// The host (not a React component) owns this: publish the current truth
+	// now and re-publish on every connection edge. The former publisher — a
+	// DevToolMount useEffect keyed on [isConnected] — missed republished
+	// topics whenever the retained value went stale WITHOUT its hook value
+	// changing (a reconnect cycle), stranding every useConnectionReady
+	// consumer on a false snapshot while the host was demonstrably connected.
+	const cm = ConnectionManager.getInstance();
+	const syncConnection = (): void => {
+		cm.publish(HOST_CONNECTION_TOPIC, { connected: cm.isConnected() });
+	};
+	cm.on('shell:connected', syncConnection);
+	cm.on('shell:disconnected', syncConnection);
+	syncConnection();
+
 	return registerOpHandlers<HostOpMap>(ConnectionManager.getInstance().ops(), impls);
 }

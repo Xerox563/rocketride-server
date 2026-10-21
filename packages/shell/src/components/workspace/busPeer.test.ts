@@ -67,6 +67,49 @@ test('a sidebar EVENT with no frame buffers and summons; the frame hello flushes
 	assert.deepEqual(seen.at(-1), { kind: 'open-table', name: 'users' });
 });
 
+test('a frame CALL with no mounted sidebar holds and summons the controller', async () => {
+	const { bus, emitted } = makeBus();
+	// The peer exists (the host arms it for every pinned tool) but no
+	// sidebar mount has subscribed — the lazy-mount case.
+	const sidebar = createSidebarBusPeer('t1', bus);
+	const frame = createFrameBusPeer('t1', bus);
+	frame.subscribe(() => {});
+	frame.post({ __rrtool: 'call', id: 'c1', op: 'monitor.listTasks', params: {} });
+	frame.post({ __rrtool: 'call', id: 'c2', op: 'monitor.listConnections', params: {} });
+	await settle();
+
+	// A burst is ONE mount request, not one per call.
+	assert.deepEqual(
+		emitted.filter((e) => e.op === 'host.mountToolSidebar'),
+		[{ op: 'host.mountToolSidebar', params: { appId: 't1' } }],
+	);
+
+	// The summoned mount receives everything held, in arrival order.
+	const seen: unknown[] = [];
+	sidebar.subscribe((m) => seen.push(m));
+	await settle();
+	assert.deepEqual(
+		(seen as Array<{ id?: string }>).filter((m) => m?.id).map((m) => m.id),
+		['c1', 'c2'],
+	);
+});
+
+test('a mounted sidebar never summons; a later unmount summons again', async () => {
+	const { bus, emitted } = makeBus();
+	const sidebar = createSidebarBusPeer('t1', bus);
+	const off = sidebar.subscribe(() => {});
+	const frame = createFrameBusPeer('t1', bus);
+	frame.subscribe(() => {});
+	frame.post({ __rrtool: 'call', id: 'c1', op: 'x', params: {} });
+	await settle();
+	assert.deepEqual(emitted.filter((e) => e.op === 'host.mountToolSidebar'), [], 'mounted: no summon');
+
+	off();
+	frame.post({ __rrtool: 'call', id: 'c2', op: 'x', params: {} });
+	await settle();
+	assert.equal(emitted.filter((e) => e.op === 'host.mountToolSidebar').length, 1, 'unmounted: summoned again');
+});
+
 test('events signal directly once a frame is ready; replies are live-only', async () => {
 	const { bus } = makeBus();
 	const sidebar = createSidebarBusPeer('t1', bus);

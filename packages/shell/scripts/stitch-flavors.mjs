@@ -150,6 +150,7 @@ try{
 	}
 	dev=p.get('rrdev')==='1';
 	if(!dev){try{dev=sessionStorage.getItem('rr:dev')==='1';}catch(e){}}
+	if(!dev){dev=!!window.__rrDevBoot;}
 }catch(e){}
 var f=RR_FLAVORS[dev?'dev':'prod'];
 f.css.forEach(function(href){

@@ -25,7 +25,7 @@
 // TOOLHOST — generic workspace-FS capability service (the host.fs.* backend)
 // =============================================================================
 //
-// The host half of the `ToolWorkspaceFs` capability: tool controllers in the
+// The host half of the `WorkspaceFs` capability: tool controllers in the
 // sidebar realm find, read, and watch workspace files through the
 // `host.fs.*` ops (shared/ops/fsOps) — the host executes globs and reads and
 // knows NOTHING about what the controller is looking for (`.rrapp` bindings,
@@ -90,6 +90,68 @@ export class WorkspaceFsService {
 		if (stat.size > maxBytes) return null;
 		const bytes = await vscode.workspace.fs.readFile(uri);
 		return Buffer.from(bytes).toString('base64');
+	}
+
+	/** One directory's immediate entries ('' = the first root). */
+	public async list(dir: string): Promise<{ name: string; type: 'file' | 'dir' }[]> {
+		const base = dir || this.workspaceRoots()[0] || '';
+		if (!base) return [];
+		this.assertInside(base);
+		const entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(base));
+		return entries.map(([name, kind]) => ({ name, type: kind === vscode.FileType.Directory ? 'dir' as const : 'file' as const }));
+	}
+
+	/** A path's kind, or null when absent. */
+	public async stat(fsPath: string): Promise<'file' | 'dir' | null> {
+		this.assertInside(fsPath);
+		try {
+			const s = await vscode.workspace.fs.stat(vscode.Uri.file(fsPath));
+			return s.type === vscode.FileType.Directory ? 'dir' : 'file';
+		} catch {
+			return null;
+		}
+	}
+
+	/** Many files in one call; unreadable paths are omitted. */
+	public async readMany(paths: string[]): Promise<Record<string, unknown>> {
+		const out: Record<string, unknown> = {};
+		await Promise.all(paths.map(async (p) => {
+			try {
+				out[p] = await this.readText(p);
+			} catch { /* unreadable — omitted by contract */ }
+		}));
+		return out;
+	}
+
+	/** Writes UTF-8 text (containment-guarded). */
+	public async writeText(fsPath: string, text: string): Promise<void> {
+		this.assertInside(fsPath);
+		await vscode.workspace.fs.writeFile(vscode.Uri.file(fsPath), Buffer.from(text, 'utf8'));
+	}
+
+	/** Writes binary carried as base64. */
+	public async writeBase64(fsPath: string, dataB64: string): Promise<void> {
+		this.assertInside(fsPath);
+		await vscode.workspace.fs.writeFile(vscode.Uri.file(fsPath), Buffer.from(dataB64, 'base64'));
+	}
+
+	/** Renames a file or directory (both ends containment-guarded). */
+	public async rename(from: string, to: string): Promise<void> {
+		this.assertInside(from);
+		this.assertInside(to);
+		await vscode.workspace.fs.rename(vscode.Uri.file(from), vscode.Uri.file(to));
+	}
+
+	/** Deletes a file or directory. */
+	public async delete(fsPath: string, recursive?: boolean): Promise<void> {
+		this.assertInside(fsPath);
+		await vscode.workspace.fs.delete(vscode.Uri.file(fsPath), { recursive: recursive === true, useTrash: false });
+	}
+
+	/** Creates a directory (parents included — vscode semantics). */
+	public async mkdir(fsPath: string): Promise<void> {
+		this.assertInside(fsPath);
+		await vscode.workspace.fs.createDirectory(vscode.Uri.file(fsPath));
 	}
 
 	/** Guards a read path to the open workspace folders. */

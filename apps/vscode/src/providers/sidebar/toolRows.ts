@@ -19,6 +19,10 @@
 import type * as vscode from 'vscode';
 import type { ConnectionManager } from '../../connection/connection';
 import type { DevToolStore } from '../DevToolStore';
+// Deep import on purpose — ext-host-safe .ts leaf (see busHost.ts).
+import { fetchDevToolCatalog } from 'shared/tools/core/devToolCatalog';
+import type { IOpBus } from 'shell/src/ops/busOps';
+import { getLogger } from '../../shared/util/output';
 
 /** workspaceState key for the last-known pinned tool rows (name + inlined
  *  icon), keyed by app id. */
@@ -36,6 +40,8 @@ export interface ToolRowDTO {
 	version?: string;
 	/** Short description (the modules list's second line). */
 	description?: string;
+	/** README path/content from the published snapshot (the details page). */
+	readme?: string;
 	/** MF container name — the sidebar's devToolSidebar mount loads by it. */
 	moduleId?: string;
 	/** Registry version resolving the remote entry URL. */
@@ -61,7 +67,10 @@ export class ToolRows {
 	constructor(
 		private readonly connectionManager: ConnectionManager,
 		private readonly devTools?: DevToolStore,
-		private readonly context?: vscode.ExtensionContext
+		private readonly context?: vscode.ExtensionContext,
+		/** The root op bus — the strip fallback's catalog fetch rides the
+		 *  same brokered op every panel calls. */
+		private readonly bus?: IOpBus
 	) {}
 
 	/**
@@ -118,8 +127,11 @@ export class ToolRows {
 	/**
 	 * Builds the pinned-tool rows: the workspace's pinned ids resolved against
 	 * the connection's account apps (name, version, icon inlined as a data:
-	 * URI). A pinned id the account no longer carries still rows up by id so
-	 * the user can unpin it.
+	 * URI), FALLING BACK to the marketplace catalog — a pinned tool need not
+	 * be on the user's desktop, and without this fallback its tab renders
+	 * bare (raw id, no icon) and its sidebar half cannot mount (no
+	 * moduleId). A pinned id NEITHER list carries still rows up by id so the
+	 * user can unpin it.
 	 */
 	async buildToolRows(): Promise<ToolRowDTO[]> {
 		const pinned = this.devTools?.getAll() ?? [];
@@ -127,10 +139,22 @@ export class ToolRows {
 		const base = this.engineBase();
 		const byId = new Map(this.accountApps().filter((a) => a?.id).map((a) => [a.id, a]));
 		const cached = this.readToolMeta();
+		// One catalog fetch per build, and only when a pinned id misses the
+		// account list (the common case — all pins on the desktop — never
+		// pays for it).
+		if (this.bus && this.connectionManager.isConnected() && pinned.some((id) => !byId.has(id))) {
+			try {
+				for (const entry of await fetchDevToolCatalog(this.bus)) {
+					if (!byId.has(entry.id)) byId.set(entry.id, entry);
+				}
+			} catch (err) {
+				getLogger().error(`[sidebar] pinned-row catalog fallback failed: ${err}`);
+			}
+		}
 		const rows = await Promise.all(pinned.map(async (id): Promise<ToolRowDTO> => {
 			const row = byId.get(id);
-			// Not in the account payload (disconnected, or genuinely gone):
-			// the last-known row keeps the tab stable; a never-seen id still
+			// In NEITHER list (disconnected, or genuinely gone): the
+			// last-known row keeps the tab stable; a never-seen id still
 			// rows up bare so the user can unpin it.
 			if (!row) return cached[id] ?? { id, name: id };
 			const iconUrl = this.resolveIconUrl(row.icon, base);
@@ -153,26 +177,5 @@ export class ToolRows {
 		return rows;
 	}
 
-	/**
-	 * Builds the full dev-tool catalog (the modules list): every account app
-	 * carrying the devTool category, installed or not, icons inlined.
-	 */
-	async buildAvailableTools(): Promise<ToolRowDTO[]> {
-		if (!this.connectionManager.isConnected()) return [];
-		const base = this.engineBase();
-		const rows = this.accountApps().filter((a) => a?.id && a.categories?.some((c) => c.toLowerCase() === 'devtool'));
-		const built = await Promise.all(rows.map(async (a) => {
-			const iconUrl = this.resolveIconUrl(a.icon, base);
-			return {
-				id: a.id,
-				name: a.name ?? a.id,
-				iconUrl: iconUrl ? await this.iconDataUri(iconUrl) : undefined,
-				version: a.version,
-				description: a.description,
-				moduleId: a.moduleId,
-				registryVersion: a.registryVersion,
-			};
-		}));
-		return built.sort((a, b) => a.name.localeCompare(b.name));
-	}
+
 }

@@ -267,9 +267,12 @@ export async function installDevHooks(): Promise<void> {
 	// there is no separate clear message.
 	window.addEventListener('message', (e: MessageEvent) => {
 		// step: registrations and session state are only ever legitimate from
-		// the embedding parent — refuse anything else (no origin allowlist is
-		// possible: the parent is a vscode-webview:// or app-builder origin)
-		if (e.source !== window.parent) return;
+		// the embedding parent OR the opener (the App Builder's blob-authored
+		// debug tab is opener-embedded) — refuse anything else (no origin
+		// allowlist is possible: the parent is a vscode-webview:// or
+		// app-builder origin)
+		const fromEmbedder = e.source === window.parent || (window.opener != null && e.source === window.opener);
+		if (!fromEmbedder) return;
 		const data = e.data as { type?: string; appId?: string; moduleId?: string; name?: string; entry?: string; token?: string; manifest?: Record<string, unknown> } | undefined;
 		if (data?.type === 'rrdev:registerRemote') {
 			if (!data.appId || !data.moduleId || !data.entry) {
@@ -355,9 +358,12 @@ export async function installDevHooks(): Promise<void> {
 		}
 	})();
 
-	// Tell a parent embedder the hooks are ready so it doesn't have to poll.
+	// Tell the embedder the hooks are ready so it doesn't have to poll. The
+	// embedder is the parent (iframe preview) or the opener (the builder's
+	// debug tab) — a top-level un-opened page posts to itself harmlessly.
 	try {
-		window.parent?.postMessage({ type: 'shell:devReady' }, '*');
+		const embedder = (window.opener as Window | null) ?? window.parent;
+		embedder?.postMessage({ type: 'shell:devReady' }, '*');
 	} catch { /* sandboxed/parentless — console users just call the API */ }
 
 	console.log('[devMode] Dev hooks installed (window.__rrShellDev)');

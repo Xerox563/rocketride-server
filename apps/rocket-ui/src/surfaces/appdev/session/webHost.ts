@@ -40,7 +40,7 @@
  */
 
 import { ConnectionManager } from 'shell';
-import type { RocketRideClient } from 'shell';
+import type { RocketRideClient, PrefsStore } from 'shell';
 import { createBusAppBuilderHost, projectListing, applyListing, probePackage, runListingPreflight } from 'shared/tools/appdev';
 import type { IAppBuilderHost } from 'shared/tools/appdev';
 import { appFileExists, readAppImageDataUri, readAppPackage, readAppText, writeAppPackage } from './appStore';
@@ -55,6 +55,8 @@ import type { WebDevSession } from './devSession';
 export interface WebHostOptions {
 	/** The shell's live client. */
 	client: RocketRideClient;
+	/** The App Builder's UI prefs — the app's partition, `appdev`-scoped. */
+	prefs: PrefsStore;
 	/** The app id the screen shows. */
 	appId: string;
 	/** The app's folder name under .appdev. */
@@ -82,12 +84,7 @@ export interface WebHostOptions {
  * @returns The host adapter AppBuilderScreen mounts.
  */
 export function createWebAppBuilderHost(o: WebHostOptions): IAppBuilderHost {
-	const { client, appId, folder, hasReviewLadder, previewUrl, session, onReloadPreview, onOpenDebugTab } = o;
-
-	// Per-app UI preference bag — localStorage IS the synchronous store the
-	// getPref contract requires (VSCode pre-hydrates workspaceState; the
-	// browser's storage read is already sync).
-	const prefKey = (key: string): string => `rr:appdev:${appId}:${key}`;
+	const { client, appId, folder, hasReviewLadder, previewUrl, session, onReloadPreview, onOpenDebugTab, prefs } = o;
 
 	return {
 		// The SDK half — the brokered client.* ops + realm-local shell:event
@@ -114,19 +111,11 @@ export function createWebAppBuilderHost(o: WebHostOptions): IAppBuilderHost {
 		// handle), so DevTools debugs the real linked app with sourcemapped
 		// VFS frames.
 		debug: onOpenDebugTab,
-		getPref: (key: string) => {
-			try {
-				const raw = window.localStorage.getItem(prefKey(key));
-				return raw === null ? undefined : (JSON.parse(raw) as unknown);
-			} catch {
-				return undefined;
-			}
-		},
-		setPref: (key: string, value: unknown) => {
-			try {
-				window.localStorage.setItem(prefKey(key), JSON.stringify(value));
-			} catch { /* storage full/unavailable — the pref just does not stick */ }
-		},
+		// App Builder UI prefs — the SAME mechanism every other pref uses
+		// (the app's own partition, `appdev` namespace). Reads are
+		// synchronous off the mirror, as getPref's contract requires.
+		getPref: (key: string) => prefs.get(key),
+		setPref: (key: string, value: unknown) => prefs.set(key, value),
 
 		// ── Deploy — the one SDK member that stays host-specific here:
 		// DEPLOY = pack the STORE-VFS source, upload bytes; the server builds

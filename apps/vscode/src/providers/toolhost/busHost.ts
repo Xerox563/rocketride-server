@@ -43,6 +43,8 @@ import { DeployManager } from '../../connection/deploy-manager';
 import { CloudAuthProvider } from '../../auth/CloudAuthProvider';
 import { ConfigManager } from '../../config';
 import { getLogger } from '../../shared/util/output';
+import { startPrefsMirror } from './prefsMirror';
+import type { WorkspaceStore } from 'shell/src/workspace/workspaceStore';
 
 /** The bus envelope key (must match shell busBridge.ts). */
 const BUS_ENVELOPE = '__rrbus';
@@ -72,8 +74,20 @@ export class BusHost {
 	 *  publish/subscribe/read resolves against. */
 	public readonly retained: IRetainedRegistry = createRetainedRegistry();
 
+	/** THE workspace manager for this process: the single writer of prefs,
+	 *  mirrored to every realm on the per-partition `shell:prefs:*` topics.
+	 *  Host-side code reads it directly (it lives in this process); webviews
+	 *  go through the mirror. */
+	public readonly prefs: WorkspaceStore;
+	private prefsMirror: { dispose(): void };
+
 	constructor(public readonly connectionManager: ConnectionManager, summon?: SummonLookup) {
 		this.router = createBusRouter(this.rootBus, { retained: this.retained, ...(summon ? { summon } : {}) });
+		// Starts before anything else attaches: the sidebar reads its mode out
+		// of the shell partition during construction.
+		const mirror = startPrefsMirror({ bus: this.rootBus, retained: this.retained, connectionManager });
+		this.prefs = mirror.store;
+		this.prefsMirror = mirror;
 		this.disposables.push(vscode.workspace.onDidChangeConfiguration((e) => {
 			if (e.affectsConfiguration('rocketride.debug.busTrace')) {
 				this.traceEnabled = vscode.workspace.getConfiguration('rocketride').get<boolean>('debug.busTrace', false);
@@ -372,6 +386,7 @@ export class BusHost {
 	// =========================================================================
 
 	public dispose(): void {
+		this.prefsMirror.dispose();
 		this.router.dispose();
 		for (const d of this.disposables) d.dispose();
 		this.disposables = [];

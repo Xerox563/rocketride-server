@@ -171,7 +171,7 @@ export async function primeProjectSources(filePath: string): Promise<void> {
 		};
 		await walk(root);
 		const contents = await view.readMany(sources);
-		for (const [path, text] of contents) {
+		for (const [path, text] of Object.entries(contents)) {
 			// step: a path with a LIVE model is already the truth — an extraLib
 			// at the same URI would shadow-duplicate it
 			const uri = `${WORKSPACE_URI_PREFIX}${path}`;

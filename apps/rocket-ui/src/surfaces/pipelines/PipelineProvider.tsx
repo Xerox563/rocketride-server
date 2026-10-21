@@ -37,7 +37,8 @@
 
 import React, { useEffect, useCallback, useMemo, useRef, useState, CSSProperties } from 'react';
 import { commonStyles } from 'shell';
-import { getClient, useShellConnection, useWorkspace, useSubscriptions, ConnectionManager, ConfirmDialog, SaveFileDialog } from 'shell';
+import { getClient, useShellConnection, useWorkspace, useSubscriptions, ConnectionManager, ConfirmDialog, SaveFileDialog, createMirroredPrefsStore } from 'shell';
+import { PIPELINE_PARTITION } from 'shared/tools/pipelines/types';
 import { getDocs } from '../../docs';
 import type { PipelineConfig } from 'shell';
 // Project module is imported via subpath (not the 'shared' barrel) so the
@@ -150,7 +151,7 @@ interface ProjectPageProps {
  */
 const PipelineProvider: React.FC<ProjectPageProps> = ({ uri, pipeline, isDirty, isNew, isReadonly = false, initialViewState, onContentChanged, onViewStateChange: onViewStateChangeProp }) => {
 	const { client, isConnected } = useShellConnection();
-	const { prefs, updatePrefs, settings } = useWorkspace();
+	const { settings } = useWorkspace();
 
 	// --- Unified settings (effective values incl. manifest defaults) ----------
 
@@ -607,21 +608,6 @@ const PipelineProvider: React.FC<ProjectPageProps> = ({ uri, pipeline, isDirty, 
 		[onViewStateChangeProp]
 	);
 
-	/**
-	 * Handles workspace preference changes from the ProjectView.
-	 *
-	 * Persists via the workspace context so canvas prefs (per-pipeline idle
-	 * timeout, toolbar position, …) survive reloads.
-	 *
-	 * @param updatedPrefs - The partial preferences to merge.
-	 */
-	const handlePrefsChange = useCallback(
-		(updatedPrefs: Record<string, unknown>) => {
-			updatePrefs(updatedPrefs);
-		},
-		[updatePrefs]
-	);
-
 	// --- Run-log bindings (replay + activity timeline) ------------------------
 
 	/**
@@ -885,17 +871,23 @@ const PipelineProvider: React.FC<ProjectPageProps> = ({ uri, pipeline, isDirty, 
 
 	// --- Render --------------------------------------------------------------
 
-	// Workspace-prefs accessor for shared persistence (DetailPanel widths
-	// via persistKey). The shell mounts its own PrefsProvider, but this app
-	// bundles shared by SUBPATH (its own module instances), so the shell's
-	// context object never reaches these components — the provider must be
-	// mounted from the SAME bundled instance, here.
+	// The pipeline editor's PREFERENCES — the editor is a built-in tool, so
+	// they live in the TOOL's partition, not in whatever app happens to be
+	// active (which is where they used to land, via useWorkspace).
+	// Per-document state does not come through here; it rides the editor's
+	// view state, which Documents already persists per editor into appState.
+	const pipelinePrefs = useMemo(() => createMirroredPrefsStore(ConnectionManager.getInstance(), PIPELINE_PARTITION), []);
+	useEffect(() => pipelinePrefs.dispose, [pipelinePrefs]);
+	// The shell mounts its own PrefsProvider, but this app bundles shared by
+	// SUBPATH (its own module instances), so the shell's context object never
+	// reaches these components — the provider must be mounted from the SAME
+	// bundled instance, here. It also wraps the deployment drawer below.
 	const prefsApi = useMemo(
 		() => ({
-			getPref: (key: string) => (prefs as Record<string, unknown> | undefined)?.[key],
-			setPref: (key: string, value: unknown) => updatePrefs({ [key]: value }),
+			getPref: (key: string) => pipelinePrefs.store.get(key),
+			setPref: (key: string, value: unknown) => pipelinePrefs.store.set(key, value),
 		}),
-		[prefs, updatePrefs]
+		[pipelinePrefs]
 	);
 
 	return (
@@ -935,7 +927,7 @@ const PipelineProvider: React.FC<ProjectPageProps> = ({ uri, pipeline, isDirty, 
 					isNew={isNew}
 					isReadonly={isReadonly}
 					{...(initialViewState ? { initialViewState: initialViewState as ViewState } : {})}
-					initialPrefs={prefs}
+					prefs={pipelinePrefs.store}
 					liveLogEvents={liveLogEvents}
 					openEventStream={isConnected ? openEventStream : undefined}
 					fetchTimeline={fetchTimeline}
@@ -944,7 +936,6 @@ const PipelineProvider: React.FC<ProjectPageProps> = ({ uri, pipeline, isDirty, 
 					getNodeSchema={handleGetNodeSchema}
 					onPipelineAction={handlePipelineAction}
 					onViewStateChange={handleViewStateChange}
-					onPrefsChange={handlePrefsChange}
 					onOpenLink={handleOpenLink}
 					onSave={handleSave}
 					onExport={handleExport}

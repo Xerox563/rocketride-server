@@ -26,7 +26,7 @@
 // =============================================================================
 //
 // The generic contract (ToolHostServices, ToolHostProvider, useToolHost,
-// the loopback peer, ToolWorkspaceFs) lives in the SHELL — the frozen host
+// the loopback peer, WorkspaceFs) lives in the SHELL — the frozen host
 // framework. This module is the in-repo builtins' PRIVATE extension of it,
 // the same pattern as the tool protocol maps: tool-shaped seams the shell
 // must not freeze (appdev feeds, pipelines verbs, host frame bodies) are

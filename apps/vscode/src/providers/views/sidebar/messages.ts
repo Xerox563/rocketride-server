@@ -14,7 +14,7 @@
 //
 // Namespaces per the wire-name convention: `sidebar:*` (this surface),
 // `devtool:*` (tool peer relay), `svc:fs*` (the workspace-FS service RPC).
-// Prefs ride the bus (host.prefs.snapshot/set) — no prefs:* wire remains;
+// Prefs ride the bus (the shell:prefs:<partition> mirror) — no prefs:* wire;
 // strip prefs (mode/order/disabled builtins) are plain pref keys.
 // =============================================================================
 

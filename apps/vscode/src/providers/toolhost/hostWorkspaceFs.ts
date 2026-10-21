@@ -38,10 +38,10 @@ import * as vscode from 'vscode';
 // compile must never see. workspaceFs is the pure capability contract.
 // Deep leaf import: the extension host must not pull the shell's React
 // barrel; the capability interface lives in a dependency-free module.
-import type { ToolWorkspaceFs } from 'shell/src/components/workspace/toolWorkspaceFs';
+import type { WorkspaceFs } from 'shell/src/workspace/workspaceFs';
 
 /** The extension host's workspace-FS capability (direct access, no RPC). */
-export const hostWorkspaceFs: ToolWorkspaceFs = {
+export const hostWorkspaceFs: WorkspaceFs = {
 	async findFiles(include, exclude) {
 		const uris = await vscode.workspace.findFiles(include, exclude ?? null);
 		return uris.map((uri) => uri.fsPath);
@@ -72,4 +72,72 @@ export const hostWorkspaceFs: ToolWorkspaceFs = {
 		});
 		return () => { for (const watcher of watchers) watcher.dispose(); };
 	},
+	async list(dir) {
+		const base = dir || (vscode.workspace.workspaceFolders ?? [])[0]?.uri.fsPath || '';
+		if (!base) return [];
+		const entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(base));
+		return entries.map(([name, kind]) => ({ name, type: kind === vscode.FileType.Directory ? 'dir' as const : 'file' as const }));
+	},
+	async stat(path) {
+		try {
+			const s = await vscode.workspace.fs.stat(vscode.Uri.file(path));
+			return s.type === vscode.FileType.Directory ? 'dir' : 'file';
+		} catch {
+			return null;
+		}
+	},
+	async read(path) {
+		return this.readTextFile(path);
+	},
+	async readMany(paths) {
+		const out: Record<string, unknown> = {};
+		await Promise.all(paths.map(async (p) => {
+			try {
+				out[p] = await this.readTextFile(p);
+			} catch { /* unreadable — omitted by contract */ }
+		}));
+		return out;
+	},
+	async write(path, content) {
+		await this.writeTextFile(path, typeof content === 'string' ? content : JSON.stringify(content));
+	},
+	async writeTextFile(path, text) {
+		await vscode.workspace.fs.writeFile(vscode.Uri.file(path), Buffer.from(text, 'utf8'));
+	},
+	async writeFileBase64(path, dataB64) {
+		await vscode.workspace.fs.writeFile(vscode.Uri.file(path), Buffer.from(dataB64, 'base64'));
+	},
+	async rename(from, to) {
+		await vscode.workspace.fs.rename(vscode.Uri.file(from), vscode.Uri.file(to));
+	},
+	async delete(path, recursive) {
+		await vscode.workspace.fs.delete(vscode.Uri.file(path), { recursive: recursive === true, useTrash: false });
+	},
+	async mkdir(path) {
+		await vscode.workspace.fs.createDirectory(vscode.Uri.file(path));
+	},
+	async refresh() { /* direct-disk host: nothing cached to re-walk */ },
+	// ── Staging: the AUTO-COMMIT workspace — trivially nothing pending ──
+	async pending() {
+		return { hasPending: false, changedPaths: {}, dirtyPaths: [] };
+	},
+	async diff() {
+		return { before: null, after: null };
+	},
+	async commit() {
+		return { committed: 0, conflicts: [] };
+	},
+	async checkpoint() {
+		return null;
+	},
+	async rollback() { /* nothing staged, ever */ },
+	async undoTurn() {
+		return { committed: 0, conflicts: [] };
+	},
+	async discard() { /* nothing staged, ever */ },
+	async layers() {
+		return [];
+	},
+	async setWriteThrough() { /* always write-through */ },
+	async whenReady() { /* no staging to rehydrate */ },
 };

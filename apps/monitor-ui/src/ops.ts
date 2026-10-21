@@ -33,7 +33,7 @@
 // =============================================================================
 
 import type { ToolOpMap, ToolOpSpec, ToolStateMap } from 'shell';
-import type { ActivityEvent, DashboardConnection, DashboardResponse, DashboardTask, ListPageRequest, ListPageResponse } from 'shell';
+import type { ActivityEvent, DashboardConnection, DashboardResponse, DashboardTask, ListPageRequest, ListPageResponse } from './monitor';
 
 /** The 'dashboard' topic's snapshot shape. */
 export interface IDashboardSnapshot {

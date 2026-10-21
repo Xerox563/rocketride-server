@@ -22,26 +22,28 @@
 // =============================================================================
 
 /**
- * FlowPreferencesContext — Owns per-project layout and global canvas preferences.
+ * FlowPreferencesContext — owns this DOCUMENT's canvas view state.
  *
  * Manages:
  *   - Navigation mode (pan vs lasso-select)
  *   - Canvas lock (prevents node/edge edits)
- *   - Per-project layout (viewport, snap grid, panel widths)
- *   - Global preference read/write (delegated to host via getPreference/setPreference)
+ *   - Canvas layout (viewport, snap grid)
  *
- * Changes to preferences are infrequent, so separating this context prevents
- * unnecessary re-renders of the graph when only preferences change.
+ * All of it is PER DOCUMENT, read and written through `useAppState` —
+ * locking one pipeline, or switching it to select-drag, must not do the same
+ * to every other open pipeline. Genuine preferences (drawer widths, the
+ * Cloud-prompt dismissal) go through `usePrefs` instead; see the shell's
+ * AppStateContext for why the workspace has two accessors.
  *
- * The host (VS Code extension or standalone app) provides `getPreference` and
- * `setPreference` callbacks. When absent, defaults are used and preferences
- * are not persisted.
+ * Changes here are infrequent, so separating this context prevents
+ * unnecessary re-renders of the graph when only view state changes. Without
+ * a provider the accessor is a no-op: defaults apply and nothing persists.
  */
 
 import { createContext, ReactElement, ReactNode, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 
 import { IProjectLayout, ICanvasPreferences } from '../types';
-import { usePrefs } from 'shell';
+import { useAppState } from 'shell';
 
 // =============================================================================
 // Constants
@@ -109,6 +111,9 @@ const FlowPreferencesContext = createContext<IFlowPreferencesContext | null>(nul
 // Provider props
 // =============================================================================
 
+/** The view-state key holding this document's canvas layout. */
+const LAYOUT_KEY = 'projectLayout';
+
 export interface IFlowPreferencesProviderProps {
 	children: ReactNode;
 
@@ -131,20 +136,20 @@ export interface IFlowPreferencesProviderProps {
  * asynchronously persisted via the host callbacks.
  */
 export function FlowPreferencesProvider({ children, projectId, isReadonly = false }: IFlowPreferencesProviderProps): ReactElement {
-	// --- Preferences: the ONE shared workspace-prefs accessor (usePrefs) -----
-	// FlowPreferences derives lock / nav / layout FROM prefs; it no longer owns a
-	// parallel getPreference/setPreference API — the canvas reads and writes prefs
-	// the same way every app does. The provider above (ProjectView) wires getPref/
-	// setPref to the host store (useWorkspace on web, the message channel in VS Code).
-	const { getPref, setPref } = usePrefs();
+	// --- This document's canvas state (useAppState) -------------------------
+	// Lock / nav / layout are PER DOCUMENT, not preferences: locking one
+	// pipeline's canvas or switching it to select-drag must not do the same
+	// to every other open pipeline. They ride this document's view state,
+	// which ProjectView owns and reports upward (see docViewState.tsx).
+	const { getAppState, setAppState } = useAppState();
 
 	// --- Per-project layout ------------------------------------------------
 
 	/** Reads the stored layout for the current project, merging with defaults. */
 	const readStoredLayout = useCallback((): IProjectLayout => {
-		const layouts = getPref('projectLayouts') as Record<string, IProjectLayout> | null;
-		return { ...DEFAULT_PROJECT_LAYOUT, ...(layouts?.[projectId] ?? {}) };
-	}, [projectId, getPref]);
+		const stored = getAppState(LAYOUT_KEY) as IProjectLayout | null;
+		return { ...DEFAULT_PROJECT_LAYOUT, ...(stored ?? {}) };
+	}, [projectId, getAppState]);
 
 	const [projectLayout, setProjectLayout] = useState<IProjectLayout>(readStoredLayout);
 
@@ -159,34 +164,30 @@ export function FlowPreferencesProvider({ children, projectId, isReadonly = fals
 			setProjectLayout((prev) => {
 				const next = { ...prev, ...patch };
 
-				// Persist the full layout map back to workspace prefs
-				if (projectId) {
-					const layouts = (getPref('projectLayouts') as Record<string, IProjectLayout> | null) ?? {};
-					setPref('projectLayouts', {
-						...layouts,
-						[projectId]: next,
-					});
-				}
+				// A FLAT key: the accessor is already bound to THIS document,
+				// so there is nothing to key by project — the per-pipeline
+				// separation IS the view-state blob.
+				setAppState(LAYOUT_KEY, next);
 
 				return next;
 			});
 		},
-		[projectId, getPref, setPref]
+		[projectId, setAppState]
 	);
 
 	// --- Navigation mode ---------------------------------------------------
 
 	const [navigationMode, setNavigationModeState] = useState<NavigationMode>(() => {
-		const stored = getPref('navigationMode') as NavigationMode | undefined;
+		const stored = getAppState('navigationMode') as NavigationMode | undefined;
 		return stored ?? (DEFAULT_CANVAS_PREFERENCES.navigationMode as NavigationMode) ?? NavigationMode.DRAG;
 	});
 
 	const setNavigationMode = useCallback(
 		(mode: NavigationMode) => {
 			setNavigationModeState(mode);
-			setPref('navigationMode', mode);
+			setAppState('navigationMode', mode);
 		},
-		[setPref]
+		[setAppState]
 	);
 
 	// --- Canvas lock -------------------------------------------------------

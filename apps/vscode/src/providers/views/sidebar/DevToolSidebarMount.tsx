@@ -22,21 +22,27 @@
 // =============================================================================
 
 /**
- * DevToolSidebarMount — mounts a tool's devToolSidebar in the RocketRide
- * sidebar webview.
+ * DevToolSidebarMount - this realm's descriptor source for the shared tool
+ * mount.
  *
- * The sidebar bundle is built WITHOUT the MF rsbuild plugin (its chunk graph
- * is deliberately all-in-one), so this component initialises a Module
- * Federation host MANUALLY on first use: `init()` from
- * `@module-federation/runtime` with the four share singletons provided
- * programmatically from this bundle's own module instances (react,
- * react-dom, shell, rocketride) — the exact contract the store-app remotes
- * (`runtime: false`, `import: false`) require of their host.
+ * The MOUNT itself is shared (tools/core ToolMount): builtin resolution,
+ * slot selection, DevToolProps wiring and every status state live there, so
+ * this host cannot hold a different opinion about them - which it used to,
+ * most visibly about WHEN to mount.
  *
- * The mount gets its own SDK connection (the shell ConnectionManager
- * singleton of THIS document, connected with the host credential) and the
- * host-relayed peer channel to the tool's frame panel. A tool without a
- * devToolSidebar renders the provided fallback (the built-in tool card).
+ * What is genuinely this realm's own is how a descriptor is obtained. The
+ * sidebar bundle is built WITHOUT the MF rsbuild plugin (its chunk graph is
+ * deliberately all-in-one), so there is no bootstrap to inherit registered
+ * remotes from: this module initialises a Module Federation host MANUALLY on
+ * first use - `init()` from `@module-federation/runtime` with the four share
+ * singletons provided programmatically from this bundle's own module
+ * instances (react, react-dom, shell, rocketride), the exact contract the
+ * store-app remotes (`runtime: false`, `import: false`) require of their
+ * host - and composes each remote entry URL from the engine URL itself.
+ *
+ * The mount reaches the engine over the shell bus (brokered client.* ops),
+ * never its own socket, and talks to the tool's frame panel over the
+ * host-relayed peer.
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
@@ -46,8 +52,10 @@ import type { CSSProperties, ReactNode } from 'react';
 import { init, registerRemotes, loadRemote } from '@module-federation/runtime';
 import * as shellNS from 'shell';
 import * as rocketrideNS from 'rocketride';
-import { ConnectionManager, createToolChannel } from 'shell';
+import { createToolChannel } from 'shell';
 import type { AppDescriptor, DevToolProps } from 'shell';
+import { ToolMount } from 'shared/tools/core';
+import type { ToolDescriptorSource } from 'shared/tools/core';
 import type { ToolTab } from 'shared/tools/core/chrome/types';
 
 // =============================================================================
@@ -74,17 +82,12 @@ function ensureMfHost(): void {
 	});
 }
 
+
 // =============================================================================
 // STYLES
 // =============================================================================
 
 const styles = {
-	fill: {
-		display: 'flex',
-		flexDirection: 'column' as const,
-		height: '100%',
-		minHeight: 0,
-	} as CSSProperties,
 	status: {
 		padding: 16,
 		fontSize: 12,
@@ -103,6 +106,7 @@ export interface DevToolHostInfo {
 	engineHttpUrl: string;
 }
 
+/** Props for {@link DevToolSidebarMount}. */
 export interface DevToolSidebarMountProps {
 	/** The pinned tool (needs moduleId + registryVersion to mount). */
 	tool: ToolTab;
@@ -119,24 +123,24 @@ export interface DevToolSidebarMountProps {
 	fallback: ReactNode;
 }
 
-/** Mount pipeline state. */
-type Phase =
-	| { kind: 'loading' }
-	| { kind: 'ready'; Sidebar: React.ComponentType<DevToolProps> }
-	| { kind: 'none' }
-	| { kind: 'error'; message: string };
-
 // =============================================================================
 // COMPONENT
 // =============================================================================
 
+/**
+ * Loads one tool's descriptor through this realm's MF host and hands it to
+ * {@link ToolMount}.
+ *
+ * @param props - See {@link DevToolSidebarMountProps}.
+ * @returns The mounted tool sidebar.
+ */
 export const DevToolSidebarMount: React.FC<DevToolSidebarMountProps> = ({ tool, host, peer, documents, activeDocKey, fallback }) => {
-	const [phase, setPhase] = useState<Phase>({ kind: 'loading' });
+	const [source, setSource] = useState<ToolDescriptorSource>({ status: 'loading' });
 	// The typed channel rides the same peer transport; one instance per peer
 	// identity (the peer is cached per tool by the webview, so this is one
 	// channel per tool for the document's lifetime).
 	const channel = useMemo(() => createToolChannel(peer), [peer]);
-	// One mount per tool@version per document — a loaded MF container cannot
+	// One mount per tool@version per document - a loaded MF container cannot
 	// be repointed; a version change re-runs the pipeline for the NEW remote
 	// name registration (force) but the stale container may require a reload.
 	const mountKeyRef = useRef<string | null>(null);
@@ -144,21 +148,23 @@ export const DevToolSidebarMount: React.FC<DevToolSidebarMountProps> = ({ tool, 
 	useEffect(() => {
 		if (!host || !tool.moduleId || tool.registryVersion === undefined) {
 			// Forget the mounted key so a reconnect with the SAME facts re-runs
-			// the pipeline instead of early-returning into a dead 'none'.
+			// the pipeline instead of early-returning into a dead state. No
+			// descriptor and no error: disconnected is not a load FAILURE, so
+			// the shared mount renders the card rather than an error line.
 			mountKeyRef.current = null;
-			setPhase({ kind: 'none' });
+			setSource({ status: 'ready', descriptor: null });
 			return;
 		}
 		const mountKey = `${tool.id}@${tool.registryVersion}@${host.engineHttpUrl}`;
 		// `host` arrives as a fresh object on every full update, so this effect
 		// re-runs with unchanged facts while the pipeline below is still in
-		// flight — the key match skips the re-run, and the in-flight run stays
+		// flight - the key match skips the re-run, and the in-flight run stays
 		// authoritative (its results are gated on key CURRENCY, not on this
 		// effect instance, so a skipped re-run cannot orphan it in 'loading').
 		if (mountKeyRef.current === mountKey) return;
 		mountKeyRef.current = mountKey;
 
-		setPhase({ kind: 'loading' });
+		setSource({ status: 'loading' });
 
 		void (async () => {
 			try {
@@ -171,29 +177,31 @@ export const DevToolSidebarMount: React.FC<DevToolSidebarMountProps> = ({ tool, 
 				registerRemotes([{ name: tool.moduleId!, entry: `${host.engineHttpUrl}/apps/${encodeURIComponent(tool.id)}/v${tool.registryVersion}/remoteEntry.js` }], { force: true });
 				const mod = (await loadRemote(`${tool.moduleId}/AppDescriptor`)) as { default: AppDescriptor } | null;
 				if (mountKeyRef.current !== mountKey) return;
-
-				const Sidebar = mod?.default?.devToolSidebar;
-				setPhase(Sidebar ? { kind: 'ready', Sidebar } : { kind: 'none' });
+				setSource({ status: 'ready', descriptor: mod?.default ?? null });
 			} catch (err) {
 				if (mountKeyRef.current !== mountKey) return;
-				setPhase({ kind: 'error', message: err instanceof Error ? err.message : String(err) });
+				setSource({ status: 'error', error: err instanceof Error ? err.message : String(err) });
 			}
 		})();
 	}, [tool.id, tool.moduleId, tool.registryVersion, host]);
 
-	if (phase.kind === 'ready') {
-		const Sidebar = phase.Sidebar;
-		return (
-			<div style={styles.fill}>
-				<Sidebar peer={peer} channel={channel} {...(documents ? { documents } : {})} {...(activeDocKey !== undefined ? { activeDocKey } : {})} />
-			</div>
-		);
-	}
+	// This realm words its own wait: the shared mount's centred status suits
+	// a document surface, not a narrow sidebar column.
+	if (source.status === 'loading') return <div style={styles.status}>Loading {tool.name}...</div>;
 
-	if (phase.kind === 'loading') return <div style={styles.status}>Loading {tool.name}…</div>;
-	if (phase.kind === 'error') return <div style={styles.status}>Could not load {tool.name}: {phase.message}</div>;
-	// No devToolSidebar (or disconnected): the built-in tool card.
-	return <>{fallback}</>;
+	return (
+		<ToolMount
+			appId={tool.id}
+			name={tool.name}
+			slot="sidebar"
+			peer={peer}
+			channel={channel}
+			source={source}
+			fallback={fallback}
+			{...(documents !== undefined ? { documents } : {})}
+			{...(activeDocKey !== undefined ? { activeDocKey } : {})}
+		/>
+	);
 };
 
 export default DevToolSidebarMount;

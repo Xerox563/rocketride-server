@@ -32,7 +32,6 @@ import type { ShellOpMap, ShellOpSpec } from 'shell/src/ops/busOps';
 export interface PipelineLoadPayload {
 	project?: unknown;
 	viewState: Record<string, unknown>;
-	prefs: Record<string, unknown>;
 	statuses: Record<string, unknown>;
 	isSubscribed: boolean;
 	isDirty: boolean;
@@ -51,7 +50,6 @@ export interface PipelineLoadPayload {
 //                               after applying (the one sanctioned
 //                               consumer-retract: the value is a one-shot
 //                               credential, not state)
-//   pipeline:prefs              SIGNAL   {prefs} (global-scoped delta fan-out)
 //   pipeline:env / pipeline:cloudSetup — see steps above (global retained)
 
 /** The pipeline editor's host-verb op map. */
@@ -64,9 +62,6 @@ export interface PipelineHostOpMap extends ShellOpMap {
 	'host.pipeline.contentSet': ShellOpSpec<{ doc: string; project: unknown; saveAfter?: boolean }, void>;
 	/** Persists the document's layout defaults (emitOp). */
 	'host.pipeline.viewState': ShellOpSpec<{ doc: string; viewState: Record<string, unknown> }, void>;
-	/** Persists a project-preferences patch (emitOp); global-scoped keys fan
-	 *  back out on the pipeline:prefs signal. */
-	'host.pipeline.prefsChange': ShellOpSpec<{ prefs: Record<string, unknown> }, void>;
 	/** Starts the browser OAuth flow (https-only guard host-side); tokens
 	 *  come back on the doc's retained oauth topic. */
 	'host.pipeline.oauthStart': ShellOpSpec<{ doc: string; url: string }, void>;

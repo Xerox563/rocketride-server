@@ -23,8 +23,8 @@
 // =============================================================================
 // FROZEN shell-api contract — ShellApiV6 — never edit by hand
 // =============================================================================
-// Generated:     2026-10-19T01:20:56.518Z
-// Source commit: b2ed2678a12df1c578620a863d330d89103ed274
+// Generated:     2026-10-21T00:31:58.054Z
+// Source commit: b8a2e0bad259d587b74d78d8f1d95b804eb4556d
 // Generator:     dts-bundle-generator@9.5.1
 // Produced by:   ./builder shell:freeze
 // =============================================================================
@@ -8083,94 +8083,6 @@ export interface IUsePollingOptions {
     gate?: "shell" | "none";
 }
 export declare function usePolling(fetcher: () => void | Promise<void>, interval: number, options?: IUsePollingOptions): void;
-/** Wrapper for activity events from either channel. */
-export type ActivityEvent = {
-    source: "task";
-    body: TaskEvent;
-    receivedAt: number;
-} | {
-    source: "dashboard";
-    body: DashboardEvent;
-    receivedAt: number;
-};
-interface IMonitorViewProps {
-    /**
-     * Document display name for the page header. When provided, the view
-     * renders a stock {@link ContentHeader} titled with this name (matching
-     * the host's tab title), pinned between the page strip and the scrolling
-     * page bodies. No header renders without it.
-     */
-    documentTitle?: string;
-    /** Full dashboard snapshot from rrext_dashboard response, or null if not yet loaded. */
-    data: DashboardResponse | null;
-    /** Activity events pushed from the server (newest first). */
-    events: ActivityEvent[];
-    /** Whether the client is connected to the server. */
-    isConnected: boolean;
-    /** Callback to request a manual data refresh from the host. */
-    onRefresh?: () => void;
-    /**
-     * Optional server-paginated connections fetcher — presence switches the
-     * Connections grid to REMOTE mode (host binds it to `listConnections`).
-     */
-    listConnections?: (req: ListPageRequest) => Promise<ListPageResponse<DashboardConnection>>;
-    /**
-     * Optional server-paginated tasks fetcher — presence switches the Tasks
-     * grid to REMOTE mode (host binds it to `listTasks`).
-     */
-    listTasks?: (req: ListPageRequest) => Promise<ListPageResponse<DashboardTask>>;
-    /**
-     * Receives ONE combined refetch that silently re-requests the current
-     * page of every remote grid — the host polls it (usePolling, 3s) the way
-     * the admin views poll their own grids.
-     */
-    onRefetchReady?: (refetch: () => void) => void;
-    /**
-     * Controlled active page. When set, the view renders this page and
-     * ignores its internal tab state; page switches (if the strip is shown)
-     * are reported through `onPageChange` instead of applied locally. Hosts
-     * that render their own switcher (monitor-ui's sidebar menu) pair this
-     * with `hideTabs`.
-     */
-    activePage?: MonitorPageId;
-    /** Fired with the target page id when the user picks a strip tab. */
-    onPageChange?: (page: MonitorPageId) => void;
-    /**
-     * Hide the top TabControl strip — the host provides the page switcher
-     * (e.g. a sidebar menu) and drives the view via `activePage`.
-     */
-    hideTabs?: boolean;
-}
-/** One of the monitor's four pages — the ids the page switcher selects. */
-export type MonitorPageId = "overview" | "connections" | "tasks" | "activity";
-export declare const MonitorView: React$1.FC<IMonitorViewProps>;
-/**
- * Parse a raw server event into a monitor ActivityEvent.
- *
- * @param raw - Raw event object from the server WebSocket.
- * @returns ActivityEvent if the event is dashboard or task related, null otherwise.
- */
-export declare function parseActivityEvent(raw: unknown): ActivityEvent | null;
-/** Data returned by the useDashboardData hook. */
-export interface DashboardData {
-    /** Latest dashboard snapshot, or null if not yet loaded. */
-    data: DashboardResponse | null;
-    /** Activity events (newest first). */
-    events: ActivityEvent[];
-    /** Last fetch failure (e.g. a permission denial), or null when healthy. */
-    error: string | null;
-    /** Trigger a manual refresh. */
-    refresh: () => void;
-}
-/**
- * Shared hook that provides server dashboard data and activity events.
- *
- * Uses a module-level singleton: the first consumer starts polling, the last
- * one to unmount stops it. Data persists across view switches.
- *
- * @returns Dashboard data, events, and a manual refresh callback.
- */
-export declare function useDashboardData(): DashboardData;
 /**
  * Returns the current ConnectionStatus with automatic re-renders on changes.
  *
@@ -9266,6 +9178,34 @@ export declare function PrefsProvider({ value, children }: {
  * @returns The `{ getPref, setPref }` accessor.
  */
 export declare function usePrefs(): IPrefsApi;
+/** The app-state accessor: read one key, write one key. */
+export interface IAppStateApi {
+    /** Current value for `key`, or `undefined` if unset. Caller narrows. */
+    getAppState: (key: string) => unknown;
+    /** Persist `value` under `key` (shallow-merged into the app's slice). */
+    setAppState: (key: string, value: unknown) => void;
+}
+/**
+ * Provides the app's state accessor to every shared component beneath it.
+ *
+ * Mount it where the relevant SLICE is owned — which for a documents-based app
+ * is per document (one provider per open editor), not once at the app root.
+ *
+ * @param props.value - The `{ getAppState, setAppState }` implementation.
+ * @param props.children - The subtree that may read it via {@link useAppState}.
+ * @returns The provider element.
+ */
+export declare function AppStateProvider({ value, children }: {
+    value: IAppStateApi;
+    children: React$1.ReactNode;
+}): React$1.ReactElement;
+/**
+ * Reads the ambient app-state accessor. Returns a no-op accessor when no
+ * provider is mounted, so callers never need to null-check.
+ *
+ * @returns The `{ getAppState, setAppState }` accessor.
+ */
+export declare function useAppState(): IAppStateApi;
 declare const ENVELOPE$1 = "__rrtool";
 /** Default per-call timeout — generous because engine-side statements can
  *  legitimately run long; override per call. */
@@ -9451,12 +9391,20 @@ export declare function typedToolChannel<S extends ToolStateMap = ToolStateMap, 
 export declare function useToolState<S extends ToolStateMap, E extends ToolEventMap, K extends keyof S & string>(channel: TypedToolChannel<S, E>, topic: K): S[K] | undefined;
 /**
  * Whether the controller realm's server connection is up, from the retained
- * `host:connection` system topic. False until the snapshot arrives.
+ * `host:connection` system topic — TRI-STATE:
+ *
+ *   true       the host said connected
+ *   false      the host said disconnected
+ *   undefined  no snapshot has arrived — NO IDEA YET
+ *
+ * Absence of a snapshot is never evidence of a negative: render a waiting
+ * state on undefined, never a "disconnected" claim (that lie cost a day).
+ * Boolean gates (`if (!ready)`) keep working — undefined gates like false.
  *
  * @param channel - The mount's channel (raw or typed).
- * @returns Whether the controller realm can reach the server.
+ * @returns The host's connection level, or undefined before the first snapshot.
  */
-export declare function useConnectionReady(channel: ToolChannel | TypedToolChannel): boolean;
+export declare function useConnectionReady(channel: ToolChannel | TypedToolChannel): boolean | undefined;
 /**
  * Publishes the server-connection status into one tool channel's retention.
  * HOST-side: called per tool channel on every connection change (tools
@@ -9468,8 +9416,6 @@ export declare function useConnectionReady(channel: ToolChannel | TypedToolChann
  * @param connected - Whether the server connection is up.
  */
 export declare function publishHostConnectionState(channel: ToolChannel, connected: boolean): void;
-/** Durability of one written key: roams with the workspace, or per-user. */
-export type PrefScope = "workspace" | "global";
 /**
  * The raw, string-keyed preference store a HOST implements. Tool and shell
  * code should not consume this directly — use {@link typedPrefs} for
@@ -9481,7 +9427,7 @@ export interface PrefsStore {
     /** One key's current value (synchronous). */
     get(key: string): unknown;
     /** Writes one key (fire-and-forget merge; notifies subscribers). */
-    set(key: string, value: unknown, scope?: PrefScope): void;
+    set(key: string, value: unknown): void;
     /** Subscribe to any change; returns unsubscribe. */
     subscribe(cb: () => void): () => void;
     /** Resolves once the store has hydrated from its backend. */
@@ -9512,7 +9458,7 @@ export interface TypedPrefsStore<M> {
     /** One key's current value. */
     get<K extends keyof M & string>(key: K): M[K] | undefined;
     /** Writes one key. */
-    set<K extends keyof M & string>(key: K, value: M[K], scope?: PrefScope): void;
+    set<K extends keyof M & string>(key: K, value: M[K]): void;
     /** Subscribe to any change; returns unsubscribe. */
     subscribe(cb: () => void): () => void;
     /** Resolves once hydrated. */
@@ -9537,22 +9483,56 @@ export declare function typedPrefs<M>(store: PrefsStore): TypedPrefsStore<M>;
  * @returns The confined store.
  */
 export declare function scopedPrefs(store: PrefsStore, partition: string): PrefsStore;
+/** The retained topic carrying ONE partition's prefs. */
+export declare function prefsTopic(partition: string): string;
+/** The minimal bus surface a mirrored prefs store needs. */
+export interface IPrefsBus {
+    /** Subscribe to a retained topic (replays the current snapshot). */
+    subscribe(topic: string, cb: (snapshot: unknown) => void): () => void;
+    /** Fire-and-forget op to the workspace manager. */
+    emitOp(op: string, params: unknown): void;
+}
 /**
- * A hydrate-once, in-memory store over a message bridge — the shape every
- * ISOLATED host realm needs (a VS Code webview, an iframe): the host seeds
- * the full snapshot once (`seed`), writes go up through `post`, and remote
- * echoes land through `apply`. Reads never wait on the wire.
+ * A MIRRORED prefs store for ONE partition — the shape every realm uses.
  *
- * @param post - Sends one write to the owning side.
- * @returns The store plus the bridge's seed/apply feeds.
+ * Reads are SYNCHRONOUS off the realm's mirrored copy (never a round-trip,
+ * which is the constraint grid persistence and boot paths impose). Writes go
+ * to the manager as a fire-and-forget `shell.setPref`; it merges,
+ * republishes, and debounces the dump, so every realm converges.
+ *
+ * `shell.prefs.attach` is what makes the first snapshot arrive: the registry
+ * cannot tell the manager that someone subscribed, and a partition the
+ * manager has not loaded has no retained value to replay. The realm
+ * therefore DECLARES its partition and the manager publishes it — even when
+ * empty, so `ready` resolves either way.
+ *
+ * @param bus - The realm's connection manager (subscribe + emitOp).
+ * @param partition - The partition this store is confined to.
+ * @returns The store plus a disposer for its subscription.
  */
-export declare function createBridgedPrefsStore(post: (key: string, value: unknown, scope: PrefScope) => void): {
+export declare function createMirroredPrefsStore(bus: IPrefsBus, partition: string): {
     store: PrefsStore;
-    /** Seeds (or replaces) the hydrated snapshot; resolves `ready`. */
-    seed(values: Record<string, unknown>): void;
-    /** Applies one remote write (another realm changed a key). */
-    apply(key: string, value: unknown): void;
+    dispose(): void;
 };
+/** A realm's per-partition prefs stores, created on demand. */
+export interface IPrefsHub {
+    /** The mirrored store for one partition (cached per name). */
+    partition(name: string): PrefsStore;
+    /** Drops every subscription this hub opened. */
+    dispose(): void;
+}
+/**
+ * A realm's prefs hub: one mirrored store per partition, created on demand
+ * and cached.
+ *
+ * A realm hosts more than one partition — its own chrome reads `shell`, and
+ * every tool it mounts reads `app:<id>` (or `preview:<id>`). Each gets its
+ * own topic; the hub keeps them from being subscribed twice.
+ *
+ * @param bus - The realm's connection manager.
+ * @returns The hub, plus a disposer that drops every subscription.
+ */
+export declare function createPrefsHub(bus: IPrefsBus): IPrefsHub;
 /**
  * The live value of one preference key (re-renders on store changes).
  *
@@ -9561,52 +9541,216 @@ export declare function createBridgedPrefsStore(post: (key: string, value: unkno
  * @returns The current value, or undefined before hydration / when unset.
  */
 export declare function usePref<M, K extends keyof M & string>(store: TypedPrefsStore<M>, key: K): M[K] | undefined;
+/** How a path differs from the base, for badges and review. */
+export type ChangeKind = "added" | "modified" | "deleted";
+/** One commit/undo blocker: the base moved underneath a staged change. */
+export interface StagedConflict {
+    path: string;
+    reason: "changed" | "missing" | "resurrected";
+}
+/** The outcome of commit(): all-or-nothing. */
+export interface CommitResult {
+    /** Paths written/deleted on the base (0 when conflicts exist). */
+    committed: number;
+    /** Non-empty means NOTHING was written. */
+    conflicts: StagedConflict[];
+}
+/** One staged layer's METADATA — entry contents never cross a realm. */
+export interface LayerMeta {
+    /** Stable id (uuid). */
+    id: string;
+    /** Display label (e.g. a turn title). */
+    label: string;
+    /** The agent session that produced it, when any. */
+    sessionId?: string;
+    /** True once commit() retained this layer as inert undo history. */
+    committed?: boolean;
+    /** Number of staged operations in the layer. */
+    entryCount: number;
+}
+/** The one-round-trip pending snapshot (`host.fs.pending`). */
+export interface PendingState {
+    /** Whether any non-retained staged operation exists. */
+    hasPending: boolean;
+    /** Staged path → how it differs from the base. */
+    changedPaths: Record<string, ChangeKind>;
+    /** Paths with unsaved editor overlays (dirty markers). */
+    dirtyPaths: string[];
+}
 /**
- * The workspace-FS capability a host provides to tool code: globs, bytes,
- * and watches — nothing tool-shaped. Hosts may implement it twice: direct
- * access for code in their own process, and an RPC client for tool code in
- * an isolated realm. Tool modules are written against this interface alone.
+ * A write-through save was REFUSED because the base moved underneath the
+ * buffer (someone else committed this path since it was opened) — the
+ * VS Code "content of the file is newer" condition. The buffer is intact;
+ * the caller resolves by comparing, overwriting deliberately (re-read then
+ * re-save), or reverting.
  */
-export interface ToolWorkspaceFs {
+export declare class StaleWriteError extends Error {
+    /** The refused path. */
+    readonly path: string;
+    constructor(path: string);
+}
+/**
+ * The workspace-FS capability a host provides: files, globs, watches, AND
+ * the full change-management surface. Hosts without staging (vscode)
+ * answer the staging verbs trivially — a pending-changes UI simply shows
+ * nothing pending, truthfully.
+ */
+export interface WorkspaceFs {
     /**
-     * Finds files by glob across the workspace.
+     * Lists one directory's immediate entries.
      *
-     * @param include - Include glob (e.g. '**​/*.rrapp').
-     * @param exclude - Optional exclude glob.
-     * @returns Absolute paths, host-native separators.
+     * @param dir - Directory path ('' = the root).
+     * @returns Name + kind per entry.
      */
-    findFiles(include: string, exclude?: string): Promise<string[]>;
+    list(dir: string): Promise<{
+        name: string;
+        type: "file" | "dir";
+    }[]>;
     /**
-     * The open workspace folders' absolute root paths — what absolute result
-     * paths are made display-relative against.
+     * The type of a path, consulting the authority definitively.
      *
-     * @returns The roots (possibly empty), host-native separators.
+     * @param path - Path to classify.
+     * @returns 'file' | 'dir', or null when the path does not exist.
      */
-    workspaceRoots(): Promise<string[]>;
+    stat(path: string): Promise<"file" | "dir" | null>;
+    /**
+     * Reads one file's content (JSON-serializable; text files read as
+     * strings).
+     *
+     * @param path - The file.
+     * @returns The content.
+     */
+    read(path: string): Promise<unknown>;
+    /**
+     * Reads many files in one round-trip — the batch seam for bulk
+     * consumers (pack, export).
+     *
+     * @param paths - Paths to read.
+     * @returns Path → content; unreadable paths are omitted.
+     */
+    readMany(paths: string[]): Promise<Record<string, unknown>>;
     /**
      * Reads a file as UTF-8 text.
      *
-     * @param path - Absolute path (must be inside the workspace).
+     * @param path - The file.
      * @returns The text.
      */
     readTextFile(path: string): Promise<string>;
     /**
      * Reads a file as base64, size-gated.
      *
-     * @param path - Absolute path (must be inside the workspace).
+     * @param path - The file.
      * @param maxBytes - Files larger than this return null.
      * @returns The base64 payload, or null (missing / too large).
      */
     readFileBase64(path: string, maxBytes: number): Promise<string | null>;
     /**
+     * Writes one file (JSON-serializable content; strings for text).
+     *
+     * @param path - The file.
+     * @param content - The content, stored per the host's workspace.
+     */
+    write(path: string, content: unknown): Promise<void>;
+    /** Writes UTF-8 text. */
+    writeTextFile(path: string, text: string): Promise<void>;
+    /** Writes binary content carried as base64 (the bus's binary rule). */
+    writeFileBase64(path: string, dataB64: string): Promise<void>;
+    /** Renames a file or directory. */
+    rename(from: string, to: string): Promise<void>;
+    /**
+     * Deletes a file or directory.
+     *
+     * @param path - The target.
+     * @param recursive - Required truthy to delete a non-empty directory on
+     *                    hosts that distinguish (vscode); staged hosts
+     *                    shadow subtrees either way.
+     */
+    delete(path: string, recursive?: boolean): Promise<void>;
+    /** Creates a directory. */
+    mkdir(path: string): Promise<void>;
+    /** Re-walks the authority's inventory (no-op on direct-disk hosts). */
+    refresh(): Promise<void>;
+    /**
+     * Finds files by glob across the workspace.
+     *
+     * @param include - Include glob (e.g. '**​/*.rrapp').
+     * @param exclude - Optional exclude glob.
+     * @returns Paths in the host's spelling.
+     */
+    findFiles(include: string, exclude?: string): Promise<string[]>;
+    /**
+     * The workspace root paths — what result paths are made
+     * display-relative against (possibly empty on single-rooted virtual
+     * hosts).
+     */
+    workspaceRoots(): Promise<string[]>;
+    /**
      * Watches globs for create/change/delete.
      *
      * @param globs - Include globs.
-     * @param onEvent - Receives each changed path (undebounced).
+     * @param onEvent - Receives each changed path; '' is the synthetic
+     *                  "re-evaluate everything" tick.
      * @returns Unsubscribe.
      */
     watch(globs: string[], onEvent: (path: string) => void): () => void;
+    /** The pending snapshot — one round-trip for badges and gates. */
+    pending(): Promise<PendingState>;
+    /**
+     * One path's base-vs-staged comparison.
+     *
+     * @param path - The file.
+     * @returns Text pair; null side = does not exist there.
+     */
+    diff(path: string): Promise<{
+        before: string | null;
+        after: string | null;
+    }>;
+    /**
+     * Commits every pending staged operation to the base — all-or-nothing.
+     *
+     * @param options - retain: keep committed layers as inert undo history.
+     * @returns The outcome (conflicts mean nothing was written).
+     */
+    commit(options?: {
+        retain?: boolean;
+    }): Promise<CommitResult>;
+    /**
+     * Freezes the working layer as a named checkpoint.
+     *
+     * @param label - Display label.
+     * @param sessionId - Producing agent session, when any.
+     * @returns The new layer id, or null when nothing was pending.
+     */
+    checkpoint(label: string, sessionId?: string): Promise<string | null>;
+    /** Rolls staged state back to (and including) one layer. */
+    rollback(layerId: string): Promise<void>;
+    /** Un-commits one retained layer from the base (the undo of a commit). */
+    undoTurn(layerId: string): Promise<CommitResult>;
+    /**
+     * Discards pending staged changes.
+     *
+     * @param path - One path; omitted = everything pending.
+     */
+    discard(path?: string): Promise<void>;
+    /** The staged layers' metadata, oldest first (contents never cross). */
+    layers(): Promise<LayerMeta[]>;
+    /**
+     * Switches write-through (auto-commit) mode. Rejects when pending
+     * changes exist — commit or discard first. Always-on hosts no-op.
+     */
+    setWriteThrough(on: boolean): Promise<void>;
+    /** Resolves once persisted staged layers are rehydrated (trivial where
+     *  there is no staging). */
+    whenReady(): Promise<void>;
 }
+/**
+ * Compiles one include glob to a RegExp over '/'-separated paths.
+ * Supports `**` (any depth), `*` (within a segment), `?` (one char).
+ *
+ * @param glob - The glob.
+ * @returns The matcher.
+ */
+export declare function globToRegExp(glob: string): RegExp;
 /** The generic, host-wide capabilities a workbench hands its tools. */
 export interface ToolHostServices {
     /** Opens an embedded host page/document by key (see file header). */
@@ -9614,7 +9758,7 @@ export interface ToolHostServices {
     /** Opens a workspace FILE in the host's editor surface. */
     openFile?: (path: string) => void;
     /** Workspace/store file access for tool discovery. */
-    workspaceFs?: ToolWorkspaceFs;
+    workspaceFs?: WorkspaceFs;
     /** This tool's preference partition — PRE-SCOPED by the host (see
      *  scopedPrefs): the handle physically cannot address another app's
      *  keys, and system prefs are not reachable through it. */
@@ -9732,176 +9876,172 @@ export declare function createLocalEndpointPair(): [
     IBusEndpoint,
     IBusEndpoint
 ];
-/** A monitor key as the SDK takes it. */
-export type ClientMonitorKey = {
-    token: string;
-} | {
-    projectId: string;
-    source: string;
-    teamId?: string;
-    pipeId?: number;
-    runKind?: "dev" | "deploy";
-};
+type C = RocketRideClient;
+type Acct = C["account"];
+type Bill = C["billing"];
+type Dep = C["deploy"];
+type LogFam = C["log"];
+type R<M extends (...args: never[]) => unknown> = Awaited<ReturnType<M>>;
+type P0<M extends (...args: never[]) => unknown> = NonNullable<Parameters<M>[0]>;
+type P1<M extends (...args: never[]) => unknown> = NonNullable<Parameters<M>[1]>;
+/** A monitor key — exactly what the SDK's addMonitor takes. */
+export type ClientMonitorKey = Parameters<C["addMonitor"]>[0];
 /**
- * The brokered client vocabulary. Results are typed loosely where the SDK
- * shape is pass-through — tightening is incremental and local.
+ * The brokered client vocabulary, strictly typed. The remaining `unknown`s
+ * are deliberate and documented inline: generic-erased SDK results and raw
+ * polymorphic wire verbs — nothing else.
  */
 export interface ClientOpMap extends ShellOpMap {
-    "client.getDashboard": ShellOpSpec<Record<string, never>, unknown>;
-    "client.listTasks": ShellOpSpec<Record<string, unknown>, unknown>;
-    "client.listConnections": ShellOpSpec<Record<string, unknown>, unknown>;
-    "client.getTasks": ShellOpSpec<Record<string, never>, unknown>;
-    "client.getTaskToken": ShellOpSpec<{
-        projectId: string;
-        source: string;
-        teamId?: string;
-    }, unknown>;
+    "client.getDashboard": ShellOpSpec<Record<string, never>, R<C["getDashboard"]>>;
+    "client.listTasks": ShellOpSpec<P0<C["listTasks"]>, R<C["listTasks"]>>;
+    "client.listConnections": ShellOpSpec<P0<C["listConnections"]>, R<C["listConnections"]>>;
+    "client.getTasks": ShellOpSpec<Record<string, never>, R<C["getTasks"]>>;
+    "client.getTaskToken": ShellOpSpec<P0<C["getTaskToken"]>, R<C["getTaskToken"]>>;
     "client.getTaskPipeline": ShellOpSpec<{
         token: string;
-    }, unknown>;
+    }, R<C["getTaskPipeline"]>>;
     "client.getTaskStatus": ShellOpSpec<{
         token: string;
         timeout?: number;
-    }, unknown>;
+    }, R<C["getTaskStatus"]>>;
     "client.terminate": ShellOpSpec<{
         token: string;
-    }, unknown>;
-    "client.use": ShellOpSpec<Record<string, unknown>, unknown>;
-    "client.restart": ShellOpSpec<Record<string, unknown>, unknown>;
-    "client.validate": ShellOpSpec<Record<string, unknown>, unknown>;
-    "client.tool": ShellOpSpec<{
-        token: string;
-        tool: string;
-        nodeId?: string;
-        input?: unknown;
-        timeout?: number;
-    }, unknown>;
+    }, R<C["terminate"]>>;
+    "client.use": ShellOpSpec<P0<C["use"]>, R<C["use"]>>;
+    "client.restart": ShellOpSpec<P0<C["restart"]>, R<C["restart"]>>;
+    "client.validate": ShellOpSpec<P0<C["validate"]>, R<C["validate"]>>;
+    /** Result stays `unknown`: the SDK's `tool<T = any>` erases its return
+     *  type — there is nothing to derive; callers narrow at the edge. */
+    "client.tool": ShellOpSpec<P0<C["tool"]>, unknown>;
     "client.addMonitor": ShellOpSpec<{
         key: ClientMonitorKey;
         types: string[];
-    }, void>;
+    }, R<C["addMonitor"]>>;
     "client.removeMonitor": ShellOpSpec<{
         key: ClientMonitorKey;
         types: string[];
-    }, void>;
+    }, R<C["removeMonitor"]>>;
     "client.fsListDir": ShellOpSpec<{
         path: string;
-    }, unknown>;
+    }, R<C["fsListDir"]>>;
     "client.fsStat": ShellOpSpec<{
         path: string;
-    }, unknown>;
+    }, R<C["fsStat"]>>;
     "client.fsGetUrl": ShellOpSpec<{
         path: string;
         expiresIn?: number;
         downloadName?: string;
-    }, string>;
+    }, R<C["fsGetUrl"]>>;
     "client.fsReadString": ShellOpSpec<{
         path: string;
-    }, string>;
+    }, R<C["fsReadString"]>>;
     "client.fsWriteString": ShellOpSpec<{
         path: string;
         text: string;
-    }, unknown>;
+    }, R<C["fsWriteString"]>>;
+    /** JSON file contents — `unknown` IS the honest type (schemaless). */
     "client.fsReadJson": ShellOpSpec<{
         path: string;
     }, unknown>;
     "client.fsWriteJson": ShellOpSpec<{
         path: string;
         value: unknown;
-    }, unknown>;
+    }, R<C["fsWriteJson"]>>;
     "client.fsRename": ShellOpSpec<{
         from: string;
         to: string;
-    }, unknown>;
+    }, R<C["fsRename"]>>;
     "client.fsDelete": ShellOpSpec<{
         path: string;
-    }, unknown>;
+    }, R<C["fsDelete"]>>;
     "client.fsMkdir": ShellOpSpec<{
         path: string;
-    }, unknown>;
+    }, R<C["fsMkdir"]>>;
     "client.fsRmdir": ShellOpSpec<{
         path: string;
         recursive?: boolean;
-    }, unknown>;
+    }, R<C["fsRmdir"]>>;
     "client.fsOpen": ShellOpSpec<{
         path: string;
-        mode: string;
-    }, unknown>;
+        mode: "r" | "w";
+    }, R<C["fsOpen"]>>;
     "client.fsWrite": ShellOpSpec<{
-        handle: unknown;
+        handle: string;
         dataB64: string;
-    }, unknown>;
+    }, R<C["fsWrite"]>>;
     "client.fsClose": ShellOpSpec<{
-        handle: unknown;
-        mode?: string;
-    }, unknown>;
+        handle: string;
+        mode: "r" | "w";
+    }, R<C["fsClose"]>>;
+    /** NOTE: `session` is a STRING per the SDK — the old loose spec said
+     *  `Record<string, unknown>`, a drift this typing now makes impossible. */
     "client.cprofileStart": ShellOpSpec<{
         target?: string | null;
-        session?: Record<string, unknown>;
-    }, unknown>;
+        session?: string;
+    }, R<C["cprofileStart"]>>;
     "client.cprofileStop": ShellOpSpec<{
         target?: string | null;
-    }, unknown>;
+    }, R<C["cprofileStop"]>>;
     "client.cprofileStatus": ShellOpSpec<{
         target?: string | null;
-    }, unknown>;
+    }, R<C["cprofileStatus"]>>;
     "client.cprofileReport": ShellOpSpec<{
         target?: string | null;
-    }, unknown>;
+    }, R<C["cprofileReport"]>>;
     "client.cprofileReportTree": ShellOpSpec<{
         target?: string | null;
         max_depth?: number;
         min_pct?: number;
         include_system?: boolean;
         thread?: number | null;
-    }, unknown>;
+    }, R<C["cprofileReportTree"]>>;
     "client.cprofileThreads": ShellOpSpec<{
         target?: string | null;
-    }, unknown>;
+    }, R<C["cprofileThreads"]>>;
     "client.getService": ShellOpSpec<{
         service: string;
-    }, unknown>;
-    "client.getEnvironmentKeys": ShellOpSpec<Record<string, never>, unknown>;
-    "client.deploy.list": ShellOpSpec<Record<string, never>, unknown>;
+    }, R<C["getService"]>>;
+    "client.getEnvironmentKeys": ShellOpSpec<Record<string, never>, R<Acct["getEnvironmentKeys"]>>;
+    "client.deploy.list": ShellOpSpec<Record<string, never>, R<Dep["list"]>>;
     "client.deploy.versions": ShellOpSpec<{
         projectId: string;
-    }, unknown>;
+    }, R<Dep["versions"]>>;
     "client.deploy.get": ShellOpSpec<{
         projectId: string;
         teamId: string;
-    }, unknown>;
+    }, R<Dep["get"]>>;
     "client.deploy.artifact": ShellOpSpec<{
         projectId: string;
         version: number;
-    }, unknown>;
+    }, R<Dep["artifact"]>>;
     "client.deploy.history": ShellOpSpec<{
         projectId: string;
         teamId?: string;
         page?: number;
         pageSize?: number;
-    }, unknown>;
+    }, R<Dep["history"]>>;
     "client.deploy.deploy": ShellOpSpec<{
         projectId: string;
         version: number;
         teamId: string;
-    }, unknown>;
+    }, R<Dep["deploy"]>>;
     "client.deploy.disable": ShellOpSpec<{
         projectId: string;
         teamId: string;
-    }, unknown>;
+    }, R<Dep["disable"]>>;
     "client.deploy.enable": ShellOpSpec<{
         projectId: string;
         teamId: string;
-    }, unknown>;
+    }, R<Dep["enable"]>>;
     "client.deploy.remove": ShellOpSpec<{
         projectId: string;
         teamId: string;
-    }, unknown>;
+    }, R<Dep["remove"]>>;
     "client.deploy.run": ShellOpSpec<{
         projectId: string;
         sourceId: string;
         teamId: string;
-    }, unknown>;
+    }, R<Dep["run"]>>;
     /** cron=null clears the schedule; ttl rides options. */
     "client.deploy.setSchedule": ShellOpSpec<{
         projectId: string;
@@ -9909,75 +10049,105 @@ export interface ClientOpMap extends ShellOpMap {
         cron: string | null;
         teamId: string;
         ttl?: number;
-    }, unknown>;
+    }, R<Dep["setSchedule"]>>;
     "client.deploy.pauseSchedule": ShellOpSpec<{
         projectId: string;
         sourceId: string;
         teamId: string;
-    }, unknown>;
+    }, R<Dep["pauseSchedule"]>>;
     "client.deploy.resumeSchedule": ShellOpSpec<{
         projectId: string;
         sourceId: string;
         teamId: string;
-    }, unknown>;
+    }, R<Dep["resumeSchedule"]>>;
     "client.deploy.setSourceConfig": ShellOpSpec<{
         projectId: string;
         sourceId: string;
         teamId: string;
         traceLevel?: string;
         debugOut?: boolean;
-    }, unknown>;
+    }, R<Dep["setSourceConfig"]>>;
     "client.deploy.preview": ShellOpSpec<{
         cron: string;
         count: number;
-    }, unknown>;
+    }, R<Dep["preview"]>>;
     /** The server task registry's raw rows (ownerKind/ownerId/runKind/teamId
      *  carried) — the deploy drawers' live-run scan. A NAMED allowlist entry
-     *  over the one extension command (never a generic call passthrough). */
-    "client.listRunningTasks": ShellOpSpec<Record<string, never>, unknown>;
+     *  over the one extension command (never a generic call passthrough).
+     *  Raw wire verb — the body shape is the server's, typed to what every
+     *  consumer reads. */
+    "client.listRunningTasks": ShellOpSpec<Record<string, never>, {
+        tasks?: Array<Record<string, unknown>>;
+    }>;
     "client.app.listDeployments": ShellOpSpec<{
         appId: string;
-    }, unknown>;
+    }, R<C["listDeployments"]>>;
     "client.app.where": ShellOpSpec<{
         appId: string;
-    }, unknown>;
+    }, R<C["whereApp"]>>;
     "client.app.submit": ShellOpSpec<{
         appId: string;
         version: number;
-    }, unknown>;
+    }, R<C["submitApp"]>>;
     "client.app.publish": ShellOpSpec<{
         appId: string;
         version: number;
         target: string;
-    }, unknown>;
+    }, R<C["publishApp"]>>;
     "client.app.withdraw": ShellOpSpec<{
         appId: string;
         version: number;
-    }, unknown>;
+    }, R<C["withdrawApp"]>>;
     "client.app.removePublish": ShellOpSpec<{
         appId: string;
         target: string;
-    }, unknown>;
+    }, R<C["removeAppPublish"]>>;
     "client.app.buildLog": ShellOpSpec<{
         appId: string;
         version: number;
-    }, unknown>;
+    }, R<C["buildLog"]>>;
     "client.app.reply": ShellOpSpec<{
         appId: string;
         message: string;
         version?: number;
-    }, unknown>;
-    /** Wraps the one extension command (named allowlist entries, never a
-     *  generic passthrough). */
-    "client.app.developerStatus": ShellOpSpec<Record<string, never>, unknown>;
+    }, R<C["replyApp"]>>;
+    /** Raw wire verb (no SDK method): the server returns exactly these keys
+     *  on BOTH editions (OSS base.py + SaaS app_handler). */
+    "client.app.developerStatus": ShellOpSpec<Record<string, never>, {
+        developerId: string | null;
+        stripeAccountId: string | null;
+        stripeAccountStatus: string;
+    }>;
+    /** The marketplace walk (`rrext_app list`): every app the caller can
+     *  reach on the @me/@team/@public rails. THE app catalog — pickers and
+     *  store surfaces call this; the account list (desktop-only on SaaS)
+     *  and the MF registration list are never catalogs. Rows are manifest-
+     *  shaped; `category`/`search` are documented on the wire but implemented
+     *  by no edition yet — filter client-side. */
+    "client.app.list": ShellOpSpec<{
+        offset?: number;
+        limit?: number;
+        search?: string;
+        category?: string;
+        shell?: string;
+    }, {
+        apps: AppManifestEntry$1[];
+        total?: number;
+        offset?: number;
+        limit?: number;
+    }>;
+    /** Raw wire verb — the server's confirmed body (app_handler.py). */
     "client.app.developerRegister": ShellOpSpec<{
         developerId: string;
-    }, unknown>;
+    }, {
+        developerId: string;
+        orgId: string;
+    }>;
     "client.log.chapters": ShellOpSpec<{
         projectId: string;
         source: string;
         teamId?: string;
-    }, unknown>;
+    }, R<LogFam["chapters"]>>;
     "client.log.openStream": ShellOpSpec<{
         sessionId: string;
         projectId: string;
@@ -9985,7 +10155,9 @@ export interface ClientOpMap extends ShellOpMap {
         teamId?: string;
     }, void>;
     /** seek/getStatus/getTrace — gated on the runtime allowlist (the typed
-     *  map gives NO runtime guarantee at a process boundary). */
+     *  map gives NO runtime guarantee at a process boundary). Result stays
+     *  `unknown`: it is the union of three methods' returns, dispatched by a
+     *  runtime string — callers narrow per method. */
     "client.log.streamCall": ShellOpSpec<{
         sessionId: string;
         method: "seek" | "getStatus" | "getTrace";
@@ -10001,6 +10173,7 @@ export interface ClientOpMap extends ShellOpMap {
     "client.log.streamPause": ShellOpSpec<{
         sessionId: string;
     }, void>;
+    /** `event` is a live engine event forwarded verbatim — schemaless. */
     "client.log.streamIngest": ShellOpSpec<{
         sessionId: string;
         event: unknown;
@@ -10008,153 +10181,155 @@ export interface ClientOpMap extends ShellOpMap {
     "client.log.streamClose": ShellOpSpec<{
         sessionId: string;
     }, void>;
-    "client.account.getProfile": ShellOpSpec<Record<string, never>, unknown>;
+    "client.account.getProfile": ShellOpSpec<Record<string, never>, R<Acct["getProfile"]>>;
     "client.account.updateProfile": ShellOpSpec<{
-        fields: Record<string, unknown>;
-    }, unknown>;
+        fields: P0<Acct["updateProfile"]>;
+    }, R<Acct["updateProfile"]>>;
     "client.account.setDevTeam": ShellOpSpec<{
         teamId: string;
-    }, unknown>;
+    }, R<Acct["setDevTeam"]>>;
     "client.account.setDefaultOrg": ShellOpSpec<{
         orgId: string;
-    }, unknown>;
-    "client.account.deleteAccount": ShellOpSpec<Record<string, never>, unknown>;
+    }, R<Acct["setDefaultOrg"]>>;
+    "client.account.deleteAccount": ShellOpSpec<Record<string, never>, R<Acct["deleteAccount"]>>;
     "client.account.getOrg": ShellOpSpec<{
         orgId?: string;
-    }, unknown>;
+    }, R<Acct["getOrg"]>>;
     "client.account.updateOrgName": ShellOpSpec<{
         orgId: string;
         name: string;
-    }, unknown>;
-    "client.account.listKeys": ShellOpSpec<Record<string, never>, unknown>;
+    }, R<Acct["updateOrgName"]>>;
+    "client.account.listKeys": ShellOpSpec<Record<string, never>, R<Acct["listKeys"]>>;
     "client.account.createKey": ShellOpSpec<{
-        params: Record<string, unknown>;
-    }, unknown>;
+        params: P0<Acct["createKey"]>;
+    }, R<Acct["createKey"]>>;
     "client.account.revokeKey": ShellOpSpec<{
         keyId: string;
-    }, unknown>;
+    }, R<Acct["revokeKey"]>>;
     "client.account.listMembers": ShellOpSpec<{
         orgId: string;
-    }, unknown>;
+    }, R<Acct["listMembers"]>>;
     "client.account.inviteMember": ShellOpSpec<{
         orgId: string;
-        params: Record<string, unknown>;
-    }, unknown>;
+        params: P1<Acct["inviteMember"]>;
+    }, R<Acct["inviteMember"]>>;
     "client.account.updateMemberRole": ShellOpSpec<{
         orgId: string;
         userId: string;
         role: string;
-    }, unknown>;
+    }, R<Acct["updateMemberRole"]>>;
     "client.account.removeMember": ShellOpSpec<{
         orgId: string;
         userId: string;
-    }, unknown>;
+    }, R<Acct["removeMember"]>>;
     "client.account.resendInvite": ShellOpSpec<{
         orgId: string;
         userId: string;
-    }, unknown>;
+    }, R<Acct["resendInvite"]>>;
     "client.account.listTeams": ShellOpSpec<{
         orgId: string;
-    }, unknown>;
+    }, R<Acct["listTeams"]>>;
     "client.account.getTeamDetail": ShellOpSpec<{
         orgId: string;
         teamId: string;
-    }, unknown>;
+    }, R<Acct["getTeamDetail"]>>;
     "client.account.createTeam": ShellOpSpec<{
         orgId: string;
         name: string;
-    }, unknown>;
+    }, R<Acct["createTeam"]>>;
     "client.account.deleteTeam": ShellOpSpec<{
         orgId: string;
         teamId: string;
-    }, unknown>;
+    }, R<Acct["deleteTeam"]>>;
     "client.account.addTeamMember": ShellOpSpec<{
         orgId: string;
-        params: Record<string, unknown>;
-    }, unknown>;
+        params: P1<Acct["addTeamMember"]>;
+    }, R<Acct["addTeamMember"]>>;
     "client.account.updateTeamMemberPerms": ShellOpSpec<{
         orgId: string;
-        params: Record<string, unknown>;
-    }, unknown>;
+        params: P1<Acct["updateTeamMemberPerms"]>;
+    }, R<Acct["updateTeamMemberPerms"]>>;
     "client.account.removeTeamMember": ShellOpSpec<{
         orgId: string;
-        params: Record<string, unknown>;
-    }, unknown>;
+        params: P1<Acct["removeTeamMember"]>;
+    }, R<Acct["removeTeamMember"]>>;
     "client.account.getEnv": ShellOpSpec<{
         scope: "org" | "team" | "user";
         scopeId?: string;
         connection?: "dev" | "deploy";
-    }, unknown>;
+    }, R<Acct["getEnv"]>>;
     "client.account.setEnv": ShellOpSpec<{
         scope: "org" | "team" | "user";
         env: Record<string, string>;
         scopeId?: string;
         connection?: "dev" | "deploy";
-    }, unknown>;
+    }, R<Acct["setEnv"]>>;
     "client.billing.getDetails": ShellOpSpec<{
         orgId: string;
-    }, unknown>;
+    }, R<Bill["getDetails"]>>;
     "client.billing.getProductPrices": ShellOpSpec<{
         appId: string;
-    }, unknown>;
+    }, R<Bill["getProductPrices"]>>;
     "client.billing.createCheckoutSession": ShellOpSpec<{
         orgId: string;
         appId: string;
         priceId: string;
         promotionCode?: string;
-    }, unknown>;
+    }, R<Bill["createCheckoutSession"]>>;
     "client.billing.validatePromoCode": ShellOpSpec<{
         orgId: string;
         code: string;
         priceId?: string;
-    }, unknown>;
+    }, R<Bill["validatePromoCode"]>>;
     "client.billing.redeemPromoCode": ShellOpSpec<{
         orgId: string;
         code: string;
-    }, unknown>;
+    }, R<Bill["redeemPromoCode"]>>;
     "client.billing.createPortalSession": ShellOpSpec<{
         orgId: string;
-    }, unknown>;
+    }, R<Bill["createPortalSession"]>>;
     "client.billing.cancelSubscription": ShellOpSpec<{
         orgId: string;
         appId: string;
-    }, unknown>;
+    }, R<Bill["cancelSubscription"]>>;
     "client.billing.upgradeSubscription": ShellOpSpec<{
         orgId: string;
         appId: string;
         newPriceId: string;
-    }, unknown>;
+    }, R<Bill["upgradeSubscription"]>>;
     "client.billing.purchaseTopup": ShellOpSpec<{
         orgId: string;
         priceId: string;
-    }, unknown>;
+    }, R<Bill["purchaseTopup"]>>;
     "client.billing.getCreditBalance": ShellOpSpec<{
         orgId: string;
-    }, unknown>;
-    "client.billing.listCreditPacks": ShellOpSpec<Record<string, never>, unknown>;
+    }, R<Bill["getCreditBalance"]>>;
+    "client.billing.listCreditPacks": ShellOpSpec<Record<string, never>, R<Bill["listCreditPacks"]>>;
     "client.billing.getTransactions": ShellOpSpec<{
         orgId: string;
-        options?: Record<string, unknown>;
-    }, unknown>;
+        options?: P1<Bill["getTransactions"]>;
+    }, R<Bill["getTransactions"]>>;
     "client.billing.getTransactionDistinct": ShellOpSpec<{
         orgId: string;
         field: string;
-    }, unknown>;
+    }, R<Bill["getTransactionDistinct"]>>;
     "client.billing.getUsageByUser": ShellOpSpec<{
         orgId: string;
-    }, unknown>;
+    }, R<Bill["getUsageByUser"]>>;
     "client.billing.getUsageByTeam": ShellOpSpec<{
         orgId: string;
-    }, unknown>;
+    }, R<Bill["getUsageByTeam"]>>;
     "client.billing.createCreditCheckout": ShellOpSpec<{
         orgId: string;
         packId: string;
-    }, unknown>;
+    }, R<Bill["createCreditCheckout"]>>;
     "client.billing.confirmPending": ShellOpSpec<{
         appId: string;
         subscriptionId: string;
         priceId: string;
-    }, unknown>;
+    }, {
+        status: string;
+    }>;
 }
 /** What the registration needs from its host — the SDK client and liveness.
  *  Typed structurally so BOTH ConnectionManager classes (shell and the VS
@@ -10382,7 +10557,7 @@ export interface IVirtualFileSystem {
      * @param paths - Relative file paths.
      * @returns Map of path to content for every readable path.
      */
-    readMany?(paths: string[]): Promise<Map<string, unknown>>;
+    readMany?(paths: string[]): Promise<Record<string, unknown>>;
     /**
      * Writes content to a file.  The content type matches what read() returns.
      *
@@ -11076,7 +11251,7 @@ export declare class CachedVfs implements IVirtualFileSystem {
      * @param paths - Relative file paths.
      * @returns Map of path to content for every readable path.
      */
-    readMany(paths: string[]): Promise<Map<string, unknown>>;
+    readMany(paths: string[]): Promise<Record<string, unknown>>;
     /**
      * Writes one file through the backend and updates the caches.
      *
@@ -11477,6 +11652,22 @@ interface CheckoutFlowProps {
  * billing API.
  */
 export declare const CheckoutFlow: React$1.FC<CheckoutFlowProps>;
+/** The bus surface the client needs (realm or root ConnectionManager). */
+export interface IWorkspaceFsBus {
+    request(op: string, params: unknown): Promise<unknown>;
+    emitOp(op: string, params: unknown): void;
+    /** Registers THIS realm's handler for a pushed op (registration-is-routing). */
+    handle(op: string, handler: (params: unknown) => void): () => void;
+}
+/**
+ * The realm-side WorkspaceFs over the `host.fs.*` op family — one shared
+ * instance per bus (repeat calls return it).
+ *
+ * @param bus - The realm's connection manager.
+ * @returns The capability handed to tools (`ToolHostServices.workspaceFs`)
+ *          or used directly by any component.
+ */
+export declare function createWorkspaceFs(bus: IWorkspaceFsBus): WorkspaceFs;
 /**
  * Sent by the shell to an iframe immediately after the iframe posts `view:ready`.
  *
@@ -13721,111 +13912,6 @@ export declare function getAppVersionOverride(appId: string): AppVersionOverride
  * @returns 'ready' when the switch can proceed in-place, else 'reload-required'.
  */
 export declare function applyAppVersionOverride(appId: string, moduleId: string, override: AppVersionOverride | null): "ready" | "reload-required";
-interface IOverviewGridProps {
-    /** Full dashboard snapshot, or null while it has not loaded yet. */
-    data: DashboardResponse | null;
-    /** Optional manual refresh callback — renders the header's Refresh action. */
-    onRefresh?: () => void;
-}
-/**
- * Overview grid — the unified Connections & Tasks CardDataGrid: connections
- * first, then running tasks, then the five most recent completed ones, with
- * CPU/Memory gauges and status badges. Clicking a client row opens the
- * connection record panel; clicking a task row opens the task record panel.
- *
- * @param props - {@link IOverviewGridProps}.
- * @returns The card-hosted grid plus both record panels.
- */
-export declare const OverviewGrid: React$1.FC<IOverviewGridProps>;
-interface IConnectionsPanelProps {
-    /**
-     * Snapshot connection rows (the dashboard snapshot). LOCAL mode renders
-     * exactly these; with `listConnections` present the fetched pages take
-     * over and this prop is unused.
-     */
-    connections?: DashboardConnection[];
-    /**
-     * Optional server-paginated fetcher — presence switches the grid to
-     * REMOTE mode. Hosts bind it to their client's `listConnections`.
-     */
-    listConnections?: (req: ListPageRequest) => Promise<ListPageResponse<DashboardConnection>>;
-    /**
-     * Receives the grid's silent current-page refetch trigger (REMOTE mode
-     * only) so the HOST owns the polling cadence.
-     */
-    onRefetchReady?: (refetch: () => void) => void;
-}
-/**
- * Connections grid — every active client connection as a CardDataGrid with
- * identity, client label, traffic counters, subscription counts, and auth
- * status; clicking a row opens the connection record panel.
- *
- * @param props - {@link IConnectionsPanelProps}.
- * @returns The card-hosted grid plus its record panel.
- */
-export declare const ConnectionsPanel: React$1.FC<IConnectionsPanelProps>;
-interface ITasksPanelProps {
-    /**
-     * Snapshot task rows (the dashboard snapshot): feeds the header's
-     * running/completed counts in both modes, and the grid rows plus record
-     * panel in LOCAL mode. Null while the snapshot has not loaded yet (the
-     * header counts stay hidden).
-     */
-    tasks?: DashboardTask[] | null;
-    /**
-     * Optional server-paginated fetcher — presence switches the grid to
-     * REMOTE mode. Hosts bind it to their client's `listTasks`.
-     */
-    listTasks?: (req: ListPageRequest) => Promise<ListPageResponse<DashboardTask>>;
-    /**
-     * Receives the grid's silent current-page refetch trigger (REMOTE mode
-     * only) so the HOST owns the polling cadence.
-     */
-    onRefetchReady?: (refetch: () => void) => void;
-}
-/**
- * Tasks grid — all pipeline tasks as a CardDataGrid with CPU/Memory gauges,
- * elapsed time, completion counts, TTL/idle time, and status badges;
- * clicking a row opens the task record panel.
- *
- * @param props - {@link ITasksPanelProps}.
- * @returns The card-hosted grid plus its record panel.
- */
-export declare const TasksPanel: React$1.FC<ITasksPanelProps>;
-/** Semantic tone of an event, keyed off what happened (not who reported it). */
-export type EventTone = "connection" | "task" | "warning" | "system";
-interface IEventDisplay {
-    /** Semantic tone (drives the badge / feed color). */
-    tone: EventTone;
-    /** Short category label (connect, disconnect, task, security, system). */
-    label: string;
-    /** Human-readable one-line summary. */
-    message: string;
-    /** Epoch-milliseconds arrival time of the event at this client. */
-    timestamp: number;
-}
-interface IActivityPanelProps {
-    /** Accumulated activity events (newest first, as delivered by the host). */
-    events: ActivityEvent[];
-}
-/**
- * Describe one activity event from either channel (task / dashboard) as its
- * display fields. Exported for the Overview surfaces' Recent Activity feeds,
- * which render the same events in card form.
- *
- * @param event - The wrapped activity event.
- * @returns Tone, label, message, and the arrival timestamp (epoch ms).
- */
-export declare function getEventDisplay(event: ActivityEvent): IEventDisplay;
-/**
- * Activity grid — live stream of server events (connections, task lifecycle,
- * errors) as a CardDataGrid fed by the host's event feed (LOCAL mode: each
- * poll / push hands down a new events array, applied silently).
- *
- * @param props - {@link IActivityPanelProps}.
- * @returns The card-hosted grid.
- */
-export declare const ActivityPanel: React$1.FC<IActivityPanelProps>;
 /**
  * Formatting utilities for the Server Monitor module.
  */
@@ -14461,7 +14547,8 @@ export declare const shellApi: {
     readonly HOST_CONNECTION_TOPIC: string;
     readonly typedPrefs: typeof typedPrefs;
     readonly scopedPrefs: typeof scopedPrefs;
-    readonly createBridgedPrefsStore: typeof createBridgedPrefsStore;
+    readonly createMirroredPrefsStore: typeof createMirroredPrefsStore;
+    readonly createPrefsHub: typeof createPrefsHub;
     readonly usePref: typeof usePref;
     readonly ToolHostProvider: import("react").Provider<ToolHostServices | null>;
     readonly useToolHost: typeof useToolHost;
@@ -14490,13 +14577,13 @@ export declare const shellApi: {
     readonly useIframeBridge: typeof useIframeBridge;
     readonly useSubscriptions: typeof useSubscriptions;
     readonly usePolling: typeof usePolling;
-    readonly useDashboardData: typeof useDashboardData;
     readonly useConnectionStatus: typeof useConnectionStatus;
     readonly useShellApiConfig: typeof useShellApiConfig;
     readonly useAppComponent: typeof useAppComponent;
     readonly useClickOutside: typeof useClickOutside;
     readonly useFixedPopupPosition: typeof useFixedPopupPosition;
     readonly usePrefs: typeof usePrefs;
+    readonly useAppState: typeof useAppState;
     readonly getClient: typeof getClient;
     readonly ConnectionManager: typeof ConnectionManager;
     readonly ConnectionState: typeof ConnectionState;
@@ -14504,6 +14591,7 @@ export declare const shellApi: {
     readonly ApiKeyAuthProvider: typeof ApiKeyAuthProvider;
     readonly WorkspaceProvider: import("react").FC<IWorkspaceProviderProps>;
     readonly PrefsProvider: typeof PrefsProvider;
+    readonly AppStateProvider: typeof AppStateProvider;
     readonly Documents: typeof Documents;
     readonly NOOP_VFS: IVirtualFileSystem;
     readonly CachedVfs: typeof CachedVfs;

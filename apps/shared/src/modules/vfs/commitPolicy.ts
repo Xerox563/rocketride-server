@@ -90,7 +90,9 @@ export class CommitPolicy {
 		if (next === 'auto' && this.fs.hasPendingChanges()) {
 			throw new ModeSwitchBlockedError();
 		}
-		this.fs.setWriteThrough(autoCommit);
+		// Fire-and-forget: the pending guard above already ruled, and the
+		// flag flip itself cannot fail past it.
+		void this.fs.setWriteThrough(autoCommit);
 		this.mode = next;
 	}
 

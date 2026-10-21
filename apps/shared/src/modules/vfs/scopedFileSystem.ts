@@ -73,13 +73,13 @@ export function scopedFileSystem(root: IWorkspaceFileSystem, prefix: string): IW
 
 		// ── View surface ────────────────────────────────────────────────
 		refresh: () => root.refresh(),
-		readMany: async (paths: string[]): Promise<Map<string, unknown>> => {
+		readMany: async (paths: string[]): Promise<Record<string, unknown>> => {
 			// step: batch at the root, translate both directions
 			const rooted = await root.readMany(paths.map(toRoot));
-			const out = new Map<string, unknown>();
-			for (const [p, content] of rooted) {
+			const out: Record<string, unknown> = {};
+			for (const [p, content] of Object.entries(rooted)) {
 				const local = toLocal(p);
-				if (local !== null) out.set(local, content);
+				if (local !== null) out[local] = content;
 			}
 			return out;
 		},

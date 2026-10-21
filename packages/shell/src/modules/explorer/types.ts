@@ -58,7 +58,7 @@ export interface IVirtualFileSystem {
 	 * @param paths - Relative file paths.
 	 * @returns Map of path to content for every readable path.
 	 */
-	readMany?(paths: string[]): Promise<Map<string, unknown>>;
+	readMany?(paths: string[]): Promise<Record<string, unknown>>;
 
 	/**
 	 * Writes content to a file.  The content type matches what read() returns.

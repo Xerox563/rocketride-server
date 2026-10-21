@@ -335,7 +335,7 @@ export class WebDevSession {
 			// the committed remainder rides the backend's native batch read
 			const files = await this.vfs.readMany(paths);
 			if (this.disposed) return;
-			for (const [path, text] of files) {
+			for (const [path, text] of Object.entries(files)) {
 				this.vfs.prime(path, String(text));
 				this.wireModel(path, String(text));
 			}

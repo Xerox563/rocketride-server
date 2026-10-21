@@ -2910,15 +2910,42 @@ export class RocketRideClient extends DAPClient {
 		}
 	}
 
-	/** Read a JSON file. */
+	/**
+	 * Read a JSON file.
+	 *
+	 * ONE round trip (`fs_get_json`), not open/read/close — see
+	 * {@link fsWriteJson} for why that matters.
+	 *
+	 * @param path - Relative path within the account store
+	 * @returns The parsed value
+	 */
 	async fsReadJson<T = any>(path: string): Promise<T> {
-		const text = await this.fsReadString(path);
-		return JSON.parse(text);
+		this.validateStorePath(path);
+		const body = await this.call('rrext_store', { subcommand: 'fs_get_json', path });
+		return body.value as T;
 	}
 
-	/** Write an object as JSON. */
+	/**
+	 * Write an object as JSON.
+	 *
+	 * ONE round trip (`fs_put_json`). The handle sequence this used to run —
+	 * fs_open, fs_write, fs_close — leaves a write handle open between
+	 * messages, and the server commits that handle when the connection
+	 * drops: a client that dies after fs_open replaces the file with an
+	 * empty buffer. A browser reload mid-save was enough to zero a
+	 * workspace file. A single request has no such window; one that never
+	 * arrives leaves the file exactly as it was.
+	 *
+	 * The whole value travels in that one message, so this is for complete
+	 * documents (it always was — the object is serialised in full either
+	 * way). Large payloads still belong on the streaming handle API.
+	 *
+	 * @param path - Relative path within the account store
+	 * @param obj - Any JSON-serialisable value
+	 */
 	async fsWriteJson(path: string, obj: any): Promise<void> {
-		await this.fsWriteString(path, JSON.stringify(obj, null, 2));
+		this.validateStorePath(path);
+		await this.call('rrext_store', { subcommand: 'fs_put_json', path, value: obj });
 	}
 
 	// ============================================================================

@@ -65,7 +65,7 @@ import { CloudAuthProvider } from '../auth/CloudAuthProvider';
 import {
 	ConnectionGenerationController,
 	GenerationOwnedOperationSlot,
-} from './connection-generation';
+} from 'shared/utils/connectionGeneration';
 
 // =============================================================================
 // CONSTANTS

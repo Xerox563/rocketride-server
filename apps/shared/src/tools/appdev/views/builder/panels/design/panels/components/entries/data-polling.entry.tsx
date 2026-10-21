@@ -24,44 +24,34 @@
 // POLLING & DASHBOARD DATA — GALLERY ENTRY (DOC-ONLY, HOOKS)
 // =============================================================================
 
-/** Doc-only gallery entry for usePolling and the shared dashboard data feed. */
+/** Doc-only gallery entry for connection-gated interval polling. */
 
 import type { IGalleryEntry } from '../galleryTypes';
 
-/** The Polling & dashboard data gallery entry. */
+/** The Polling gallery entry. */
 export const dataPollingEntry: IGalleryEntry = {
 	id: 'data-polling',
-	name: 'Polling & dashboard data',
+	name: 'Polling',
 	group: 'hooks',
-	blurb: 'Connection-gated interval polling (usePolling) and the ONE shared dashboard feed every overview view reads (useDashboardData).',
+	blurb: 'Connection-gated interval polling (usePolling) for views that re-fetch on a cadence.',
 	doc: `\`usePolling(fetcher, interval)\` fires immediately, then every \`interval\` ms, and by default only while the shell is connected (\`gate: 'shell'\`), so views never poll into a dead socket. Pass \`{ gate: 'none' }\` for unconditional polling.
 
-\`useDashboardData()\` is the shared feed: a module singleton where the FIRST consumer starts the 3s poll plus the \`shell:event\` subscription and the LAST unmount stops it. Every dashboard-ish view reads this one hook instead of rolling its own poll. Data survives view switches, and there is exactly one request in flight regardless of how many views listen.`,
-	docNote: 'Do not hand-roll a poll-every-N-seconds effect for dashboard data - the shared feed exists so N views cost one poll.',
-	code: `import { usePolling, useDashboardData } from 'shell';
+For data several views share, wrap the poll in a module-singleton hook (first consumer starts it, last unmount stops it) so N views cost one request — the Server Monitor tool's dashboard feed is the reference implementation of that pattern.`,
+	docNote: 'Do not hand-roll a poll-every-N-seconds effect per view - share one gated poll behind a singleton hook.',
+	code: `import { usePolling } from 'shell';
 
 // A view-specific poll, gated on the connection by default:
-usePolling(() => refreshRunList(), 5000);
-
-// The shared dashboard feed - one poll for every consumer:
-function OverviewTiles() {
-	const { data, events, error, refresh } = useDashboardData();
-	if (error) return <Banner variant="error">{error}</Banner>;
-	return <MiniContainer>{/* tiles from data.overview */}</MiniContainer>;
-}`,
+usePolling(() => refreshRunList(), 5000);`,
 	propsLabel: 'Hooks',
 	props: [
 		{ name: 'usePolling', type: '(fetcher: () => void | Promise<void>, interval: number, options?: IUsePollingOptions) => void', dir: 'out', note: 'Fires immediately then every interval ms; connection-gated by default.' },
-		{ name: 'useDashboardData', type: '() => DashboardData', dir: 'out', note: 'The shared singleton feed: 3s poll + live shell:event merge, refcounted by consumers.' },
 	],
 	sections: [
 		{
 			label: 'Types',
 			rows: [
 				{ name: 'IUsePollingOptions', type: "{ gate?: 'shell' | 'none' }", dir: 'in', note: "'shell' (default) polls only while connected; 'none' polls unconditionally." },
-				{ name: 'DashboardData', type: '{ data, events, error, refresh }', dir: 'in', note: 'The current DashboardResponse (null until first load), activity events newest-first, last error, and a manual refresh.' },
-				{ name: 'DashboardResponse et al.', type: 'DashboardOverview / DashboardConnection / DashboardTask / DashboardEvent / TaskEvent / ActivityEvent', dir: 'in', note: 'The server dashboard payload types, all exported from the surface.' },
-				{ name: 'ListPageRequest / ListPageResponse', type: 'paged list contract', dir: 'in', note: 'The request/response shape of the server list_* APIs that feed DataGrid.fetchPage.' },
+				{ name: 'ListPageRequest / ListPageResponse', type: 'paged list contract (rocketride)', dir: 'in', note: 'The request/response shape of the server list_* APIs that feed DataGrid.fetchPage — from the SDK.' },
 			],
 		},
 	],

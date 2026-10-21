@@ -33,14 +33,14 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { useShellConnection, ConnectionManager, ConfirmDialog, useWorkspace } from 'shell';
+import { useShellConnection, ConnectionManager, ConfirmDialog, useWorkspace, createWorkspaceFs } from 'shell';
 import type { ShellNotification } from 'shell';
 import { getDocs } from '../../docs';
 import { SidebarChrome } from 'shared/tools/core/chrome/SidebarChrome';
-import { ToolHostProvider } from 'shared/tools/core';
+import { ToolHostProvider, useArmedToolPeers } from 'shared/tools/core';
 import { useToolStrip } from 'shared/tools/core/chrome/useToolStrip';
 import { toolDocUri } from 'shell';
-import { useWorkspacePrefsStore } from '../workspace/vfs/workspacePrefsStore';
+import { realmPrefsHub } from 'shell';
 import type { BuiltinToolServices } from 'shared/tools/core';
 import { registerBuiltinTools } from 'shared/tools/builtins';
 import { appdevFrames } from '../appdev/session/appdevFrames';
@@ -48,7 +48,7 @@ import { BxExport, useSidebarCollapsed, useSidebarActiveView } from 'shell';
 import type { ProjectEntry } from 'shared/tools/pipelines/sidebar/types';
 import type { SidebarMode, ToolTabsSidebar } from 'shared/tools/core/chrome/types';
 import type { AppListItem } from 'shared/tools/appdev/sidebarTypes';
-import { useDevToolPins, toToolTab } from '../devtools/devToolPins';
+import { useDevToolPins } from '../devtools/devToolPins';
 import { getSidebarPeer, getToolChannel } from '../devtools/peer';
 import DevToolMount from '../devtools/DevToolMount';
 import { isPipelineFile, pipelineExtension } from '../workspace/projectStore';
@@ -448,11 +448,13 @@ const SidebarProvider: React.FC = () => {
 
 	// Pins, strip order, and the server's devTool catalog — prefs-backed, one
 	// source of truth shared with RocketApp's rail containers.
-	const { tabOrder, catalog: toolCatalog, pinnedTools, unpin: unpinTool, setTabOrder } = useDevToolPins();
+	const { list: pins, setList: setPins, tabOrder, catalog: toolCatalog, pinnedTools, unpin: unpinTool, setTabOrder } = useDevToolPins();
+	// Arm this host's sidebar-side peers before any frame traffic arrives.
+	useArmedToolPeers(useMemo(() => pinnedTools.map((t) => t.id), [pinnedTools]), getSidebarPeer);
 
 	/** Opens (or focuses) a tool's frame as a `tool:<appId>` document. */
 	const handleOpenTool = useCallback((id: string) => {
-		const name = toolCatalog.find((a) => a.id === id)?.name ?? id;
+		const name = (toolCatalog ?? []).find((a) => a.id === id)?.name ?? id;
 		getDocs()?.openStaticDocument(`tool:${id}`, name);
 	}, [toolCatalog]);
 
@@ -489,15 +491,6 @@ const SidebarProvider: React.FC = () => {
 	// The dev-tool tabs contract: presence adds the pinned tool tabs and the
 	// Dev Tools catalog tab to the mode strip (classic mode); the workbench
 	// rail mirrors the same pins through RocketApp's sidebarViews.
-	// Builtin tools the user DISABLED (prefs-persisted; enable/disable only).
-	const disabledBuiltins = useMemo<string[]>(() => (prefs?.disabledBuiltins as string[] | undefined) ?? [], [prefs]);
-
-	/** Flips one builtin's enabled state. */
-	const handleToggleBuiltin = useCallback((id: string, enabled: boolean) => {
-		const next = enabled ? disabledBuiltins.filter((d) => d !== id) : [...disabledBuiltins.filter((d) => d !== id), id];
-		updatePrefs({ disabledBuiltins: next });
-	}, [disabledBuiltins, updatePrefs]);
-
 
 
 
@@ -515,15 +508,23 @@ const SidebarProvider: React.FC = () => {
 		docs.openStaticDocument(key, title ?? key);
 	}, []);
 
-	// This realm's prefs backend — per-tool partitions are carved off it in
-	// the builtin render wrappers below.
-	const prefsStore = useWorkspacePrefsStore();
+	// This realm's prefs hub — one mirrored store per partition. In the root
+	// page these resolve locally (the manager serves the ops on this very
+	// bus), so the code path is identical to a webview's.
+	// The REALM's hub — one mirrored store per partition for the whole page.
+	// Never disposed here: it outlives this component.
+	const prefsHub = useMemo(() => realmPrefsHub(ConnectionManager.getInstance()), []);
 
 	// The ONE services object the builtin tools read (ToolContext). Tools own
 	// their state; this host contributes generic verbs + two host-variant
 	// data sources (appdevScan, pipelineEntries).
+	// THE workspace seam — one stateless client; the ops resolve locally
+	// into the staged class (zero serialization in this root realm).
+	const workspaceFs = useMemo(() => createWorkspaceFs(ConnectionManager.getInstance()), []);
+
 	const toolServices = useMemo<BuiltinToolServices>(() => ({
 		openPage,
+		workspaceFs,
 		openFile: handleOpenFile,
 		manageFile: handleFileManage,
 		fileActions: [{ id: 'export', label: 'Export', icon: <BxExport size={16} />, onSelect: handleExportPipeline }],
@@ -543,7 +544,7 @@ const SidebarProvider: React.FC = () => {
 		},
 	}), [openPage, handleOpenFile, handleFileManage, handleExportPipeline, handleSourceAction, handleNavigate, handleOpenUnknownTask, showConfirm, activeFilePath, appdevApps, refresh]);
 
-	// Shared builtin-strip glue: items (with per-tool scoped prefs), store
+	// Shared builtin-strip glue: items (each with its OWN prefs partition), store
 	// rows, and the activation/deactivation discipline — over this host's
 	// per-tool peer/channel/documents and the Documents reveal verb.
 	const documentsFor = useCallback((toolId: string) => ({
@@ -551,11 +552,12 @@ const SidebarProvider: React.FC = () => {
 		close: (key: string) => getDocs()?.discardDocument(toolDocUri(toolId, key)),
 	}), []);
 	const channelFor = useCallback((toolId: string) => getToolChannel(toolId, 'sidebar'), []);
-	const { builtinItems, builtinStoreRows, focusTool: handleFocusTool, deactivateReplacedTab, announceBuiltinSelected } = useToolStrip({
+	const { builtinItems, builtinStoreRows, toggleBuiltin, focusTool: handleFocusTool, deactivateReplacedTab, announceBuiltinSelected } = useToolStrip({
 		host: 'rocket',
 		services: toolServices,
-		prefsStore,
-		disabledBuiltins,
+		prefsHub,
+		pins,
+		onPinsChange: setPins,
 		peerFor: getSidebarPeer,
 		channelFor,
 		documentsFor,
@@ -564,11 +566,10 @@ const SidebarProvider: React.FC = () => {
 
 	const toolTabs: ToolTabsSidebar = useMemo(() => ({
 		tools: pinnedTools,
-		available: toolCatalog.map(toToolTab),
 		onOpenTool: handleOpenTool,
 		onFocusTool: handleFocusTool,
 		onShowTool: (id: string) => {
-			const name = toolCatalog.find((a) => a.id === id)?.name ?? id;
+			const name = (toolCatalog ?? []).find((a) => a.id === id)?.name ?? id;
 			getDocs()?.openStaticDocument(`toolreadme:${id}`, `Dev Tool: ${name}`);
 		},
 		onRemoveTool: (id: string) => {
@@ -583,8 +584,8 @@ const SidebarProvider: React.FC = () => {
 		},
 		renderToolPanel: (id: string) => <DevToolMount appId={id} name={pinnedTools.find((t) => t.id === id)?.name ?? id} slot="sidebar" />,
 		builtins: builtinStoreRows,
-		onToggleBuiltin: handleToggleBuiltin,
-	}), [pinnedTools, toolCatalog, handleOpenTool, handleFocusTool, unpinTool, builtinStoreRows, handleToggleBuiltin]);
+		onToggleBuiltin: toggleBuiltin,
+	}), [pinnedTools, toolCatalog, handleOpenTool, handleFocusTool, unpinTool, builtinStoreRows, toggleBuiltin]);
 
 
 

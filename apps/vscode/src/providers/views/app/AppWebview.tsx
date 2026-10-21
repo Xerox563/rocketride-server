@@ -24,11 +24,11 @@ import 'shell/themes/rocketride-default.css';
 import '../../../themes/rocketride-vscode.css';
 import '../../styles/root.css';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ConnectionManager } from 'shell';
+import { ConnectionManager, createMirroredPrefsStore, scopedPrefs } from 'shell';
+import { appPartition } from 'shell/src/workspace/workspaceStore';
 import { AppBuilderScreen } from 'shared/tools/appdev/views';
 import { createBusAppBuilderHost } from 'shared/tools/appdev';
 import type { AppErrorRow, AppEventRow, AppSummary, BuildStatusTick, ConsoleRow, IAppBuilderHost, ListingDraft, PreflightCheck, WatchStatus } from 'shared/tools/appdev';
-import type { AppBuilderStage } from 'shared/tools/appdev';
 import type { AppBuilderLoadPayload } from 'shared/ops/appBuilderOps';
 
 // =============================================================================
@@ -436,7 +436,6 @@ const AppWebview: React.FC = () => {
 	// hasReviewLadder defaults true (the gated flow) until init declares the
 	// server; an OSS server flips it off and @public publishes directly.
 	const [capabilities, setCapabilities] = useState({ hasNativeFiles: true, canDebug: false, hasReviewLadder: true });
-	const [initialStage, setInitialStage] = useState<AppBuilderStage>('dashboard');
 	const [reloadSeq, setReloadSeq] = useState(0);
 	const [devEntry, setDevEntry] = useState('');
 	// The workspace manifest riding the dev registration (dev = local truth)
@@ -492,7 +491,12 @@ const AppWebview: React.FC = () => {
 	// App Builder UI preferences (per-workspace, per-app): seeded from
 	// appdev:init, written back over appdev:pref. A ref, not state — reads
 	// are synchronous via host.getPref and never drive a re-render here.
-	const prefsRef = useRef<Record<string, unknown>>({});
+	// App Builder UI prefs live in the app's OWN partition, under an `appdev`
+	// namespace so they cannot collide with the app's runtime prefs. Reads are
+	// synchronous off the mirror, which is what getPref's contract requires.
+	const prefs = useMemo(() => createMirroredPrefsStore(cm, appPartition(STAMPED_APP_ID)), []);
+	const appdevPrefs = useMemo(() => scopedPrefs(prefs.store, 'appdev'), [prefs]);
+	useEffect(() => prefs.dispose, [prefs]);
 
 	// ── Feed registries — stable across renders ─────────────────────────
 	const eventListeners = useRef<Registry<AppEventRow>>(new Set());
@@ -570,11 +574,9 @@ const AppWebview: React.FC = () => {
 			// Prefs must land BEFORE the App Builder screen mounts (app gates
 			// the render below), so host.getPref is synchronous by the time
 			// the views initialize their state from it.
-			prefsRef.current = payload.prefs ?? {};
 			setApp(payload.app);
 			setPreviewUrl(payload.previewUrl);
 			setCapabilities(payload.capabilities);
-			if (payload.stage) setInitialStage(payload.stage);
 		};
 		void cm.request('host.appbuilder.load', { app: appId } as never).then(
 			(payload) => applyLoad(payload as AppBuilderLoadPayload),
@@ -845,11 +847,8 @@ const AppWebview: React.FC = () => {
 			setInheritAuth: (inherit: boolean) => setInheritAuthState(inherit),
 			// Per-workspace UI preferences: reads from the load-delivered bag,
 			// writes echo to the extension host (workspaceState).
-			getPref: (key: string) => prefsRef.current[key],
-			setPref: (key: string, value: unknown) => {
-				prefsRef.current[key] = value;
-				cm.emitOp('host.appbuilder.pref', { app: appId, key, value } as never);
-			},
+			getPref: (key: string) => appdevPrefs.get(key),
+			setPref: (key: string, value: unknown) => appdevPrefs.set(key, value),
 			// Host actions. No `debug`: the external-browser debug flow was
 			// removed (2026-10-16); the capability stays declared and false.
 			revealFiles: capabilities.hasNativeFiles ? () => cm.emitOp('host.appbuilder.reveal', { app: appId } as never) : undefined,
@@ -884,7 +883,7 @@ const AppWebview: React.FC = () => {
 
 	return (
 		<div style={styles.root}>
-			<AppBuilderScreen host={host} app={app} previewPane={proxyPreviewUrl && previewLive ? <PreviewFrame url={proxyPreviewUrl} reloadSeq={reloadSeq} app={app} devEntry={devEntry} devManifest={devManifest} authToken={authToken} inheritAuth={inheritAuth} explicitAuthSeq={explicitAuthSeq} /> : <PreviewInitializing status={watchStatus} subscribeConsole={subscribeConsole} />} initialStage={initialStage} onStageChange={(stage: AppBuilderStage) => cm.emitOp('host.appbuilder.stage', { app: STAMPED_APP_ID, stage } as never)} />
+			<AppBuilderScreen host={host} app={app} previewPane={proxyPreviewUrl && previewLive ? <PreviewFrame url={proxyPreviewUrl} reloadSeq={reloadSeq} app={app} devEntry={devEntry} devManifest={devManifest} authToken={authToken} inheritAuth={inheritAuth} explicitAuthSeq={explicitAuthSeq} /> : <PreviewInitializing status={watchStatus} subscribeConsole={subscribeConsole} />} />
 		</div>
 	);
 };

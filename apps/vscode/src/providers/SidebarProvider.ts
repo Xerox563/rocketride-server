@@ -14,7 +14,7 @@
  * sidebar:modeSelect), and per-source diagnostics (signal
  * pipeline:sourceDiagnostics). Connection/auth/deploy state rides the
  * BusHost mirrors (shell:status / shell:deployStatus / shell:cloudAuth);
- * strip prefs are plain pref keys over host.prefs.*.
+ * strip prefs are plain pref keys on the `shell` prefs partition.
  *
  * The ONLY remaining postMessage traffic: sidebar:command (unrestricted
  * executeCommand — a deliberate host decision) and view:ready (the page-
@@ -37,7 +37,8 @@ import { getLogger } from '../shared/util/output';
 import { getPipelineProvider } from '../extension';
 import { DevToolStore } from './DevToolStore';
 import type { BusHost } from './toolhost/busHost';
-import { readPref, writePref } from './PrefsBag';
+// Deep import on purpose — ext-host-safe .ts leaf (see busHost.ts).
+import { SHELL_PARTITION } from 'shell/src/workspace/workspaceStore';
 // Deep imports on purpose — ext-host-safe .ts leaves (see busHost.ts).
 import { registerOpHandlers } from 'shell/src/ops/busOps';
 import type { PipelineHostOpMap } from 'shared/ops/pipelineOps';
@@ -48,8 +49,8 @@ import type { ToolRowDTO } from './sidebar/toolRows';
 import { PipelineFiles } from './sidebar/pipelineFiles';
 
 /** Prefs-bag key for the persisted sidebar mode. The webview reads and
- *  writes it over host.prefs.* (as it does 'sidebarTabOrder' and
- *  'disabledBuiltins'); the host only touches it in setModeExternal. */
+ *  writes it over shell.setPref (as it does 'devToolPins' and
+ *  'devToolPins'); the host only touches it in setModeExternal. */
 const SIDEBAR_MODE_KEY = 'sidebarMode';
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
@@ -98,12 +99,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 		// and the persisted strip order.
 		// DELIBERATE per-host default: 'apps' in VS Code, 'agent' on web. A
 		// persisted mode whose tool is disabled falls back in SidebarChrome.
-		this.sidebarMode = (this.context ? readPref<string>(this.context, SIDEBAR_MODE_KEY) : undefined) ?? 'apps';
-		this.toolRows = new ToolRows(this.connectionManager, this.devTools, this.context);
+		const savedMode = this.busHost?.prefs.prefsFor(SHELL_PARTITION)[SIDEBAR_MODE_KEY];
+		this.sidebarMode = (typeof savedMode === 'string' ? savedMode : undefined) ?? 'apps';
+		this.toolRows = new ToolRows(this.connectionManager, this.devTools, this.context, this.busHost?.rootBus);
 		this.pipelineFiles = new PipelineFiles(this.connectionManager, this.configManager);
 		// The workspace-FS capability (declared in shared/ops/fsOps) is served
 		// HERE too: this provider owns the service and the watch lifecycle.
-		// Events ride the realm-registered sidebar.fs.event op — broadcast;
+		// Events ride the realm-registered host.fs.event op — broadcast;
 		// only realms that registered the handler hear it, and they filter by
 		// their own sub keys.
 		if (this.busHost) {
@@ -111,10 +113,34 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 			registerOpHandlers<HostFsOpMap>(busHost.rootBus, {
 				'host.fs.findFiles': (p) => this.workspaceFs.findFiles(p.include, p.exclude),
 				'host.fs.workspaceRoots': () => this.workspaceFs.workspaceRoots(),
+				'host.fs.list': (p) => this.workspaceFs.list(p.dir),
+				'host.fs.stat': (p) => this.workspaceFs.stat(p.path),
+				// Generic content rides the text path — vscode files ARE text
+				// on this seam (binary rides readBase64/writeBase64).
+				'host.fs.read': (p) => this.workspaceFs.readText(p.path),
+				'host.fs.readMany': (p) => this.workspaceFs.readMany(p.paths),
 				'host.fs.readText': (p) => this.workspaceFs.readText(p.path),
 				'host.fs.readBase64': (p) => this.workspaceFs.readBase64(p.path, p.maxBytes),
+				'host.fs.write': (p) => this.workspaceFs.writeText(p.path, typeof p.content === 'string' ? p.content : JSON.stringify(p.content)),
+				'host.fs.writeText': (p) => this.workspaceFs.writeText(p.path, p.text),
+				'host.fs.writeBase64': (p) => this.workspaceFs.writeBase64(p.path, p.dataB64),
+				'host.fs.rename': (p) => this.workspaceFs.rename(p.from, p.to),
+				'host.fs.delete': (p) => this.workspaceFs.delete(p.path, p.recursive),
+				'host.fs.mkdir': (p) => this.workspaceFs.mkdir(p.path),
+				'host.fs.refresh': () => { /* direct-disk host: nothing cached to re-walk */ },
+				// ── Staging: the AUTO-COMMIT workspace answers trivially — a
+				// pending-changes UI on vscode truthfully shows nothing pending.
+				'host.fs.pending': () => ({ hasPending: false, changedPaths: {}, dirtyPaths: [] }),
+				'host.fs.diff': () => ({ before: null, after: null }),
+				'host.fs.commit': () => ({ committed: 0, conflicts: [] }),
+				'host.fs.checkpoint': () => null,
+				'host.fs.rollback': () => { /* nothing staged, ever */ },
+				'host.fs.undoTurn': () => ({ committed: 0, conflicts: [] }),
+				'host.fs.discard': () => { /* nothing staged, ever */ },
+				'host.fs.layers': () => [],
+				'host.fs.writeThrough': () => { /* always write-through */ },
 				'host.fs.watch': (p) => {
-					this.workspaceFs.watch(p.sub, p.globs, (path) => busHost.broadcastEmitOp('sidebar.fs.event', { sub: p.sub, path }));
+					this.workspaceFs.watch(p.sub, p.globs, (path) => busHost.broadcastEmitOp('host.fs.event', { sub: p.sub, path }));
 				},
 				'host.fs.unwatch': (p) => {
 					this.workspaceFs.unwatch(p.sub);
@@ -217,7 +243,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 	 */
 	public setModeExternal(mode: string): void {
 		this.sidebarMode = mode;
-		if (this.context) void writePref(this.context, SIDEBAR_MODE_KEY, mode, 'workspace');
+		this.busHost?.prefs.setPref(SHELL_PARTITION, SIDEBAR_MODE_KEY, mode);
 		// Reveal the RocketRide sidebar (keeping keyboard focus where it is)
 		// so the tool's sidebar body is actually on screen, then switch its
 		// strip to the tool's tab. A SIGNAL, not retained — a focus event,
@@ -240,11 +266,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 		this.busHost?.retained.publish('devtools:activeDoc', { appId, docKey });
 	}
 
-	/** Publishes fresh tool rows + catalog (pin/unpin, account change). */
+	/** Publishes fresh strip rows (pin/unpin, account change). The PICKER
+	 *  list no longer rides this — every panel asks the server itself via
+	 *  the brokered client.app.list op. */
 	private pushToolsUpdate(): void {
-		void Promise.all([this.toolRows.buildToolRows().catch((): ToolRowDTO[] => this.toolRows.cachedRows()), this.toolRows.buildAvailableTools().catch((): ToolRowDTO[] | undefined => undefined)]).then(([tools, available]) => {
-			this.publishToolRows(tools, available);
-		});
+		void this.toolRows.buildToolRows()
+			.catch((): ToolRowDTO[] => this.toolRows.cachedRows())
+			.then((tools) => this.publishToolRows(tools));
 	}
 
 	// =========================================================================
@@ -364,8 +392,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 	 * (disconnected, cached-only seed, failed compose): the webview keeps its
 	 * last catalog instead of wiping the Modules list.
 	 */
-	private publishToolRows(tools: ToolRowDTO[], available?: ToolRowDTO[]): void {
-		this.busHost?.retained.publish('devtools:rows', { tools, ...(available ? { available } : {}) });
+	private publishToolRows(tools: ToolRowDTO[]): void {
+		this.busHost?.retained.publish('devtools:rows', { tools });
 	}
 
 	// =========================================================================

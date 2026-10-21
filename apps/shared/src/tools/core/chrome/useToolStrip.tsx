@@ -30,7 +30,7 @@
 //
 //   - the Store rows (enable/disable, never uninstall),
 //   - the strip items: each enabled builtin's sidebar mounted under its
-//     own ToolHostProvider carrying ITS scoped prefs partition (isolation
+//     own ToolHostProvider carrying ITS OWN mirrored prefs partition (isolation
 //     by construction) and its per-tool peer/channel/documents wiring,
 //   - the activation/deactivation discipline: selecting a tool tab emits
 //     `shell:toolSidebarActivated` and reveals (never creates) a window;
@@ -43,10 +43,12 @@
 // =============================================================================
 
 import { useCallback, useMemo, useRef } from 'react';
-import { ConnectionManager, ToolHostProvider, createLoopbackPeer, scopedPrefs } from 'shell';
-import type { DevToolProps, PrefsStore, ToolChannel } from 'shell';
+import { ConnectionManager, ToolHostProvider, createLoopbackPeer } from 'shell';
+import { appPartition } from 'shell/src/workspace/workspaceStore';
+import type { DevToolProps, IPrefsHub, ToolChannel } from 'shell';
 import type { BuiltinToolServices } from '../ToolContext';
 import { getBuiltinTools } from '../registry';
+import { isStoreToolPin, pinIdOf } from 'shell/src/workspace/devToolPins';
 import type { SidebarToolItem } from './SidebarChrome';
 
 /** One Store row for a builtin (enable/disable, never uninstall). */
@@ -63,10 +65,20 @@ export interface ToolStripConfig {
 	host: 'rocket' | 'vscode';
 	/** The realm's services object (each item overrides `prefs` per tool). */
 	services: BuiltinToolServices;
-	/** The realm's prefs backend — per-tool partitions are carved off it. */
-	prefsStore: PrefsStore;
-	/** Disabled builtin ids (host-persisted). */
-	disabledBuiltins: string[];
+	/** The realm's prefs hub — each tool gets its OWN mirrored partition
+	 *  (`app:<id>`), which is a separate retained topic, not a key prefix. */
+	prefsHub: IPrefsHub;
+	/**
+	 * The one toolbar list (`devToolPins`), which IS the enablement:
+	 * a builtin is enabled when the list names it, disabled when it does
+	 * not. No second key can disagree with the list.
+	 *
+	 * EMPTY means untouched, not "everything off" — a person who has never
+	 * arranged their toolbar sees every builtin.
+	 */
+	pins: readonly string[];
+	/** Persists a new toolbar list. */
+	onPinsChange: (next: string[]) => void;
 	/** Per-tool sidebar peer; omit for stable loopback peers. */
 	peerFor?: (toolId: string) => DevToolProps['peer'];
 	/** Per-tool channel; omit when the tool builds its own over the peer. */
@@ -84,6 +96,8 @@ export interface ToolStrip {
 	builtinItems: SidebarToolItem[];
 	/** The Store's builtin rows. */
 	builtinStoreRows: BuiltinStoreRow[];
+	/** Flips one builtin's enablement in the toolbar list. */
+	toggleBuiltin: (toolId: string, enabled: boolean) => void;
 	/** Strip tab focus: activation emit + host reveal. */
 	focusTool: (toolId: string) => void;
 	/** Call on every mode change BEFORE committing it: emits the
@@ -104,7 +118,7 @@ export interface ToolStrip {
  * @returns Strip items, store rows, and the activation handlers.
  */
 export function useToolStrip(config: ToolStripConfig): ToolStrip {
-	const { host, services, prefsStore, disabledBuiltins, peerFor, channelFor, documentsFor, revealTool } = config;
+	const { host, services, prefsHub, pins, onPinsChange, peerFor, channelFor, documentsFor, revealTool } = config;
 
 	// Stable loopback peers for hosts without per-tool transports — one per
 	// tool for the realm's lifetime, so mounts keep their identities.
@@ -122,18 +136,55 @@ export function useToolStrip(config: ToolStripConfig): ToolStrip {
 		[peerFor]
 	);
 
+	/** Enabled = named by the list. An empty list is "never arranged", so
+	 *  everything shows; only a list that exists can withhold anything. */
+	const isEnabled = useCallback(
+		(toolId: string) => pins.length === 0 || pins.includes(pinIdOf(toolId)),
+		[pins],
+	);
+
+	/**
+	 * Flips one builtin by adding it to the list or taking it out.
+	 *
+	 * Turning the FIRST one off has to materialise the list: until then it
+	 * is empty (meaning "all of them"), and removing an id from an empty
+	 * list would say nothing. The materialised list is every builtin this
+	 * host serves, in registration order, plus the store tools already
+	 * pinned — i.e. exactly what was on screen a moment ago.
+	 */
+	const toggleBuiltin = useCallback(
+		(toolId: string, enabled: boolean) => {
+			const pinId = pinIdOf(toolId);
+			if (pins.length === 0) {
+				if (enabled) return; // already shown — nothing to record
+				const everything = [
+					...getBuiltinTools().filter((t) => !t.hosts || t.hosts.includes(host)).map((t) => pinIdOf(t.id)),
+					...pins.filter(isStoreToolPin),
+				];
+				onPinsChange(everything.filter((id) => id !== pinId));
+				return;
+			}
+			if (enabled) {
+				if (!pins.includes(pinId)) onPinsChange([...pins, pinId]);
+				return;
+			}
+			onPinsChange(pins.filter((id) => id !== pinId));
+		},
+		[pins, host, onPinsChange],
+	);
+
 	const builtinStoreRows = useMemo<BuiltinStoreRow[]>(
 		() =>
 			getBuiltinTools()
 				.filter((t) => !t.hosts || t.hosts.includes(host))
-				.map((t) => ({ id: t.id, name: t.name, ...(t.description !== undefined ? { description: t.description } : {}), enabled: !disabledBuiltins.includes(t.id) })),
-		[host, disabledBuiltins]
+				.map((t) => ({ id: t.id, name: t.name, ...(t.description !== undefined ? { description: t.description } : {}), enabled: isEnabled(t.id) })),
+		[host, isEnabled]
 	);
 
 	const builtinItems = useMemo<SidebarToolItem[]>(
 		() =>
 			getBuiltinTools()
-				.filter((t) => (!t.hosts || t.hosts.includes(host)) && !disabledBuiltins.includes(t.id))
+				.filter((t) => (!t.hosts || t.hosts.includes(host)) && isEnabled(t.id))
 				.map((t) => {
 					const Sidebar = t.sidebar;
 					const peer = resolvePeer(t.id);
@@ -147,13 +198,13 @@ export function useToolStrip(config: ToolStripConfig): ToolStrip {
 						// partition — a tool's handle cannot address another
 						// app's keys (isolation by construction).
 						render: () => (
-							<ToolHostProvider value={{ ...services, prefs: scopedPrefs(prefsStore, `app:${t.id}`) }}>
+							<ToolHostProvider value={{ ...services, prefs: prefsHub.partition(appPartition(t.id)) }}>
 								<Sidebar peer={peer} {...(channel !== undefined ? { channel } : {})} {...(documents !== undefined ? { documents } : {})} />
 							</ToolHostProvider>
 						),
 					};
 				}),
-		[host, disabledBuiltins, services, prefsStore, resolvePeer, channelFor, documentsFor]
+		[host, isEnabled, services, prefsHub, resolvePeer, channelFor, documentsFor]
 	);
 
 	/** Strip tab selection → reveal an open window of the tool (create none),
@@ -196,5 +247,5 @@ export function useToolStrip(config: ToolStripConfig): ToolStrip {
 		}
 	}, [builtinToolIds]);
 
-	return { builtinItems, builtinStoreRows, focusTool, deactivateReplacedTab, announceBuiltinSelected };
+	return { builtinItems, builtinStoreRows, toggleBuiltin, focusTool, deactivateReplacedTab, announceBuiltinSelected };
 }

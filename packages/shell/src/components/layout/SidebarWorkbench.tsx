@@ -46,10 +46,15 @@
 // Desktop only: below the compact breakpoint ShellLayout renders the classic
 // Sidebar drawer for every mode, so this frame never meets the drawer rules.
 //
-// State (width, panel open, active view) is remembered PER APP in
-// localStorage, read synchronously so the first frame is correct — the same
-// reasoning as the classic sidebar's collapse memory. ShellLayout keys this
-// component by app id, so the initializers re-run on every app switch.
+// GEOMETRY (width, panel open) is remembered per app in localStorage, read
+// synchronously so the first frame is correct — the same reasoning as the
+// classic sidebar's collapse memory, and the only thing that reasoning
+// actually covers. SELECTION and ORDER are not geometry: they live in the
+// workspace file (ShellPrefsMap.sidebarActiveView / devToolPins), because
+// neither can flash — this chrome cannot mount before the app has declared
+// its containers — and both should follow the person across machines.
+// ShellLayout keys this component by app id, so the geometry initializers
+// re-run on every app switch.
 // =============================================================================
 
 import React, { useCallback, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
@@ -58,6 +63,12 @@ import { BxDockLeft, BxDotsHorizontal } from '../BoxIcon';
 import { ConnectionManager } from '../../connection/connection';
 import { useWorkspace } from '../workspace/WorkspaceContext';
 import type { ShellThemeConfig, ShellAccountConfig } from '../workspace/types';
+import { applyContainerOrder, orderByPins } from '../../workspace/devToolPins';
+import { realmPrefsHub, typedPrefs, usePref } from '../workspace/prefsStore';
+import type { SidebarPrefsMap } from '../../workspace/devToolPins';
+import { appPartition } from '../../workspace/workspaceStore';
+import { TabControl } from '../tab-control/TabControl';
+import type { ViewMenu } from '../../types/viewMenu';
 import { SidebarFooter, SidebarFooterExtras, openPlatformDocs } from '../sidebar-footer/SidebarFooter';
 import { useSidebarFooterMenu } from './useSidebarFooterMenu';
 import { SidebarCollapsedProvider } from '../sidebar-menu/SidebarCollapsedContext';
@@ -67,7 +78,7 @@ import { TabPanel } from '../tab-panel/TabPanel';
 import type { ITabPanelPanel } from '../tab-panel/TabPanel';
 import { useHostChromeState } from './HostChromeContext';
 import { AppSwitcherButton } from './Sidebar';
-import { SidebarViewStrip, rememberedWorkbench as remembered, rememberWorkbench as remember, resolveActiveView, viewTitleStyle } from './SidebarViewStrip';
+import { rememberedWorkbench as remembered, rememberWorkbench as remember, resolveActiveView, viewTitleStyle } from './SidebarViewStrip';
 import type { SidebarViewContainer } from '../../types/sidebarChrome';
 
 // =============================================================================
@@ -94,6 +105,9 @@ const KEY_RESIZE_STEP = 24;
 const RAIL_GAP = 4;
 /** Drag-and-drop MIME for rail view reordering. */
 const RAIL_DND_MIME = 'application/rr-rail-view';
+
+/** Stable empty list — a fresh [] each render would re-sort the rail. */
+const EMPTY_PINS: string[] = [];
 
 // Per-app memory (remembered/remember) is shared with the compact drawer —
 // see SidebarViewStrip.tsx. Both frames read and write the same stored
@@ -197,6 +211,19 @@ const styles = {
 			: hovered ? 'var(--rr-bg-rail-hover, rgba(255, 255, 255, 0.12))' : 'transparent',
 		transition: 'background 100ms ease, color 100ms ease',
 	}),
+	/** The drop insertion line: centred in the RAIL_GAP on the drop side, so
+	 *  it reads as a position between two buttons rather than a selection. */
+	railDropLine: (after: boolean): CSSProperties => ({
+		position: 'absolute',
+		left: 2,
+		right: 2,
+		height: 2,
+		borderRadius: 1,
+		background: 'var(--rr-brand)',
+		pointerEvents: 'none',
+		...(after ? { bottom: -(RAIL_GAP / 2) - 1 } : { top: -(RAIL_GAP / 2) - 1 }),
+	}),
+
 	railBadge: {
 		position: 'absolute',
 		right: 2,
@@ -328,18 +355,59 @@ const SidebarWorkbench: React.FC<SidebarWorkbenchProps> = ({ variant, themeConfi
 	// that is the one-data-owner path, not a legacy shim.
 	const declaredViews: SidebarViewContainer[] = (sidebarViews ?? []).slice().sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
 
-	// --- Rail order: user-dragged, remembered per app -----------------------------
-	// Ids the memory names render first in that order; anything it doesn't
-	// name keeps its declared position after them (new containers appear at
-	// the end rather than scrambling the user's arrangement).
-	const [railOrder, setRailOrder] = useState<string[]>(() => remembered(activeAppId).railOrder ?? []);
-	const views: SidebarViewContainer[] = useMemo(() => {
-		if (railOrder.length === 0) return declaredViews;
-		const rank = new Map(railOrder.map((id, i) => [id, i]));
-		const named = declaredViews.filter((v) => rank.has(v.id)).sort((a, b) => (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0));
-		return [...named, ...declaredViews.filter((v) => !rank.has(v.id))];
+	// --- Rail order: the ONE toolbar list, from the global workspace file ---------
+	// Not per-app and not localStorage: `devToolPins` in the shell prefs
+	// partition is the single ordered list of toolbar buttons, shared with
+	// every other chrome (see workspace/devToolPins). Ids it names render
+	// first in that order; anything it does not name keeps its declared
+	// position after them, so a new container appears without scrambling the
+	// arrangement a person chose.
+	// The shell partition's own prefs, through the standard interface: the
+	// realm's hub owns ONE store per partition, typedPrefs narrows it to
+	// ShellPrefsMap, and usePref subscribes. No private store for this.
+	// The APP's own partition: the toolbar belongs to this app's workspace
+	// file, not to global.json (which is what the SHELL is, not what an app
+	// holds). Re-resolved per app so switching apps switches toolbars.
+	const shellPrefs = useMemo(
+		() => typedPrefs<SidebarPrefsMap>(realmPrefsHub(ConnectionManager.getInstance()).partition(appPartition(activeAppId))),
+		[activeAppId],
+	);
+	const pins = usePref(shellPrefs, 'devToolPins') ?? EMPTY_PINS;
+	const views: SidebarViewContainer[] = useMemo(
+		() => orderByPins(declaredViews, pins),
 		// eslint-disable-next-line react-hooks/exhaustive-deps -- declaredViews is rebuilt per render; its CONTENT only changes with sidebarViews
-	}, [sidebarViews, railOrder]);
+		[sidebarViews, pins],
+	);
+
+	// --- The container switcher as a ViewMenu (TabControl's input) ----------------
+	// One declaration both the cursor strip and the overflow menu read: the
+	// container's title is the tab label (its tooltip when icons-only), the
+	// badge rides as the entry count, and every entry is draggable because
+	// the toolbar order is the person's to arrange.
+	const viewMenu: ViewMenu = useMemo(
+		() => ({
+			entries: views.map((v) => ({
+				id: v.id,
+				label: v.title,
+				...(v.icon !== undefined ? { icon: v.icon } : {}),
+				...(typeof v.badge === 'number' && v.badge !== 0 ? { count: v.badge } : {}),
+				draggable: true,
+			})),
+		}),
+		[views],
+	);
+
+	/** TabControl's drop → the same persisted toolbar list the rail writes. */
+	const handleTabReorder = useCallback(
+		(dragId: string, targetId: string, position: 'before' | 'after') => {
+			const ids = views.map((v) => v.id).filter((id) => id !== dragId);
+			const at = ids.indexOf(targetId);
+			if (at < 0) return;
+			ids.splice(at + (position === 'after' ? 1 : 0), 0, dragId);
+			shellPrefs.set('devToolPins', applyContainerOrder(ids, pins));
+		},
+		[views, pins, shellPrefs],
+	);
 
 	// --- Rail drag-reorder ---------------------------------------------------------
 	const [dragViewId, setDragViewId] = useState<string | null>(null);
@@ -356,9 +424,10 @@ const SidebarWorkbench: React.FC<SidebarWorkbenchProps> = ({ variant, themeConfi
 		const at = ids.indexOf(targetId);
 		if (at < 0) return;
 		ids.splice(at + (after ? 1 : 0), 0, dragged);
-		setRailOrder(ids);
-		remember(activeAppId, { railOrder: ids });
-	}, [dragViewId, views, activeAppId]);
+		// Fold this chrome's new order back into the full list — entries it
+		// never declared (a store tool the server has not listed) keep theirs.
+		shellPrefs.set('devToolPins', applyContainerOrder(ids, pins));
+	}, [dragViewId, views, pins, shellPrefs]);
 
 	// --- Rail overflow ----------------------------------------------------------------
 	// The view buttons stack in a measured box (railViews) that ends where the
@@ -401,7 +470,11 @@ const SidebarWorkbench: React.FC<SidebarWorkbenchProps> = ({ variant, themeConfi
 		if (typeof stored === 'boolean') return stored;
 		return loadedApps[activeAppId]?.sidebar !== 'collapsed';
 	});
-	const [activeViewId, setActiveViewId] = useState(() => remembered(activeAppId).view ?? '');
+	// Selection lives in the workspace file (see ShellPrefsMap.sidebarActiveView):
+	// it follows the person across browsers, and nothing here can flash
+	// because this chrome only mounts once the app has declared its views.
+	const activeViewId = usePref(shellPrefs, 'sidebarActiveView') ?? '';
+	const setActiveViewId = useCallback((id: string) => shellPrefs.set('sidebarActiveView', id), [shellPrefs]);
 	const [isResizing, setIsResizing] = useState(false);
 	const [sashHover, setSashHover] = useState(false);
 	const [hoveredRailId, setHoveredRailId] = useState<string | null>(null);
@@ -451,7 +524,6 @@ const SidebarWorkbench: React.FC<SidebarWorkbenchProps> = ({ variant, themeConfi
 			return;
 		}
 		setActiveViewId(id);
-		remember(activeAppId, { view: id });
 		if (!open) openPanel();
 	}, [open, activeView?.id, activeAppId, closePanel, openPanel, views]);
 
@@ -673,11 +745,14 @@ const SidebarWorkbench: React.FC<SidebarWorkbenchProps> = ({ variant, themeConfi
 									}}
 									style={{
 										...styles.railButton(isActive, hoveredRailId === v.id),
+										position: 'relative',
 										...(dragViewId === v.id ? { opacity: 0.4 } : null),
-										// Insertion hint: a brand edge on the drop side.
-										...(hint ? { boxShadow: `inset 0 ${hint.after ? -2 : 2}px 0 var(--rr-brand)` } : null),
 									}}
 								>
+									{/* Insertion LINE, drawn in the gap between buttons —
+									    an inset edge on the neighbour reads as "this button
+									    is highlighted", not "the item lands here". */}
+									{hint && <span aria-hidden style={styles.railDropLine(hint.after)} />}
 									<span style={{ display: 'flex', width: RAIL_ICON, height: RAIL_ICON, alignItems: 'center', justifyContent: 'center' }}>{v.icon}</span>
 									{v.badge != null && v.badge !== 0 && <span style={styles.railBadge}>{v.badge}</span>}
 								</button>
@@ -807,7 +882,11 @@ const SidebarWorkbench: React.FC<SidebarWorkbenchProps> = ({ variant, themeConfi
 				    name renders in the title row below, same as 'vscode'. The
 				    SAME component the compact drawer renders — one switcher,
 				    two frames. */}
-				<SidebarViewStrip views={views} activeId={activeView?.id ?? ''} onSelect={activate} />
+				{/* THE SAME CONTROL the classic chrome uses — measured overflow
+				    behind a chevron (with icon + label rows), drag-reorder, one
+				    tab treatment. A second hand-rolled strip here is how cursor
+				    mode ended up without the overflow menu classic always had. */}
+				<TabControl menu={viewMenu} iconsOnly activeId={activeView?.id ?? ''} onSelect={activate} onReorder={handleTabReorder} />
 				{activeView && views.length > 1 && <div style={styles.viewTitle}>{activeView.title}</div>}
 				<div style={styles.body}>{panelBody}</div>
 				{/* Footer inside the panel — the cursor variant has no rail, so

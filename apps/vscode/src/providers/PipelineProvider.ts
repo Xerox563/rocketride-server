@@ -21,6 +21,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { GenericEvent, ConnectionState, PIPE_BUILDER_APP_ID } from '../shared/types';
+import { PIPELINE_PARTITION } from 'shared/tools/pipelines/types';
 import type { TaskStatus } from 'shared/tools/pipelines/types';
 import { ConnectionManager } from '../connection/connection';
 import { CloudAuthProvider } from '../auth/CloudAuthProvider';
@@ -47,9 +48,12 @@ import type { PipelineHostOpMap, PipelineLoadPayload } from 'shared/ops/pipeline
 // CONSTANTS
 // =============================================================================
 
-const PREFS_KEY = 'rocketride.prefs';
-const LAYOUTS_KEY = 'rocketride.layouts';
-const GLOBAL_PREF_KEYS = new Set(['cloudCanvasPromptDismissed']);
+// Per-document VIEW STATE (which page, flow view, viewport, toolbar
+// position, navigation mode, canvas layout) lives in the pipeline tool's
+// partition in the WORKSPACE file, keyed by document URI — so it roams with
+// the workspace like every other piece of persisted state, instead of
+// sitting in a VS Code Memento. It is NOT prefs: moving the toolbar in one
+// pipeline must not move it in all of them.
 // workspaceState key prefix for the auto-backup of an untitled pipeline's
 // content. VS Code does not hot-exit-back-up a custom-editor untitled document,
 // so we persist it ourselves (keyed by the untitled URI) and restore it when
@@ -88,7 +92,6 @@ export class PipelineProvider implements vscode.CustomTextEditorProvider {
 	private connectionManager = ConnectionManager.getInstance();
 	private logger = getLogger();
 	private savesForRun: Set<string> = new Set();
-	private preferenceUpdateQueue: Promise<void> = Promise.resolve();
 	/** Readonly live-task viewer panels (doc = task:<projectId>.<sourceId>). */
 	private taskPanels: Map<string, vscode.WebviewPanel> = new Map();
 
@@ -220,63 +223,6 @@ export class PipelineProvider implements vscode.CustomTextEditorProvider {
 		this.busHost.retained.publish('pipeline:cloudSetup', { cloudConnectionConfigured: this.isCloudConnectionConfigured() });
 	}
 
-	private getPreferences(): Record<string, unknown> {
-		const workspacePrefs = this.context.workspaceState.get<Record<string, unknown>>(PREFS_KEY) ?? {};
-		const globalPrefs = this.context.globalState.get<Record<string, unknown>>(PREFS_KEY) ?? {};
-		const prefs = { ...workspacePrefs };
-		for (const key of GLOBAL_PREF_KEYS) {
-			// globalState is authoritative, but a value left in workspaceState by an earlier
-			// build is honoured as a fallback so a prior "Don't show again" keeps applying.
-			if (Object.prototype.hasOwnProperty.call(globalPrefs, key)) {
-				prefs[key] = globalPrefs[key];
-			}
-		}
-		return prefs;
-	}
-
-	/** Merges preference updates; keys cannot currently be deleted through this path. */
-	private updatePreferences(updatedPrefs: Record<string, unknown>): Promise<void> {
-		this.preferenceUpdateQueue = this.preferenceUpdateQueue
-			.then(async () => {
-				const workspacePrefs = this.context.workspaceState.get<Record<string, unknown>>(PREFS_KEY) ?? {};
-				const globalPrefs = this.context.globalState.get<Record<string, unknown>>(PREFS_KEY) ?? {};
-				// Webviews send one-key patches; ignore a patch that is already stored so
-				// every layout drag does not rewrite global storage.
-				const workspaceUpdates: Record<string, unknown> = {};
-				const globalUpdates: Record<string, unknown> = {};
-				for (const [key, value] of Object.entries(updatedPrefs)) {
-					const isGlobal = GLOBAL_PREF_KEYS.has(key);
-					const current = isGlobal ? globalPrefs[key] : workspacePrefs[key];
-					if (current === value) continue;
-					if (isGlobal) globalUpdates[key] = value;
-					else workspaceUpdates[key] = value;
-				}
-
-				// Only touch a scope that actually has updates — most pref writes (layout,
-				// navigation mode) are workspace-only and should not rewrite global storage.
-				await Promise.all([
-					Object.keys(workspaceUpdates).length > 0 ? this.context.workspaceState.update(PREFS_KEY, { ...workspacePrefs, ...workspaceUpdates }) : Promise.resolve(),
-					Object.keys(globalUpdates).length > 0 ? this.context.globalState.update(PREFS_KEY, { ...globalPrefs, ...globalUpdates }) : Promise.resolve(),
-				]);
-
-				// Broadcast only the global-scoped changes. Workspace prefs (layout,
-				// navigation mode) are per-editor view state: propagating them would let one
-				// editor's stale full-bag write revert another editor's live UI.
-				// Global-scoped changes fan out as a SIGNAL (merging is
-				// idempotent — the sender re-merging its own patch is a no-op).
-				// Workspace prefs (layout, navigation mode) are per-editor view
-				// state: propagating them would let one editor's stale write
-				// revert another editor's live UI.
-				if (Object.keys(globalUpdates).length > 0) {
-					this.busHost.retained.signal('pipeline:prefs', { prefs: globalUpdates });
-				}
-			})
-			.catch((err: unknown) => {
-				this.logger.error(`Failed to persist preferences: ${err}`);
-			});
-		return this.preferenceUpdateQueue;
-	}
-
 	/**
 	 * Re-fetches env key names from the server and broadcasts them to all
 	 * open editor webviews so the autocomplete list stays in sync after
@@ -400,16 +346,7 @@ export class PipelineProvider implements vscode.CustomTextEditorProvider {
 			},
 			'host.pipeline.viewState': (p) => {
 				if (!p.viewState) return;
-				const allLayouts = this.context.workspaceState.get<Record<string, unknown>>(LAYOUTS_KEY) ?? {};
-				allLayouts[p.doc] = p.viewState;
-				this.context.workspaceState.update(LAYOUTS_KEY, allLayouts).then(undefined, (err: unknown) => {
-					this.logger.error(`Failed to persist layout: ${err}`);
-				});
-			},
-			'host.pipeline.prefsChange': async (p) => {
-				if (typeof p.prefs === 'object' && p.prefs !== null && !Array.isArray(p.prefs)) {
-					await this.updatePreferences(p.prefs);
-				}
+				this.busHost.prefs.setAppStateKey(PIPELINE_PARTITION, p.doc, p.viewState);
 			},
 			'host.pipeline.oauthStart': (p) => this.startOAuth(stateFor(p.doc).document, p.url),
 			'host.pipeline.run': (p) => this.runFromRealm(stateFor(p.doc), p.action, p.source),
@@ -522,7 +459,6 @@ export class PipelineProvider implements vscode.CustomTextEditorProvider {
 			return {
 				project,
 				viewState: { mode: 'design' },
-				prefs: {},
 				statuses: {},
 				isSubscribed: true,
 				isReadonly: true,
@@ -546,8 +482,10 @@ export class PipelineProvider implements vscode.CustomTextEditorProvider {
 			}
 		}
 
-		const layouts = this.context.workspaceState.get<Record<string, Record<string, unknown>>>(LAYOUTS_KEY) ?? {};
-		const layout = layouts[doc] ?? {};
+		// The tool's partition may never have been activated — load it before
+		// reading, or a fresh window restores every editor to defaults.
+		await this.busHost.prefs.ensurePartition(PIPELINE_PARTITION);
+		const layout = (this.busHost.prefs.appStateFor(PIPELINE_PARTITION)[doc] as Record<string, unknown> | undefined) ?? {};
 		const client = this.connectionManager.getClient();
 		let envKeys: string[] | undefined;
 		try {
@@ -569,7 +507,6 @@ export class PipelineProvider implements vscode.CustomTextEditorProvider {
 		return {
 			project,
 			viewState: { mode: 'design', ...layout },
-			prefs: this.getPreferences(),
 			statuses: editorState.cachedStatuses,
 			isSubscribed: isSubscribed(client, PIPE_BUILDER_APP_ID),
 			isDirty: document.isDirty,

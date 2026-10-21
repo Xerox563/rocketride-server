@@ -314,9 +314,13 @@ export const ExplorerDevToolSidebar: React.FC<DevToolProps> = ({ peer, documents
 
 	// SINGLE-PANE UX: the explorer's editor surface is one pane, so
 	// activating its sidebar tab opens (or reveals) it — the tool's choice.
-	// This mount only exists because the tab was selected, so mounting IS
-	// the first activation; the shell event covers re-selections.
-	useEffect(() => { documents?.open('', 'File Explorer'); }, [documents]);
+	//
+	// Mounting is NOT an activation. The host keeps every pinned tool's
+	// sidebar mounted (SidebarChrome's TabPanel hides inactive panels with
+	// display:none rather than unmounting them), so opening on mount
+	// reopened this pane on every page load — including panes the user had
+	// deliberately closed. This listener is registered long before any
+	// selection can happen, so it covers the first selection too.
 	useShellEvent('shell:toolSidebarActivated', ({ appId }) => {
 		if (appId === 'rocketride.explorer') documents?.open('', 'File Explorer');
 	});

@@ -36,7 +36,6 @@ import { registerOpHandlers } from 'shell/src/ops/busOps';
 import type { IOpBus, OpImplTable } from 'shell/src/ops/busOps';
 import type { IRetainedRegistry } from 'shell/src/ops/retained';
 import type { AppBuilderHostOpMap, AppBuilderLoadPayload } from 'shared/ops/appBuilderOps';
-import type { AppBuilderStage } from 'shared/tools/appdev/types';
 
 /** What the registration needs from the extension. */
 interface IAppBuilderOpsDeps {
@@ -45,18 +44,6 @@ interface IAppBuilderOpsDeps {
 	/** The root's retained registry — the login op republishes the app's
 	 *  one-shot :session credential there. */
 	retained: IRetainedRegistry;
-}
-
-/**
- * Maps a persisted stage value to the current vocabulary. workspaceState
- * stores the active tab raw, so windows that persisted before the
- * DEVELOP -> DESIGN rename hold the legacy id; anything unknown (or never
- * persisted) lands on 'dashboard', the default view.
- */
-function normalizeStage(raw: unknown): AppBuilderStage {
-	if (raw === 'develop') return 'design';
-	if (raw === 'design' || raw === 'package' || raw === 'store' || raw === 'deploy' || raw === 'dashboard') return raw;
-	return 'dashboard';
 }
 
 /**
@@ -126,21 +113,7 @@ export function registerVscodeAppBuilderOps(bus: IOpBus, deps: IAppBuilderOpsDep
 					canDebug: false,
 					hasReviewLadder: !(connectionManager.getClient()?.getAccountInfo()?.capabilities ?? []).includes('oss'),
 				},
-				stage: normalizeStage(context.workspaceState.get(`appdev.stage.${p.app}`)),
-				prefs: context.workspaceState.get(`appdev.prefs.${p.app}`) ?? {},
 			};
-		},
-
-		'host.appbuilder.stage': async (p) => {
-			await context.workspaceState.update(`appdev.stage.${p.app}`, p.stage);
-		},
-
-		'host.appbuilder.pref': async (p) => {
-			// Merge-write the per-app bag — concurrent keys must not clobber
-			// each other.
-			const bag = { ...(context.workspaceState.get<Record<string, unknown>>(`appdev.prefs.${p.app}`) ?? {}) };
-			bag[p.key] = p.value;
-			await context.workspaceState.update(`appdev.prefs.${p.app}`, bag);
 		},
 
 		'host.appbuilder.restart': async (p) => {

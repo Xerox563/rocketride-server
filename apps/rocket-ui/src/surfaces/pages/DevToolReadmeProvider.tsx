@@ -53,6 +53,10 @@ const DevToolReadmeProvider: React.FC<{ appId: string }> = ({ appId }) => {
 	const { isConnected } = useShellConnection();
 	const { catalog, pins, pin, unpin } = useDevToolPins();
 
+	// null = the catalog fetch has not resolved — loading, not missing.
+	if (catalog === null) {
+		return <div style={missingStyle}>Loading…</div>;
+	}
 	const tool = catalog.find((a) => a.id === appId);
 	if (!tool) {
 		return <div style={missingStyle}>This dev tool is not published on the connected server.</div>;

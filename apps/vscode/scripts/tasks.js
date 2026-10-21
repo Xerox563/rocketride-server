@@ -377,11 +377,7 @@ function makeTestAction() {
 	return {
 		description: 'Testing vscode',
 		run: async (ctx, task) => {
-			const testFiles = (await glob('src/test/*.test.ts', { cwd: APP_ROOT, nodir: true }))
-				// extension.test.ts requires the real extension-host-only `vscode` module.
-				// Compare basenames: glob yields backslash-separated paths on Windows.
-				.filter((file) => path.basename(file) !== 'extension.test.ts')
-				.sort();
+			const testFiles = (await glob('src/test/*.test.ts', { cwd: APP_ROOT, nodir: true })).sort();
 
 			// Fail rather than pass silently: this target exists because these tests
 			// previously ran nowhere, so a glob that matches nothing must not read as green.

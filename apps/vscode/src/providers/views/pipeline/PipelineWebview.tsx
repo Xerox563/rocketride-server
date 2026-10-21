@@ -14,14 +14,13 @@
  * cross-app, out of this rename's scope).
  */
 
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 
 import type { IProject } from 'shell';
 // Project module is imported via subpath (not the 'shared' barrel): the
 // barrel is the shell's MF share and must stay canvas-free; this webview
 // bundles the project module directly.
 import { ProjectView, parseServerEvent, isDevLiveEvent, isTeamLiveEvent } from 'shared/tools/pipelines';
-import { mergeProjectPreferences } from 'shared/tools/pipelines/utils/prefs';
 import { registerServiceIcons } from 'shared/tools/pipelines/panels/design/canvas';
 import { foldProjectDeployRuns } from 'shared/tools/pipelines/sidebar/taskFold';
 import type { TaskLifecycleEvent } from 'shared/tools/pipelines/sidebar/taskFold';
@@ -30,7 +29,9 @@ import { CheckoutModal } from 'shell';
 import type { CheckoutPlan, PlanAction } from 'shell';
 import { DeploymentRecordPanel, TeamDeploymentRecordPanel } from 'shared/panels/deploy';
 import type { DeploySnapshot } from 'shared/panels/deploy';
-import { createBridgedPrefsStore, useGridConfigAnswering, ConnectionManager } from 'shell';
+import { createMirroredPrefsStore, useGridConfigAnswering, ConnectionManager } from 'shell';
+import { PIPELINE_PARTITION } from 'shared/tools/pipelines/types';
+import { SHELL_PARTITION } from 'shell/src/workspace/workspaceStore';
 import { isAppSubscribed } from 'shared/utils/subscriptionGate';
 import { PIPE_BUILDER_APP_ID } from '../../../shared/types';
 import { fetchDeployLifecycle as fetchLifecycleOp, fetchDeployment as fetchDeploymentOp, deploymentActions, toWireTeamId } from './deployOps';
@@ -77,7 +78,6 @@ const PipelineWebview: React.FC = () => {
 	// ProjectView sections' buffers and folds feed from this append-only array.
 	const [liveLogEvents, setLiveLogEvents] = useState<TaskEventMessage[]>([]);
 	const [viewState, setViewState] = useState<ViewState | undefined>(undefined);
-	const [prefs, setPrefs] = useState<Record<string, unknown> | undefined>(undefined);
 	const [serverHost, setServerHost] = useState<string>('');
 	const [oauthReturnUrl, setOauthReturnUrl] = useState<string | undefined>(undefined);
 	const [pendingOAuthTokens, setPendingOAuthTokens] = useState<{ tokens: string; state: string } | undefined>(undefined);
@@ -176,7 +176,6 @@ const PipelineWebview: React.FC = () => {
 				flowViewMode: vs?.flowViewMode ?? 'pipeline',
 				viewport: vs?.viewport,
 			});
-			setPrefs(payload.prefs ?? {});
 			setLiveLogEvents([]);
 			// Unconditional: a load without a return URL must clear any stale
 			// one, and a reload must not keep tokens from a previous session.
@@ -229,11 +228,6 @@ const PipelineWebview: React.FC = () => {
 				const sub = isAppSubscribed(cm.getAccountInfo(), PIPE_BUILDER_APP_ID);
 				setSubscribed(sub);
 				if (sub) setShowCheckout(false);
-			}),
-			// Global-scoped project-preference changes from any editor.
-			cm.subscribe('pipeline:prefs', (payload) => {
-				const pr = payload as { prefs?: Record<string, unknown> } | undefined;
-				if (pr?.prefs) setPrefs((prev) => mergeProjectPreferences(prev, pr.prefs ?? {}));
 			}),
 			// The engine event stream arrives realm-locally (mirror.event →
 			// shell:event) — feed the same fold the typed push used to.
@@ -296,21 +290,21 @@ const PipelineWebview: React.FC = () => {
 
 	const sendMessageRef = useRef<(msg: PipelineWebviewToHost) => void>(() => {});
 
-	// This realm's prefs store — hydrated once from the host's memento bag
-	// over the bus (host.prefs.*; the same lane every framework page uses);
-	// grid layouts answer synchronously from it, so DataGrid persistence
-	// works in this webview exactly as in the web shell.
-	const prefsBridgeRef = useRef<ReturnType<typeof createBridgedPrefsStore> | null>(null);
-	if (!prefsBridgeRef.current) {
-		prefsBridgeRef.current = createBridgedPrefsStore((key, value, scope) => ConnectionManager.getInstance().emitOp('host.prefs.set', { key, value, scope }));
-	}
-	useGridConfigAnswering(prefsBridgeRef.current.store);
-	useEffect(() => {
-		void ConnectionManager.getInstance().request('host.prefs.snapshot', {} as never).then(
-			(snap) => prefsBridgeRef.current?.seed(snap as Record<string, unknown>),
-			() => prefsBridgeRef.current?.seed({})
-		);
-	}, []);
+	// This realm's prefs store — the SHELL partition, mirrored off the
+	// workspace manager (the same lane every framework page uses). Grid
+	// layouts answer synchronously from it, so DataGrid persistence works in
+	// this webview exactly as in the web shell.
+	const shellPrefs = useMemo(() => createMirroredPrefsStore(ConnectionManager.getInstance(), SHELL_PARTITION), []);
+	useGridConfigAnswering(shellPrefs.store);
+	useEffect(() => shellPrefs.dispose, [shellPrefs]);
+
+	// The pipeline EDITOR's own preferences (toolbar position, navigation
+	// mode, per-project canvas layout, the cloud prompt) live in the tool's
+	// partition — not the shell bag. Writes are one key at a time through the
+	// single writer, so two open editors no longer need the old
+	// non-propagation workaround to avoid clobbering each other.
+	const editorPrefs = useMemo(() => createMirroredPrefsStore(ConnectionManager.getInstance(), PIPELINE_PARTITION), []);
+	useEffect(() => editorPrefs.dispose, [editorPrefs]);
 	const getStateRef = useRef<() => ViewState | null>(() => null);
 
 	const handleMessage = useCallback((msg: PipelineHostToWebview) => {
@@ -447,14 +441,6 @@ const PipelineWebview: React.FC = () => {
 			ConnectionManager.getInstance().emitOp('host.pipeline.viewState', { doc: docRef.current, viewState: vs });
 		},
 		[sendMessage, getState, setState]
-	);
-
-	const handlePrefsChange = useCallback(
-		(updatedPrefs: Record<string, unknown>) => {
-			setPrefs((prev) => mergeProjectPreferences(prev, updatedPrefs));
-			ConnectionManager.getInstance().emitOp('host.pipeline.prefsChange', { prefs: updatedPrefs });
-		},
-		[sendMessage]
 	);
 
 	const handleOpenLink = useCallback((url: string, displayName?: string) => {
@@ -665,7 +651,7 @@ const PipelineWebview: React.FC = () => {
 
 	// --- Wait for initial state from host before rendering -------------------
 
-	if (!viewState || !prefs) return null;
+	if (!viewState) return null;
 
 	// --- Render --------------------------------------------------------------
 
@@ -682,14 +668,13 @@ const PipelineWebview: React.FC = () => {
 				isDirty={isDirty}
 				isNew={isNew}
 				initialViewState={viewState}
-				initialPrefs={prefs}
+				prefs={editorPrefs.store}
 				liveLogEvents={liveLogEvents}
 				onContentChanged={handleContentChanged}
 				onValidate={handleValidate}
 				getNodeSchema={handleGetNodeSchema}
 				onPipelineAction={handlePipelineAction}
 				onViewStateChange={handleViewStateChange}
-				onPrefsChange={handlePrefsChange}
 				onOpenLink={handleOpenLink}
 				onOpenCloudSetup={handleOpenCloudSetup}
 				oauthReturnUrl={oauthReturnUrl}

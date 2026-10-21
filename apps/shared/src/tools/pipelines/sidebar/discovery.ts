@@ -37,7 +37,7 @@ import { parsePipelineContent } from '../utils/parse';
 import type { ParsedPipelineFile, ServiceClassInfo } from '../utils/parse';
 // Leaf import: these modules also compile in the VS Code EXTENSION HOST
 // program, which must not resolve the shell's React barrel.
-import type { ToolWorkspaceFs } from 'shell/src/components/workspace/toolWorkspaceFs';
+import type { WorkspaceFs } from 'shell/src/workspace/workspaceFs';
 import type { ProjectEntry } from './types';
 
 /** The globs that are pipeline files. */
@@ -88,7 +88,7 @@ function toRelativePath(fsPath: string, roots: string[]): string {
  * @param onEntries - Receives each fresh entry set (the controller's state).
  * @returns The running loop's handle.
  */
-export function startPipelineDiscovery(fs: ToolWorkspaceFs, options: IPipelineDiscoveryOptions, onEntries: (entries: ProjectEntry[]) => void): IPipelineDiscovery {
+export function startPipelineDiscovery(fs: WorkspaceFs, options: IPipelineDiscoveryOptions, onEntries: (entries: ProjectEntry[]) => void): IPipelineDiscovery {
 	let seq = 0;
 	let stopped = false;
 	let timer: ReturnType<typeof setTimeout> | undefined;

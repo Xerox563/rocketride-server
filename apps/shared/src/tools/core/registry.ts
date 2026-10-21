@@ -84,3 +84,18 @@ export function registerBuiltinTool(tool: BuiltinTool): void {
 export function getBuiltinTools(): readonly BuiltinTool[] {
 	return builtins;
 }
+
+/**
+ * Whether an id names a builtin tool.
+ *
+ * For hosts deciding whether a descriptor LOAD is needed at all — the
+ * builtin's components come from this registry, so there is nothing to
+ * fetch. Which component actually mounts is ToolMount's decision, never a
+ * host's.
+ *
+ * @param appId - The tool id.
+ * @returns True when the id is registered here.
+ */
+export function isBuiltinTool(appId: string): boolean {
+	return builtins.some((t) => t.id === appId);
+}

@@ -86,7 +86,8 @@ export const ProfilerDevTool: React.FC<DevToolProps> = ({ peer, channel }) => {
 	// enablement is the host-published `host:connection` system topic.
 	const toolChannel = useMemo(() => channel ?? createToolChannel(peer), [channel, peer]);
 	const call = useMemo(() => createToolController<ProfilerOps>(peer), [peer]);
-	const ready = useConnectionReady(toolChannel);
+	// Tri-state collapsed at the gate: "no snapshot yet" disables like false.
+	const ready = useConnectionReady(toolChannel) === true;
 	const engine = useMemo<ProfilerEngine>(() => ({
 		ready,
 		call: <T,>(command: string, args?: Record<string, unknown>): Promise<T> =>

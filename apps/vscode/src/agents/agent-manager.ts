@@ -49,7 +49,7 @@ import { WindsurfInstaller } from './windsurf-installer';
 import { CopilotInstaller } from './copilot-installer';
 import { ClaudeMdInstaller } from './claude-md-installer';
 import { AgentsMdInstaller } from './agents-md-installer';
-import { appendGitignoreEntries } from '../shared/util/gitignoreEntries';
+import { appendGitignoreEntries } from 'shared/utils/gitignoreEntries';
 
 const DOCS_DIR = '.rocketride/docs';
 /**

@@ -42,7 +42,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { commonStyles } from '../../themes/styles';
 import { EDITOR_DND_MIME, getEditorDrag } from './Documents';
-import type { Documents, Public, SplitOrientation, SplitPosition } from './Documents';
+import type { DocumentsLike, SplitOrientation, SplitPosition } from './Documents';
 
 // =============================================================================
 // TYPES
@@ -56,7 +56,7 @@ type DropRegion = 'center' | 'left' | 'right' | 'top' | 'bottom';
  */
 export interface DocDropZonesProps {
 	/** The Documents instance to read drag state from and dispatch actions to. */
-	docs: Public<Documents>;
+	docs: DocumentsLike;
 	/** The editor group rendered inside this pane. */
 	groupId: string;
 	/** The pane content (the app's renderPane output). */

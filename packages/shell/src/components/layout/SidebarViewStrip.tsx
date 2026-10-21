@@ -29,18 +29,18 @@ import type { SidebarViewContainer } from '../../types/sidebarChrome';
 /** Where the workbench's per-app state is kept. */
 const MEMORY_KEY = 'rr.shell.workbench';
 
-/** The remembered workbench shape for one app. */
+/** The remembered workbench shape for one app.
+ *
+ *  GEOMETRY ONLY — a first-paint hint, not a system of record. The toolbar
+ *  ORDER is not here: it lives in the global workspace file as the one
+ *  `devToolPins` list (workspace/devToolPins), so it follows the person
+ *  across browsers instead of being per-browser state that silently
+ *  disagrees with the file everything else reads. */
 export interface WorkbenchMemory {
 	/** Panel width in px. */
 	width?: number;
 	/** Whether the panel is open. */
 	open?: boolean;
-	/** The active view container id. */
-	view?: string;
-	/** User-dragged rail order — container ids in display order. Ids it
-	    names render first in that order; anything it doesn't name keeps its
-	    declared position after them. */
-	railOrder?: string[];
 }
 
 /**

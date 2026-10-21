@@ -3,10 +3,21 @@
 // Copyright (c) 2026 Aparavi Software AG
 // =============================================================================
 
-// Make sure react is setup prior to loading shared components
+/**
+ * Rsbuild entry point for the pipeline-editor webview page.
+ */
+
+// React globals BEFORE any shared component is evaluated: ReactFlow expects
+// window.React at module-eval time. This import must stay first.
 import '../setup.react';
 
-import { Pipeline } from './Pipeline';
+// Theme CSS (order matters: default first, then the VS Code overrides that
+// carry the --rr-* tokens, then the page root).
+import 'shell/themes/rocketride-default.css';
+import '../../../themes/rocketride-vscode.css';
+import '../../styles/root.css';
+
+import Pipeline from './PipelineWebview';
 import { mountComponent } from '../../../shared/util/mount';
 import { attachBusRealm } from '../hooks/busRealm';
 

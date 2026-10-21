@@ -30,6 +30,43 @@
  */
 
 // =============================================================================
+// INJECTED DEV BOOT CONFIG
+// =============================================================================
+
+/**
+ * The dev boot config an AUTHORING embedder injects into the page it serves —
+ * the web App Builder's blob-authored preview pages (iframe and debug tab),
+ * and any dev server that templates the HTML it proxies. Presence of the
+ * config IS the dev signal: no `rrdev=1`, no URL convention, no probe — the
+ * party that serves the page states the facts in the page.
+ */
+export interface DevBootConfig {
+	/** The app under development — the page's session-locked identity. */
+	appId: string;
+}
+
+declare global {
+	interface Window {
+		/** Injected dev boot config — present only on authored dev pages. */
+		__rrDevBoot?: DevBootConfig;
+	}
+}
+
+/**
+ * The injected dev boot config, or null when this page was not authored by
+ * a dev embedder. Validated shape: a non-empty string appId.
+ *
+ * @returns The config, or null.
+ */
+export function devBootConfig(): DevBootConfig | null {
+	try {
+		const raw = window.__rrDevBoot;
+		if (raw && typeof raw === 'object' && typeof raw.appId === 'string' && raw.appId) return raw;
+	} catch { /* no window (tests) */ }
+	return null;
+}
+
+// =============================================================================
 // DEV GATE
 // =============================================================================
 
@@ -40,8 +77,9 @@ let gateResult: boolean | undefined;
 /**
  * Whether dev hooks are enabled for this shell session.
  *
- * True when this is a development build (NODE_ENV !== 'production') OR the
- * page URL carries `rrdev=1`. Read once at first call and cached.
+ * True when this is a development build (NODE_ENV !== 'production'), the
+ * page URL carries `rrdev=1`, or the page carries an injected dev boot
+ * config (an authored preview page). Read once at first call and cached.
  *
  * @returns True when dev hooks should be installed.
  */
@@ -56,7 +94,7 @@ export function isDevHooksEnabled(): boolean {
 			// the flavor and the hooks can never disagree.
 			if (!urlFlag) urlFlag = sessionStorage.getItem('rr:dev') === '1';
 		} catch { /* no window/location (tests) — build-mode gate only */ }
-		gateResult = process.env.NODE_ENV !== 'production' || urlFlag;
+		gateResult = process.env.NODE_ENV !== 'production' || urlFlag || devBootConfig() !== null;
 	}
 	return gateResult;
 }

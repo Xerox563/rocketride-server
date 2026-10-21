@@ -62,8 +62,13 @@ export interface ToolTabsSidebar {
 	 * The full dev-tool catalog (installed or not) — the modules button's
 	 * list body, VS Code extensions-view style. Installed state is derived
 	 * from membership in `tools`.
+	 *
+	 * `null` means the host has NO ANSWER yet (fetch in flight, or no
+	 * connected server to ask) and the panel renders "Loading tools…": an
+	 * empty array would otherwise claim this server publishes none, which is
+	 * wrong at exactly the moment the sidebar first opens. Hosts whose
+	 * catalog is synchronous always pass an array.
 	 */
-	available: ToolTab[];
 	/** Opens (or focuses) the tool's frame in the host's editor area. */
 	onOpenTool: (id: string) => void;
 	/**

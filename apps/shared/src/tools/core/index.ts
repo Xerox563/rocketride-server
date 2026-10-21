@@ -28,7 +28,12 @@
 // The comms layer (typed protocol maps, op calls, the host:connection system
 // topic) lives in the shell now — import from 'shell': typedToolChannel,
 // useToolState, useConnectionReady, createToolController, createToolOpServer.
-export { registerBuiltinTool, getBuiltinTools } from './registry';
+export { registerBuiltinTool, getBuiltinTools, isBuiltinTool } from './registry';
 export type { BuiltinTool } from './registry';
 export { ToolHostProvider, useToolHost, createLoopbackPeer } from './ToolContext';
 export type { BuiltinToolServices } from './ToolContext';
+// THE one tool mount, for every host: hosts supply only the descriptor they
+// resolved (see ToolMount's header) — never a mounting policy of their own.
+export { ToolMount } from './ToolMount';
+export type { IToolMountProps, ToolDescriptorSource, ToolDescriptorStatus } from './ToolMount';
+export { useArmedToolPeers } from './useArmedToolPeers';

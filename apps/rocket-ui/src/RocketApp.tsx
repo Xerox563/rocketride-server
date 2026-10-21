@@ -62,10 +62,12 @@ import { useDevToolPins } from './surfaces/devtools/devToolPins';
 import { CodiconExtensions } from 'shared/components/icons/Codicon';
 import { AgentSession } from 'shared/modules/agent/agent';
 import { registerRocketHostOps } from './ops/hostOps';
+import { registerRocketFsOps } from './ops/fsOps';
 
 // This app IS the cloud host: its `host.*` implementations register once at
 // module scope on the root realm's bus (idempotent across remounts).
 registerRocketHostOps();
+registerRocketFsOps();
 
 // =============================================================================
 // STYLES
@@ -143,7 +145,7 @@ const styles = {
 const RocketApp: React.FC<ShellAppProps> = (_props) => {
 	const { client } = useShellConnection();
 	const authUser = useAuthUser();
-	const { loaded, appState, updateAppState, activeAppId, settings } = useWorkspace();
+	const { loaded, appState, updateAppState, flushWorkspaceNow, activeAppId, settings } = useWorkspace();
 	const [ready, setReady] = useState(false);
 
 	// --- Workspace scope (dev team → shared tree) -----------------------------
@@ -306,7 +308,7 @@ const RocketApp: React.FC<ShellAppProps> = (_props) => {
 		};
 
 		// Create the instance — both App and Sidebar will use it
-		const docs = createDocs(vfs, { appState, updateAppState });
+		const docs = createDocs(vfs, { appState, updateAppState, flushNow: flushWorkspaceNow });
 
 		// step: RESTORE-TIME DISCARD POLICY — a pure ALLOWLIST of this host's
 		// LIVE document vocabulary; any restored tab outside it is discarded.
@@ -466,18 +468,10 @@ const RocketAppReady: React.FC<{ docs: import('shell').Documents }> = ({ docs })
 	useEffect(() => {
 		/**
 		 * Listens for the shell's tab:save custom event and saves the active
-		 * document.  Reads state at call time via getDocumentsState().
+		 * document. Documents resolves "active" at call time, so there is no
+		 * stale state to close over.
 		 */
-		const handler = () => {
-			const s = docs.getState();
-			const group = s.groups[s.activeGroupId];
-			if (!group) return;
-			const editorId = group.editorIds[group.activeEditorIndex];
-			if (!editorId) return;
-			const editor = s.editors[editorId];
-			if (!editor) return;
-			docs.saveDocument(editor.documentUri);
-		};
+		const handler = () => { void docs.saveActiveDocument(); };
 		window.addEventListener('tab:save', handler);
 		return () => window.removeEventListener('tab:save', handler);
 	}, []);
@@ -520,7 +514,7 @@ const RocketAppReady: React.FC<{ docs: import('shell').Documents }> = ({ docs })
 					return (
 						<div style={styles.groupPane} onClick={() => docs.setActiveGroup(groupId)}>
 							{/* Tab bar for this group */}
-							<DocTabs docs={docs} groupId={groupId} isActive={state.activeGroupId === groupId} canClose={canCloseGroups} onSplit={(gid, dir) => docs.splitGroupWithDocument(gid, dir)} onCloseGroup={(gid) => docs.closeGroup(gid)} />
+							<DocTabs docs={docs} groupId={groupId} isActive={state.activeGroupId === groupId} canClose={canCloseGroups} onSplit={(gid, dir) => docs.splitGroupWithDocument(gid, dir)} onCloseGroup={(gid) => { void docs.requestCloseGroup(gid); }} />
 
 							{/* Editor content — keep all editors mounted, toggle visibility.
 							    This preserves per-view state (chat history, dropper rows,

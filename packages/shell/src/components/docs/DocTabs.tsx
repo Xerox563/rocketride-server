@@ -33,7 +33,7 @@ import React, { useCallback, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { CSSProperties } from 'react';
 import { EDITOR_DND_MIME, beginEditorDrag, endEditorDrag } from './Documents';
-import type { Documents, Public, SplitOrientation } from './Documents';
+import type { DocumentsLike, SplitOrientation } from './Documents';
 
 // =============================================================================
 // STYLES
@@ -240,8 +240,16 @@ const styles = {
  * Props for the DocTabs component.
  */
 export interface DocTabsProps {
-	/** The Documents instance to read state from and dispatch actions to. */
-	docs: Public<Documents>;
+	/**
+	 * The Documents instance to read state from and dispatch actions to.
+	 *
+	 * The policy-aware verbs are OPTIONAL in this type on purpose: the
+	 * frozen shell contract pins the Documents shape apps were built
+	 * against, so requiring members added later would reject a perfectly
+	 * good instance from a v5-era app. Absence is feature-detected below
+	 * and falls back to the unconditional close.
+	 */
+	docs: DocumentsLike;
 	/** The editor group whose tabs should be rendered. */
 	groupId: string;
 	/** Whether this group is the currently focused group. */
@@ -295,8 +303,15 @@ const DocTabs: React.FC<DocTabsProps> = ({ docs, groupId, isActive = false, canC
 
 	/**
 	 * Handles the close button click on a tab.
-	 * If the document is dirty and an onDirtyClose callback is provided,
-	 * delegates to the callback. Otherwise closes the editor directly.
+	 *
+	 * An app that passes `onDirtyClose` owns the decision for a dirty
+	 * document (the pre-existing contract). Otherwise the close goes
+	 * through requestCloseEditor, which applies the Documents instance's
+	 * dirty-close policy — the shell's Save/Discard/Cancel dialog by
+	 * default, and NEVER a silent discard.
+	 *
+	 * Note it asks only when this is the LAST view of the document; a split
+	 * view closes without ceremony because nothing is lost.
 	 *
 	 * @param e        - Mouse event (stopped to prevent tab activation).
 	 * @param editorId - The editor to close.
@@ -309,6 +324,10 @@ const DocTabs: React.FC<DocTabsProps> = ({ docs, groupId, isActive = false, canC
 		// If dirty and callback provided, delegate for confirmation
 		if (doc?.dirty && onDirtyClose) {
 			onDirtyClose(editorId, editor.documentUri);
+			return;
+		}
+		if (docs.requestCloseEditor) {
+			void docs.requestCloseEditor(editorId);
 			return;
 		}
 		docs.closeEditor(editorId);

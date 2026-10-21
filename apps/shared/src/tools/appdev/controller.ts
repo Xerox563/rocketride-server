@@ -29,7 +29,7 @@ import { APP_BINDING_WATCH_GLOBS, APP_RESCAN_DEBOUNCE_MS, buildWorkspaceAppRows 
 import type { IWorkspaceAppRow } from './scan';
 // Leaf import: these modules also compile in the VS Code EXTENSION HOST
 // program, which must not resolve the shell's React barrel.
-import type { ToolWorkspaceFs } from 'shell/src/components/workspace/toolWorkspaceFs';
+import type { WorkspaceFs } from 'shell/src/workspace/workspaceFs';
 
 /**
  * Runs the AppDev controller's discovery loop against a host's workspace-FS
@@ -41,7 +41,7 @@ import type { ToolWorkspaceFs } from 'shell/src/components/workspace/toolWorkspa
  * @param onRows - Receives each fresh row set (the controller's state).
  * @returns Stop — cancels the watch, the debounce, and any in-flight scan.
  */
-export function startWorkspaceAppDiscovery(fs: ToolWorkspaceFs, onRows: (rows: IWorkspaceAppRow[]) => void): () => void {
+export function startWorkspaceAppDiscovery(fs: WorkspaceFs, onRows: (rows: IWorkspaceAppRow[]) => void): () => void {
 	let seq = 0;
 	let timer: ReturnType<typeof setTimeout> | undefined;
 

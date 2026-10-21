@@ -55,6 +55,7 @@ import { registerAndMapApps, resolveServerEntry, getRegisteredEntry, invalidateA
 import { getAppVersionOverrides, setAppVersionOverride, versionedEntryUrl } from '../../util/versionOverride';
 import type { ServerAppEntry } from '../../util/appLoader';
 import { waitForEmbeddedSession } from '../../util/devMode';
+import { devBootConfig } from '../../util/devGate';
 
 // =============================================================================
 // STYLES
@@ -208,8 +209,11 @@ const Shell: React.FC<ShellProps> = ({ config }) => {
 
 	// ── Session-locked app ────────────────────────────────────────────────
 	const [sessionAppId] = useState<string>(() => {
+		// Authored preview pages (blob-served by the App Builder) carry their
+		// identity in the injected dev boot config — there is no URL to read.
+		const injected = devBootConfig()?.appId ?? '';
 		const params = new URLSearchParams(window.location.search);
-		const fromUrl = params.get('appId') || params.get('appid') || '';
+		const fromUrl = injected || params.get('appId') || params.get('appid') || '';
 		if (fromUrl) {
 			cm.setSessionAppId(fromUrl);
 			return fromUrl;

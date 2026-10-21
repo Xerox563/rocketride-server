@@ -158,11 +158,24 @@ export function createSidebarBusPeer(appId: string, cm: IBusPeerBus): Peer {
 	// ── Sidebar mount delivery (hold until the mount subscribes) ────────────
 	let sidebarCb: ((message: unknown) => void) | null = null;
 	const holdToSidebar: unknown[] = [];
+	// One mount request per HOLD PERIOD, not one per message: a frame that
+	// fires a burst of calls at an unmounted controller (the monitor's two
+	// grids paging at once) must ask for the mount once. Reset when a
+	// controller subscribes, so a later unmount can summon again.
+	let sidebarSummoned = false;
 	const deliverToSidebar = (message: unknown): void => {
-		if (sidebarCb) sidebarCb(message);
-		else {
-			holdToSidebar.push(message);
-			if (holdToSidebar.length > TOOL_RELAY_BUFFER_LIMIT) holdToSidebar.shift();
+		if (sidebarCb) {
+			sidebarCb(message);
+			return;
+		}
+		// HOLD: the peer exists (the host arms one per pinned tool) but no
+		// controller has mounted — the lazy-mount case. Keep the message and
+		// ask the host for the mount; it replays on subscribe.
+		holdToSidebar.push(message);
+		if (holdToSidebar.length > TOOL_RELAY_BUFFER_LIMIT) holdToSidebar.shift();
+		if (!sidebarSummoned) {
+			sidebarSummoned = true;
+			cm.emitOp('host.mountToolSidebar', { appId });
 		}
 	};
 
@@ -217,6 +230,8 @@ export function createSidebarBusPeer(appId: string, cm: IBusPeerBus): Peer {
 		},
 		subscribe(cb) {
 			sidebarCb = cb;
+			// The controller is here; a later hold summons again.
+			sidebarSummoned = false;
 			// The retained last frame payload replays via the root on this
 			// subscription (remount render without a handshake).
 			const offLast = cm.subscribe(t.lastToSidebar, (snapshot) => {

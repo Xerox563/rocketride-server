@@ -67,10 +67,10 @@ class MockBase implements IWorkspaceFileSystem {
 		return this.files.get(path);
 	}
 
-	async readMany(paths: string[]): Promise<Map<string, unknown>> {
-		const out = new Map<string, unknown>();
+	async readMany(paths: string[]): Promise<Record<string, unknown>> {
+		const out: Record<string, unknown> = {};
 		for (const p of paths) {
-			try { out.set(p, await this.read(p)); } catch { /* omitted */ }
+			try { out[p] = await this.read(p); } catch { /* omitted */ }
 		}
 		return out;
 	}
@@ -498,9 +498,77 @@ test('write-through mode passes mutations to the base', async () => {
 	assert.equal(base.files.get('f.ts'), 'direct');
 	assert.equal(fs.hasPendingChanges(), false);
 	// and refuses to re-enter write-through with pending changes
-	fs.setWriteThrough(false);
+	// (async per the WorkspaceFs contract — a refusal is a rejection)
+	await fs.setWriteThrough(false);
 	await fs.write('g.ts', 'staged');
-	assert.throws(() => fs.setWriteThrough(true));
+	await assert.rejects(() => fs.setWriteThrough(true));
+});
+
+test('onMutate announces staged mutations with their origin; write-through and no-ops stay silent', async () => {
+	const fired: Array<{ path: string; origin?: string }> = [];
+	const base = new MockBase();
+	base.files.set('apps/x/a.ts', 'A');
+	base.files.set('apps/x/gone.ts', 'G');
+	const fs = new StagedFileSystem(base, null, { onMutate: (path, origin) => fired.push({ path, origin }) });
+
+	// Staged write → one announcement, origin preserved.
+	await fs.write('apps/x/a.ts', 'edited', 'editor');
+	assert.deepEqual(fired, [{ path: 'apps/x/a.ts', origin: 'editor' }]);
+
+	// Round-trip back to the below-state erases the entry AND announces
+	// (the view's content changed back); a pure no-op save stays silent.
+	fired.length = 0;
+	await fs.write('apps/x/a.ts', 'A', 'editor');
+	assert.deepEqual(fired, [{ path: 'apps/x/a.ts', origin: 'editor' }]);
+	fired.length = 0;
+	await fs.write('apps/x/a.ts', 'A', 'editor');
+	assert.deepEqual(fired, []);
+
+	// Delete and mkdir announce.
+	await fs.delete('apps/x/gone.ts', 'editor');
+	await fs.mkdir('apps/x/sub');
+	assert.deepEqual(fired, [{ path: 'apps/x/gone.ts', origin: 'editor' }, { path: 'apps/x/sub', origin: undefined }]);
+
+	// Rename announces BOTH ends, origin riding each half.
+	fired.length = 0;
+	await fs.write('apps/x/from.ts', 'F');
+	fired.length = 0;
+	await fs.rename('apps/x/from.ts', 'apps/x/to.ts', 'editor');
+	assert.deepEqual(fired, [{ path: 'apps/x/from.ts', origin: 'editor' }, { path: 'apps/x/to.ts', origin: 'editor' }]);
+
+	// Discard announces every path the dropped layers touched — the
+	// effective content reverted with NO base write, so this is the only
+	// signal per-path consumers (editor models) get. (Clear the layer
+	// first: discard-all announces EVERYTHING staged above, by design.)
+	await fs.discard();
+	fired.length = 0;
+	await fs.write('apps/x/one.ts', '1');
+	await fs.write('apps/x/two.ts', '2');
+	fired.length = 0;
+	await fs.discard();
+	assert.deepEqual(fired.map((f) => f.path).sort(), ['apps/x/one.ts', 'apps/x/two.ts']);
+
+	// discard(path) announces just that path; rollback announces the
+	// dropped layers' paths.
+	fired.length = 0;
+	await fs.write('apps/x/keep.ts', 'K');
+	const cp = await fs.checkpoint('cp');
+	assert.ok(cp);
+	await fs.write('apps/x/later.ts', 'L');
+	fired.length = 0;
+	await fs.rollback(cp as string);
+	assert.deepEqual(fired.map((f) => f.path), ['apps/x/later.ts']);
+	fired.length = 0;
+	await fs.discard('apps/x/keep.ts');
+	assert.deepEqual(fired.map((f) => f.path), ['apps/x/keep.ts']);
+
+	// Write-through mode delegates to the base (the backend announces
+	// physical writes itself) — the hook stays silent.
+	await fs.discard();
+	await fs.setWriteThrough(true);
+	fired.length = 0;
+	await fs.write('apps/x/a.ts', 'direct');
+	assert.deepEqual(fired, []);
 });
 
 test('write-through save is freshness-gated: a moved base refuses the save', async () => {

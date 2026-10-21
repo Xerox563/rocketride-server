@@ -44,175 +44,219 @@
 import { registerOpHandlers } from './busOps';
 import type { IOpBus } from './busOps';
 import type { ShellOpMap, ShellOpSpec, ShellOpParams, ShellOpResult } from './busOps';
+// Type-only: erased at compile time, so the ext-host build (no DOM/jsx) and
+// every webview bundle carry no runtime dependency on the SDK package here.
+import type { RocketRideClient } from 'rocketride';
+import type { AppManifestEntry } from '../components/workspace/types';
 
-/** A monitor key as the SDK takes it. */
-export type ClientMonitorKey = { token: string } | { projectId: string; source: string; teamId?: string; pipeId?: number; runKind?: 'dev' | 'deploy' };
+// ── SDK-derived typing ───────────────────────────────────────────────────────
+// RESULTS DERIVE FROM THE SDK'S OWN SIGNATURES. When an SDK method's shape
+// changes, this map — and therefore the frozen shell contract — fails to
+// compile, instead of a realm discovering the drift at runtime. PARAMS stay
+// hand-written where the wire flattens positional SDK arguments into one
+// JSON object (the mapping is the impl's job and is compile-checked there);
+// they derive where the SDK already takes one options bag.
+type C = RocketRideClient;
+type Acct = C['account'];
+type Bill = C['billing'];
+type Dep = C['deploy'];
+type LogFam = C['log'];
+/** One SDK method's resolved (awaited) result. */
+type R<M extends (...args: never[]) => unknown> = Awaited<ReturnType<M>>;
+/** An SDK method's first/second parameter (NonNullable: optional bags are
+ *  required on the wire — an op call always carries a params object). */
+type P0<M extends (...args: never[]) => unknown> = NonNullable<Parameters<M>[0]>;
+type P1<M extends (...args: never[]) => unknown> = NonNullable<Parameters<M>[1]>;
+
+/** A monitor key — exactly what the SDK's addMonitor takes. */
+export type ClientMonitorKey = Parameters<C['addMonitor']>[0];
 
 /**
- * The brokered client vocabulary. Results are typed loosely where the SDK
- * shape is pass-through — tightening is incremental and local.
+ * The brokered client vocabulary, strictly typed. The remaining `unknown`s
+ * are deliberate and documented inline: generic-erased SDK results and raw
+ * polymorphic wire verbs — nothing else.
  */
 export interface ClientOpMap extends ShellOpMap {
 	// ── Dashboard / tasks ────────────────────────────────────────────────────
-	'client.getDashboard': ShellOpSpec<Record<string, never>, unknown>;
-	'client.listTasks': ShellOpSpec<Record<string, unknown>, unknown>;
-	'client.listConnections': ShellOpSpec<Record<string, unknown>, unknown>;
-	'client.getTasks': ShellOpSpec<Record<string, never>, unknown>;
-	'client.getTaskToken': ShellOpSpec<{ projectId: string; source: string; teamId?: string }, unknown>;
-	'client.getTaskPipeline': ShellOpSpec<{ token: string }, unknown>;
-	'client.getTaskStatus': ShellOpSpec<{ token: string; timeout?: number }, unknown>;
-	'client.terminate': ShellOpSpec<{ token: string }, unknown>;
-	'client.use': ShellOpSpec<Record<string, unknown>, unknown>;
-	'client.restart': ShellOpSpec<Record<string, unknown>, unknown>;
-	'client.validate': ShellOpSpec<Record<string, unknown>, unknown>;
-	'client.tool': ShellOpSpec<{ token: string; tool: string; nodeId?: string; input?: unknown; timeout?: number }, unknown>;
+	'client.getDashboard': ShellOpSpec<Record<string, never>, R<C['getDashboard']>>;
+	'client.listTasks': ShellOpSpec<P0<C['listTasks']>, R<C['listTasks']>>;
+	'client.listConnections': ShellOpSpec<P0<C['listConnections']>, R<C['listConnections']>>;
+	'client.getTasks': ShellOpSpec<Record<string, never>, R<C['getTasks']>>;
+	'client.getTaskToken': ShellOpSpec<P0<C['getTaskToken']>, R<C['getTaskToken']>>;
+	'client.getTaskPipeline': ShellOpSpec<{ token: string }, R<C['getTaskPipeline']>>;
+	'client.getTaskStatus': ShellOpSpec<{ token: string; timeout?: number }, R<C['getTaskStatus']>>;
+	'client.terminate': ShellOpSpec<{ token: string }, R<C['terminate']>>;
+	'client.use': ShellOpSpec<P0<C['use']>, R<C['use']>>;
+	'client.restart': ShellOpSpec<P0<C['restart']>, R<C['restart']>>;
+	'client.validate': ShellOpSpec<P0<C['validate']>, R<C['validate']>>;
+	/** Result stays `unknown`: the SDK's `tool<T = any>` erases its return
+	 *  type — there is nothing to derive; callers narrow at the edge. */
+	'client.tool': ShellOpSpec<P0<C['tool']>, unknown>;
 
 	// ── Monitors (broker-owned in multi-realm hosts) ─────────────────────────
-	'client.addMonitor': ShellOpSpec<{ key: ClientMonitorKey; types: string[] }, void>;
-	'client.removeMonitor': ShellOpSpec<{ key: ClientMonitorKey; types: string[] }, void>;
+	'client.addMonitor': ShellOpSpec<{ key: ClientMonitorKey; types: string[] }, R<C['addMonitor']>>;
+	'client.removeMonitor': ShellOpSpec<{ key: ClientMonitorKey; types: string[] }, R<C['removeMonitor']>>;
 
 	// ── File store (JSON-safe payloads; see header's binary rule) ────────────
-	'client.fsListDir': ShellOpSpec<{ path: string }, unknown>;
-	'client.fsStat': ShellOpSpec<{ path: string }, unknown>;
-	'client.fsGetUrl': ShellOpSpec<{ path: string; expiresIn?: number; downloadName?: string }, string>;
-	'client.fsReadString': ShellOpSpec<{ path: string }, string>;
-	'client.fsWriteString': ShellOpSpec<{ path: string; text: string }, unknown>;
+	'client.fsListDir': ShellOpSpec<{ path: string }, R<C['fsListDir']>>;
+	'client.fsStat': ShellOpSpec<{ path: string }, R<C['fsStat']>>;
+	'client.fsGetUrl': ShellOpSpec<{ path: string; expiresIn?: number; downloadName?: string }, R<C['fsGetUrl']>>;
+	'client.fsReadString': ShellOpSpec<{ path: string }, R<C['fsReadString']>>;
+	'client.fsWriteString': ShellOpSpec<{ path: string; text: string }, R<C['fsWriteString']>>;
+	/** JSON file contents — `unknown` IS the honest type (schemaless). */
 	'client.fsReadJson': ShellOpSpec<{ path: string }, unknown>;
-	'client.fsWriteJson': ShellOpSpec<{ path: string; value: unknown }, unknown>;
-	'client.fsRename': ShellOpSpec<{ from: string; to: string }, unknown>;
-	'client.fsDelete': ShellOpSpec<{ path: string }, unknown>;
-	'client.fsMkdir': ShellOpSpec<{ path: string }, unknown>;
-	'client.fsRmdir': ShellOpSpec<{ path: string; recursive?: boolean }, unknown>;
-	'client.fsOpen': ShellOpSpec<{ path: string; mode: string }, unknown>;
-	'client.fsWrite': ShellOpSpec<{ handle: unknown; dataB64: string }, unknown>;
-	'client.fsClose': ShellOpSpec<{ handle: unknown; mode?: string }, unknown>;
+	'client.fsWriteJson': ShellOpSpec<{ path: string; value: unknown }, R<C['fsWriteJson']>>;
+	'client.fsRename': ShellOpSpec<{ from: string; to: string }, R<C['fsRename']>>;
+	'client.fsDelete': ShellOpSpec<{ path: string }, R<C['fsDelete']>>;
+	'client.fsMkdir': ShellOpSpec<{ path: string }, R<C['fsMkdir']>>;
+	'client.fsRmdir': ShellOpSpec<{ path: string; recursive?: boolean }, R<C['fsRmdir']>>;
+	'client.fsOpen': ShellOpSpec<{ path: string; mode: 'r' | 'w' }, R<C['fsOpen']>>;
+	'client.fsWrite': ShellOpSpec<{ handle: string; dataB64: string }, R<C['fsWrite']>>;
+	'client.fsClose': ShellOpSpec<{ handle: string; mode: 'r' | 'w' }, R<C['fsClose']>>;
 
 	// ── Profiler (params use the wire's snake_case keys; the SDK methods
 	//    take POSITIONAL args, so the impls destructure — never pass `p`
 	//    wholesale or the dict nests under `target`) ──────────────────────────
-	'client.cprofileStart': ShellOpSpec<{ target?: string | null; session?: Record<string, unknown> }, unknown>;
-	'client.cprofileStop': ShellOpSpec<{ target?: string | null }, unknown>;
-	'client.cprofileStatus': ShellOpSpec<{ target?: string | null }, unknown>;
-	'client.cprofileReport': ShellOpSpec<{ target?: string | null }, unknown>;
-	'client.cprofileReportTree': ShellOpSpec<{ target?: string | null; max_depth?: number; min_pct?: number; include_system?: boolean; thread?: number | null }, unknown>;
-	'client.cprofileThreads': ShellOpSpec<{ target?: string | null }, unknown>;
+	/** NOTE: `session` is a STRING per the SDK — the old loose spec said
+	 *  `Record<string, unknown>`, a drift this typing now makes impossible. */
+	'client.cprofileStart': ShellOpSpec<{ target?: string | null; session?: string }, R<C['cprofileStart']>>;
+	'client.cprofileStop': ShellOpSpec<{ target?: string | null }, R<C['cprofileStop']>>;
+	'client.cprofileStatus': ShellOpSpec<{ target?: string | null }, R<C['cprofileStatus']>>;
+	'client.cprofileReport': ShellOpSpec<{ target?: string | null }, R<C['cprofileReport']>>;
+	'client.cprofileReportTree': ShellOpSpec<{ target?: string | null; max_depth?: number; min_pct?: number; include_system?: boolean; thread?: number | null }, R<C['cprofileReportTree']>>;
+	'client.cprofileThreads': ShellOpSpec<{ target?: string | null }, R<C['cprofileThreads']>>;
 
-	'client.getService': ShellOpSpec<{ service: string }, unknown>;
+	'client.getService': ShellOpSpec<{ service: string }, R<C['getService']>>;
 
 	// ── Account (env autocomplete) ───────────────────────────────────────────
-	'client.getEnvironmentKeys': ShellOpSpec<Record<string, never>, unknown>;
+	'client.getEnvironmentKeys': ShellOpSpec<Record<string, never>, R<Acct['getEnvironmentKeys']>>;
 
 	// ── Deploy lifecycle (publish/deploy/schedules — team-scoped) ────────────
-	'client.deploy.list': ShellOpSpec<Record<string, never>, unknown>;
-	'client.deploy.versions': ShellOpSpec<{ projectId: string }, unknown>;
-	'client.deploy.get': ShellOpSpec<{ projectId: string; teamId: string }, unknown>;
-	'client.deploy.artifact': ShellOpSpec<{ projectId: string; version: number }, unknown>;
-	'client.deploy.history': ShellOpSpec<{ projectId: string; teamId?: string; page?: number; pageSize?: number }, unknown>;
-	'client.deploy.deploy': ShellOpSpec<{ projectId: string; version: number; teamId: string }, unknown>;
-	'client.deploy.disable': ShellOpSpec<{ projectId: string; teamId: string }, unknown>;
-	'client.deploy.enable': ShellOpSpec<{ projectId: string; teamId: string }, unknown>;
-	'client.deploy.remove': ShellOpSpec<{ projectId: string; teamId: string }, unknown>;
-	'client.deploy.run': ShellOpSpec<{ projectId: string; sourceId: string; teamId: string }, unknown>;
+	'client.deploy.list': ShellOpSpec<Record<string, never>, R<Dep['list']>>;
+	'client.deploy.versions': ShellOpSpec<{ projectId: string }, R<Dep['versions']>>;
+	'client.deploy.get': ShellOpSpec<{ projectId: string; teamId: string }, R<Dep['get']>>;
+	'client.deploy.artifact': ShellOpSpec<{ projectId: string; version: number }, R<Dep['artifact']>>;
+	'client.deploy.history': ShellOpSpec<{ projectId: string; teamId?: string; page?: number; pageSize?: number }, R<Dep['history']>>;
+	'client.deploy.deploy': ShellOpSpec<{ projectId: string; version: number; teamId: string }, R<Dep['deploy']>>;
+	'client.deploy.disable': ShellOpSpec<{ projectId: string; teamId: string }, R<Dep['disable']>>;
+	'client.deploy.enable': ShellOpSpec<{ projectId: string; teamId: string }, R<Dep['enable']>>;
+	'client.deploy.remove': ShellOpSpec<{ projectId: string; teamId: string }, R<Dep['remove']>>;
+	'client.deploy.run': ShellOpSpec<{ projectId: string; sourceId: string; teamId: string }, R<Dep['run']>>;
 	/** cron=null clears the schedule; ttl rides options. */
-	'client.deploy.setSchedule': ShellOpSpec<{ projectId: string; sourceId: string; cron: string | null; teamId: string; ttl?: number }, unknown>;
-	'client.deploy.pauseSchedule': ShellOpSpec<{ projectId: string; sourceId: string; teamId: string }, unknown>;
-	'client.deploy.resumeSchedule': ShellOpSpec<{ projectId: string; sourceId: string; teamId: string }, unknown>;
-	'client.deploy.setSourceConfig': ShellOpSpec<{ projectId: string; sourceId: string; teamId: string; traceLevel?: string; debugOut?: boolean }, unknown>;
-	'client.deploy.preview': ShellOpSpec<{ cron: string; count: number }, unknown>;
+	'client.deploy.setSchedule': ShellOpSpec<{ projectId: string; sourceId: string; cron: string | null; teamId: string; ttl?: number }, R<Dep['setSchedule']>>;
+	'client.deploy.pauseSchedule': ShellOpSpec<{ projectId: string; sourceId: string; teamId: string }, R<Dep['pauseSchedule']>>;
+	'client.deploy.resumeSchedule': ShellOpSpec<{ projectId: string; sourceId: string; teamId: string }, R<Dep['resumeSchedule']>>;
+	'client.deploy.setSourceConfig': ShellOpSpec<{ projectId: string; sourceId: string; teamId: string; traceLevel?: string; debugOut?: boolean }, R<Dep['setSourceConfig']>>;
+	'client.deploy.preview': ShellOpSpec<{ cron: string; count: number }, R<Dep['preview']>>;
 	/** The server task registry's raw rows (ownerKind/ownerId/runKind/teamId
 	 *  carried) — the deploy drawers' live-run scan. A NAMED allowlist entry
-	 *  over the one extension command (never a generic call passthrough). */
-	'client.listRunningTasks': ShellOpSpec<Record<string, never>, unknown>;
+	 *  over the one extension command (never a generic call passthrough).
+	 *  Raw wire verb — the body shape is the server's, typed to what every
+	 *  consumer reads. */
+	'client.listRunningTasks': ShellOpSpec<Record<string, never>, { tasks?: Array<Record<string, unknown>> }>;
 
 	// ── App store lifecycle (the App Builder's pure-SDK half — shared by both
 	//    hosts' App Builder surfaces; see apps/shared tools/appdev). Version-
 	//    taking impls re-validate at runtime: the typed map gives NO runtime
 	//    guarantee at a process boundary, and Number(null)/Number('') coerce
 	//    to 0 ("unspecified version") on the wire. ─────────────────────────────
-	'client.app.listDeployments': ShellOpSpec<{ appId: string }, unknown>;
-	'client.app.where': ShellOpSpec<{ appId: string }, unknown>;
-	'client.app.submit': ShellOpSpec<{ appId: string; version: number }, unknown>;
-	'client.app.publish': ShellOpSpec<{ appId: string; version: number; target: string }, unknown>;
-	'client.app.withdraw': ShellOpSpec<{ appId: string; version: number }, unknown>;
-	'client.app.removePublish': ShellOpSpec<{ appId: string; target: string }, unknown>;
-	'client.app.buildLog': ShellOpSpec<{ appId: string; version: number }, unknown>;
-	'client.app.reply': ShellOpSpec<{ appId: string; message: string; version?: number }, unknown>;
-	/** Wraps the one extension command (named allowlist entries, never a
-	 *  generic passthrough). */
-	'client.app.developerStatus': ShellOpSpec<Record<string, never>, unknown>;
-	'client.app.developerRegister': ShellOpSpec<{ developerId: string }, unknown>;
+	'client.app.listDeployments': ShellOpSpec<{ appId: string }, R<C['listDeployments']>>;
+	'client.app.where': ShellOpSpec<{ appId: string }, R<C['whereApp']>>;
+	'client.app.submit': ShellOpSpec<{ appId: string; version: number }, R<C['submitApp']>>;
+	'client.app.publish': ShellOpSpec<{ appId: string; version: number; target: string }, R<C['publishApp']>>;
+	'client.app.withdraw': ShellOpSpec<{ appId: string; version: number }, R<C['withdrawApp']>>;
+	'client.app.removePublish': ShellOpSpec<{ appId: string; target: string }, R<C['removeAppPublish']>>;
+	'client.app.buildLog': ShellOpSpec<{ appId: string; version: number }, R<C['buildLog']>>;
+	'client.app.reply': ShellOpSpec<{ appId: string; message: string; version?: number }, R<C['replyApp']>>;
+	/** Raw wire verb (no SDK method): the server returns exactly these keys
+	 *  on BOTH editions (OSS base.py + SaaS app_handler). */
+	'client.app.developerStatus': ShellOpSpec<Record<string, never>, { developerId: string | null; stripeAccountId: string | null; stripeAccountStatus: string }>;
+	/** The marketplace walk (`rrext_app list`): every app the caller can
+	 *  reach on the @me/@team/@public rails. THE app catalog — pickers and
+	 *  store surfaces call this; the account list (desktop-only on SaaS)
+	 *  and the MF registration list are never catalogs. Rows are manifest-
+	 *  shaped; `category`/`search` are documented on the wire but implemented
+	 *  by no edition yet — filter client-side. */
+	'client.app.list': ShellOpSpec<{ offset?: number; limit?: number; search?: string; category?: string; shell?: string }, { apps: AppManifestEntry[]; total?: number; offset?: number; limit?: number }>;
+	/** Raw wire verb — the server's confirmed body (app_handler.py). */
+	'client.app.developerRegister': ShellOpSpec<{ developerId: string }, { developerId: string; orgId: string }>;
 
 	// ── Run-log sessions (the DVR) — stateful SDK streams brokered by id.
 	//    The REALM allocates the sessionId (globally unique) and registers
 	//    `log.event.<sessionId>` as ITS op; the broker's play loop emits
 	//    items into it (registration-is-routing — no new push machinery).
 	//    A reused id releases its old stream first (leak guard). ─────────────
-	'client.log.chapters': ShellOpSpec<{ projectId: string; source: string; teamId?: string }, unknown>;
+	'client.log.chapters': ShellOpSpec<{ projectId: string; source: string; teamId?: string }, R<LogFam['chapters']>>;
 	'client.log.openStream': ShellOpSpec<{ sessionId: string; projectId: string; source: string; teamId?: string }, void>;
 	/** seek/getStatus/getTrace — gated on the runtime allowlist (the typed
-	 *  map gives NO runtime guarantee at a process boundary). */
+	 *  map gives NO runtime guarantee at a process boundary). Result stays
+	 *  `unknown`: it is the union of three methods' returns, dispatched by a
+	 *  runtime string — callers narrow per method. */
 	'client.log.streamCall': ShellOpSpec<{ sessionId: string; method: 'seek' | 'getStatus' | 'getTrace'; args: unknown[] }, unknown>;
 	/** LONG-LIVED: resolves at STREAM COMPLETION, not at start — callers pass
 	 *  an explicit generous timeoutMs. pos=null means resume-from-position. */
 	'client.log.streamPlay': ShellOpSpec<{ sessionId: string; pos: number | 'live' | null; speed: number }, void>;
 	'client.log.streamPause': ShellOpSpec<{ sessionId: string }, void>;
+	/** `event` is a live engine event forwarded verbatim — schemaless. */
 	'client.log.streamIngest': ShellOpSpec<{ sessionId: string; event: unknown }, void>;
 	'client.log.streamClose': ShellOpSpec<{ sessionId: string }, void>;
 
 	// ── Account (profile / org / members / teams / keys / env) ──────────────
-	'client.account.getProfile': ShellOpSpec<Record<string, never>, unknown>;
-	'client.account.updateProfile': ShellOpSpec<{ fields: Record<string, unknown> }, unknown>;
-	'client.account.setDevTeam': ShellOpSpec<{ teamId: string }, unknown>;
-	'client.account.setDefaultOrg': ShellOpSpec<{ orgId: string }, unknown>;
-	'client.account.deleteAccount': ShellOpSpec<Record<string, never>, unknown>;
-	'client.account.getOrg': ShellOpSpec<{ orgId?: string }, unknown>;
-	'client.account.updateOrgName': ShellOpSpec<{ orgId: string; name: string }, unknown>;
-	'client.account.listKeys': ShellOpSpec<Record<string, never>, unknown>;
-	'client.account.createKey': ShellOpSpec<{ params: Record<string, unknown> }, unknown>;
-	'client.account.revokeKey': ShellOpSpec<{ keyId: string }, unknown>;
-	'client.account.listMembers': ShellOpSpec<{ orgId: string }, unknown>;
-	'client.account.inviteMember': ShellOpSpec<{ orgId: string; params: Record<string, unknown> }, unknown>;
-	'client.account.updateMemberRole': ShellOpSpec<{ orgId: string; userId: string; role: string }, unknown>;
-	'client.account.removeMember': ShellOpSpec<{ orgId: string; userId: string }, unknown>;
-	'client.account.resendInvite': ShellOpSpec<{ orgId: string; userId: string }, unknown>;
-	'client.account.listTeams': ShellOpSpec<{ orgId: string }, unknown>;
-	'client.account.getTeamDetail': ShellOpSpec<{ orgId: string; teamId: string }, unknown>;
-	'client.account.createTeam': ShellOpSpec<{ orgId: string; name: string }, unknown>;
-	'client.account.deleteTeam': ShellOpSpec<{ orgId: string; teamId: string }, unknown>;
-	'client.account.addTeamMember': ShellOpSpec<{ orgId: string; params: Record<string, unknown> }, unknown>;
-	'client.account.updateTeamMemberPerms': ShellOpSpec<{ orgId: string; params: Record<string, unknown> }, unknown>;
-	'client.account.removeTeamMember': ShellOpSpec<{ orgId: string; params: Record<string, unknown> }, unknown>;
+	'client.account.getProfile': ShellOpSpec<Record<string, never>, R<Acct['getProfile']>>;
+	'client.account.updateProfile': ShellOpSpec<{ fields: P0<Acct['updateProfile']> }, R<Acct['updateProfile']>>;
+	'client.account.setDevTeam': ShellOpSpec<{ teamId: string }, R<Acct['setDevTeam']>>;
+	'client.account.setDefaultOrg': ShellOpSpec<{ orgId: string }, R<Acct['setDefaultOrg']>>;
+	'client.account.deleteAccount': ShellOpSpec<Record<string, never>, R<Acct['deleteAccount']>>;
+	'client.account.getOrg': ShellOpSpec<{ orgId?: string }, R<Acct['getOrg']>>;
+	'client.account.updateOrgName': ShellOpSpec<{ orgId: string; name: string }, R<Acct['updateOrgName']>>;
+	'client.account.listKeys': ShellOpSpec<Record<string, never>, R<Acct['listKeys']>>;
+	'client.account.createKey': ShellOpSpec<{ params: P0<Acct['createKey']> }, R<Acct['createKey']>>;
+	'client.account.revokeKey': ShellOpSpec<{ keyId: string }, R<Acct['revokeKey']>>;
+	'client.account.listMembers': ShellOpSpec<{ orgId: string }, R<Acct['listMembers']>>;
+	'client.account.inviteMember': ShellOpSpec<{ orgId: string; params: P1<Acct['inviteMember']> }, R<Acct['inviteMember']>>;
+	'client.account.updateMemberRole': ShellOpSpec<{ orgId: string; userId: string; role: string }, R<Acct['updateMemberRole']>>;
+	'client.account.removeMember': ShellOpSpec<{ orgId: string; userId: string }, R<Acct['removeMember']>>;
+	'client.account.resendInvite': ShellOpSpec<{ orgId: string; userId: string }, R<Acct['resendInvite']>>;
+	'client.account.listTeams': ShellOpSpec<{ orgId: string }, R<Acct['listTeams']>>;
+	'client.account.getTeamDetail': ShellOpSpec<{ orgId: string; teamId: string }, R<Acct['getTeamDetail']>>;
+	'client.account.createTeam': ShellOpSpec<{ orgId: string; name: string }, R<Acct['createTeam']>>;
+	'client.account.deleteTeam': ShellOpSpec<{ orgId: string; teamId: string }, R<Acct['deleteTeam']>>;
+	'client.account.addTeamMember': ShellOpSpec<{ orgId: string; params: P1<Acct['addTeamMember']> }, R<Acct['addTeamMember']>>;
+	'client.account.updateTeamMemberPerms': ShellOpSpec<{ orgId: string; params: P1<Acct['updateTeamMemberPerms']> }, R<Acct['updateTeamMemberPerms']>>;
+	'client.account.removeTeamMember': ShellOpSpec<{ orgId: string; params: P1<Acct['removeTeamMember']> }, R<Acct['removeTeamMember']>>;
 	// Env ops carry an optional CONNECTION dimension: a multi-connection host
 	// (VS Code dev/deploy) pre-registers its own slot-resolving handlers; the
 	// shared entries below serve single-connection roots and ignore it.
-	'client.account.getEnv': ShellOpSpec<{ scope: 'org' | 'team' | 'user'; scopeId?: string; connection?: 'dev' | 'deploy' }, unknown>;
-	'client.account.setEnv': ShellOpSpec<{ scope: 'org' | 'team' | 'user'; env: Record<string, string>; scopeId?: string; connection?: 'dev' | 'deploy' }, unknown>;
+	'client.account.getEnv': ShellOpSpec<{ scope: 'org' | 'team' | 'user'; scopeId?: string; connection?: 'dev' | 'deploy' }, R<Acct['getEnv']>>;
+	'client.account.setEnv': ShellOpSpec<{ scope: 'org' | 'team' | 'user'; env: Record<string, string>; scopeId?: string; connection?: 'dev' | 'deploy' }, R<Acct['setEnv']>>;
 
 	// ── Billing / checkout ───────────────────────────────────────────────────
-	'client.billing.getDetails': ShellOpSpec<{ orgId: string }, unknown>;
-	'client.billing.getProductPrices': ShellOpSpec<{ appId: string }, unknown>;
-	'client.billing.createCheckoutSession': ShellOpSpec<{ orgId: string; appId: string; priceId: string; promotionCode?: string }, unknown>;
-	'client.billing.validatePromoCode': ShellOpSpec<{ orgId: string; code: string; priceId?: string }, unknown>;
-	'client.billing.redeemPromoCode': ShellOpSpec<{ orgId: string; code: string }, unknown>;
+	'client.billing.getDetails': ShellOpSpec<{ orgId: string }, R<Bill['getDetails']>>;
+	'client.billing.getProductPrices': ShellOpSpec<{ appId: string }, R<Bill['getProductPrices']>>;
+	'client.billing.createCheckoutSession': ShellOpSpec<{ orgId: string; appId: string; priceId: string; promotionCode?: string }, R<Bill['createCheckoutSession']>>;
+	'client.billing.validatePromoCode': ShellOpSpec<{ orgId: string; code: string; priceId?: string }, R<Bill['validatePromoCode']>>;
+	'client.billing.redeemPromoCode': ShellOpSpec<{ orgId: string; code: string }, R<Bill['redeemPromoCode']>>;
 	// returnUrl is HOST POLICY: the framework root decides where Stripe sends
 	// the browser back (cloud: its own origin; VS Code: the public site) — a
 	// socketless webview's origin is never a valid return target.
-	'client.billing.createPortalSession': ShellOpSpec<{ orgId: string }, unknown>;
-	'client.billing.cancelSubscription': ShellOpSpec<{ orgId: string; appId: string }, unknown>;
-	'client.billing.upgradeSubscription': ShellOpSpec<{ orgId: string; appId: string; newPriceId: string }, unknown>;
-	'client.billing.purchaseTopup': ShellOpSpec<{ orgId: string; priceId: string }, unknown>;
-	'client.billing.getCreditBalance': ShellOpSpec<{ orgId: string }, unknown>;
-	'client.billing.listCreditPacks': ShellOpSpec<Record<string, never>, unknown>;
-	'client.billing.getTransactions': ShellOpSpec<{ orgId: string; options?: Record<string, unknown> }, unknown>;
-	'client.billing.getTransactionDistinct': ShellOpSpec<{ orgId: string; field: string }, unknown>;
-	'client.billing.getUsageByUser': ShellOpSpec<{ orgId: string }, unknown>;
-	'client.billing.getUsageByTeam': ShellOpSpec<{ orgId: string }, unknown>;
-	'client.billing.createCreditCheckout': ShellOpSpec<{ orgId: string; packId: string }, unknown>;
+	'client.billing.createPortalSession': ShellOpSpec<{ orgId: string }, R<Bill['createPortalSession']>>;
+	'client.billing.cancelSubscription': ShellOpSpec<{ orgId: string; appId: string }, R<Bill['cancelSubscription']>>;
+	'client.billing.upgradeSubscription': ShellOpSpec<{ orgId: string; appId: string; newPriceId: string }, R<Bill['upgradeSubscription']>>;
+	'client.billing.purchaseTopup': ShellOpSpec<{ orgId: string; priceId: string }, R<Bill['purchaseTopup']>>;
+	'client.billing.getCreditBalance': ShellOpSpec<{ orgId: string }, R<Bill['getCreditBalance']>>;
+	'client.billing.listCreditPacks': ShellOpSpec<Record<string, never>, R<Bill['listCreditPacks']>>;
+	'client.billing.getTransactions': ShellOpSpec<{ orgId: string; options?: P1<Bill['getTransactions']> }, R<Bill['getTransactions']>>;
+	'client.billing.getTransactionDistinct': ShellOpSpec<{ orgId: string; field: string }, R<Bill['getTransactionDistinct']>>;
+	'client.billing.getUsageByUser': ShellOpSpec<{ orgId: string }, R<Bill['getUsageByUser']>>;
+	'client.billing.getUsageByTeam': ShellOpSpec<{ orgId: string }, R<Bill['getUsageByTeam']>>;
+	'client.billing.createCreditCheckout': ShellOpSpec<{ orgId: string; packId: string }, R<Bill['createCreditCheckout']>>;
 	// No SDK method exists for confirm_pending (the old call sites used a
 	// phantom `dapRequest` cast that threw at runtime); the op wraps the
 	// public client.call() exactly as BillingApi wraps its other verbs.
-	'client.billing.confirmPending': ShellOpSpec<{ appId: string; subscriptionId: string; priceId: string }, unknown>;
+	// Raw wire verb — the server's confirmed body (account_handler.py).
+	'client.billing.confirmPending': ShellOpSpec<{ appId: string; subscriptionId: string; priceId: string }, { status: string }>;
 }
+
 
 /** What the registration needs from its host — the SDK client and liveness.
  *  Typed structurally so BOTH ConnectionManager classes (shell and the VS
@@ -359,6 +403,7 @@ export function registerClientOps(bus: IOpBus, source: IClientOpsSource, options
 		'client.app.buildLog': (p) => client().buildLog(p.appId, requireRegistryVersion(p.version)),
 		'client.app.reply': (p) => client().replyApp(p.appId, p.message, p.version),
 		'client.app.developerStatus': () => client().call('rrext_deploy_app', { subcommand: 'developer_status' }),
+		'client.app.list': (p) => client().call('rrext_app', { subcommand: 'list', ...p }),
 		'client.app.developerRegister': (p) => client().call('rrext_deploy_app', { subcommand: 'developer_register', developerId: p.developerId }),
 		'client.log.chapters': (p) => client().log.chapters({ projectId: p.projectId, source: p.source, ...(p.teamId ? { teamId: p.teamId } : {}) }),
 		'client.log.openStream': (p) => {

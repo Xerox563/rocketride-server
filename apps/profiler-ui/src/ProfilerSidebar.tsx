@@ -280,10 +280,14 @@ export const ProfilerDevToolSidebar: React.FC<DevToolProps> = ({ peer, documents
 	const sidebarChannel = useMemo(() => createPeerSidebarChannel(peer), [peer]);
 
 	// SINGLE-PANE UX: the profiler is one surface, so activating its sidebar
-	// tab opens (or reveals) the pane — the tool's choice, made here. This
-	// mount only exists because the tab was selected, so mounting IS the
-	// first activation; the shell event covers re-selections.
-	useEffect(() => { documents?.open('', 'Profiler'); }, [documents]);
+	// tab opens (or reveals) the pane — the tool's choice, made here.
+	//
+	// Mounting is NOT an activation. The host keeps every pinned tool's
+	// sidebar mounted (SidebarChrome's TabPanel hides inactive panels with
+	// display:none rather than unmounting them), so opening on mount
+	// reopened this pane on every page load — including panes the user had
+	// deliberately closed. This listener is registered long before any
+	// selection can happen, so it covers the first selection too.
 	useShellEvent('shell:toolSidebarActivated', ({ appId }) => {
 		if (appId === 'rocketride.profiler') documents?.open('', 'Profiler');
 	});
