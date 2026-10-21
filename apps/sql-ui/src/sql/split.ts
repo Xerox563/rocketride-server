@@ -32,6 +32,11 @@
 // separator in CODE: inside a string literal, a quoted identifier, a line or
 // block comment, or a PostgreSQL dollar-quoted body it is ordinary text.
 //
+// Two lexical rules that decide what a server RUNS, so a statement gate can
+// rely on them: MySQL runs the text inside `/*! ... */` and `/*!NNNNN ... */`
+// (only the markers are comment), and PostgreSQL ends a `--` comment at a
+// bare carriage return as well as at a line feed.
+//
 // NOT SUPPORTED — and deliberately so: MySQL's `DELIMITER` directive. A buffer
 // that changes the statement terminator mid-file would need the scanner to
 // interpret a client-side command, and a half-working implementation is worse
@@ -93,6 +98,14 @@ interface ScanTraits {
 	dollarQuotes: boolean;
 	/** A backslash escapes the next character inside a string literal. */
 	backslashEscapes: boolean;
+	/**
+	 * `/*! ... *\/` and `/*!NNNNN ... *\/` hold CODE that the server runs
+	 * (MySQL's executable comments): only the markers are comment. MySQL, and
+	 * `unknown` (where reading them as code is the safe side).
+	 */
+	executableComments: boolean;
+	/** A bare carriage return ends a `--` comment too (PostgreSQL's lexer: newline is [\n\r]). */
+	crEndsLineComment: boolean;
 }
 
 /** What a stretch of the buffer is, lexically. */
@@ -132,6 +145,8 @@ function traitsFor(dialect: SqlDialect): ScanTraits {
 		nestedBlockComments: dialect === 'postgres',
 		dollarQuotes: dialect === 'postgres',
 		backslashEscapes: dialect === 'mysql' || dialect === 'clickhouse',
+		executableComments: dialect === 'mysql' || dialect === 'unknown',
+		crEndsLineComment: dialect === 'postgres',
 	};
 }
 
@@ -259,12 +274,23 @@ function continuesIdentifier(sql: string, open: number): boolean {
  *
  * @param sql - The buffer.
  * @param open - Offset of the first comment character.
+ * @param crEnds - Whether a bare `\r` is a line break too (PostgreSQL).
  * @returns The offset of the line break, or the buffer length.
  */
-function skipLineComment(sql: string, open: number): number {
+function skipLineComment(sql: string, open: number, crEnds = false): number {
 	const nl = sql.indexOf('\n', open);
-	return nl < 0 ? sql.length : nl;
+	const end = nl < 0 ? sql.length : nl;
+	if (!crEnds) return end;
+	const cr = sql.indexOf('\r', open);
+	return cr >= 0 && cr < end ? cr : end;
 }
+
+/**
+ * The opening marker of a MySQL executable comment: `/*!`, optionally with
+ * the version it needs (`/*!50110`, five or six digits). What follows it, up
+ * to the closing `*\/`, is code the server runs.
+ */
+const EXECUTABLE_COMMENT_OPEN = /^\/\*!(?:\d{6}|\d{5})?/;
 
 /**
  * Skip a block comment, honouring nesting when the dialect supports it.
@@ -341,6 +367,8 @@ function scanRegions(sql: string, traits: ScanTraits): Region[] {
 	const n = sql.length;
 	let codeStart = 0;
 	let i = 0;
+	/** Inside a MySQL executable comment: its closing `*\/` (in code) is a marker. */
+	let executable = false;
 
 	while (i < n) {
 		const ch = sql[i];
@@ -357,13 +385,25 @@ function scanRegions(sql: string, traits: ScanTraits): Region[] {
 			end = skipDelimited(sql, i, '`', false);
 			kind = 'string';
 		} else if (ch === '-' && sql[i + 1] === '-' && opensDashComment(sql, i, traits)) {
-			end = skipLineComment(sql, i);
+			end = skipLineComment(sql, i, traits.crEndsLineComment);
 			kind = 'comment';
 		} else if (traits.hashComments && ch === '#') {
 			end = skipLineComment(sql, i);
 			kind = 'comment';
+		} else if (executable && ch === '*' && sql[i + 1] === '/') {
+			// The end of an executable comment: only the marker is comment.
+			end = i + 2;
+			kind = 'comment';
+			executable = false;
 		} else if (ch === '/' && sql[i + 1] === '*') {
-			end = skipBlockComment(sql, i, traits.nestedBlockComments);
+			const marker = traits.executableComments && !executable ? EXECUTABLE_COMMENT_OPEN.exec(sql.slice(i, i + 9)) : null;
+			if (marker) {
+				// MySQL runs what follows: only the marker is comment.
+				end = i + marker[0].length;
+				executable = true;
+			} else {
+				end = skipBlockComment(sql, i, traits.nestedBlockComments);
+			}
 			kind = 'comment';
 		} else if (traits.dollarQuotes && ch === '$' && !continuesIdentifier(sql, i)) {
 			const closed = skipDollarQuoted(sql, i);

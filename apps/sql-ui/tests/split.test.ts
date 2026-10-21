@@ -396,6 +396,32 @@ describe('splitStatements', () => {
 	});
 });
 
+describe('what a server runs: MySQL executable comments and PostgreSQL line ends', () => {
+	it('mysql: the text inside /*!NNNNN ... */ is code, so a statement hidden there is found', () => {
+		assert.deepEqual(texts('SELECT 1; /*!50000 DELETE FROM orders */', 'mysql'), ['SELECT 1', '/*!50000 DELETE FROM orders */']);
+		// Each marker becomes one space; the code between them is kept as written.
+		assert.equal(stripSqlComments('/*!50000 DELETE FROM orders */', 'mysql'), '  DELETE FROM orders  ');
+		assert.equal(stripSqlComments('/*! DELETE FROM orders */', 'mysql'), '  DELETE FROM orders  ');
+		assert.equal(stripSqlComments('/*!800001 SELECT 1 */', 'mysql'), '  SELECT 1  ');
+	});
+
+	it('mysql: a separator inside an executable comment separates; one inside a string in it does not', () => {
+		assert.deepEqual(texts("/*!50000 SELECT ';*/' */; SELECT 2", 'mysql'), ["/*!50000 SELECT ';*/' */", 'SELECT 2']);
+	});
+
+	it('unknown reads them as code too (the safe side); postgres and clickhouse read a comment', () => {
+		assert.equal(stripSqlComments('/*!50000 DELETE FROM orders */', 'unknown'), '  DELETE FROM orders  ');
+		assert.equal(stripSqlComments('/*!50000 DELETE FROM orders */', 'postgres'), ' ');
+		assert.equal(stripSqlComments('/*!50000 DELETE FROM orders */', 'clickhouse'), ' ');
+		assert.equal(stripSqlComments('SELECT /*+ BKA(t) */ 1', 'mysql'), 'SELECT   1', 'an optimizer hint stays a comment');
+	});
+
+	it('postgres: a bare carriage return ends a -- comment, so the separator behind it counts', () => {
+		assert.deepEqual(texts('SELECT 1 -- x\r; DELETE FROM orders', 'postgres'), ['SELECT 1 -- x', 'DELETE FROM orders']);
+		assert.deepEqual(texts('SELECT 1 -- x\r\n; SELECT 2', 'postgres'), ['SELECT 1 -- x', 'SELECT 2']);
+	});
+});
+
 // =============================================================================
 // STATEMENT AT OFFSET
 // =============================================================================
