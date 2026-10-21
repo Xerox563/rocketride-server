@@ -48,6 +48,8 @@
 // =============================================================================
 
 import { createContext, useContext } from 'react';
+import { ExplorerToolError } from 'shared/explorer/errors';
+import type { IGenerationTicket } from 'shared/explorer/generation';
 import type { IFrameCaller } from 'shared/explorer/devtool/frame';
 import type { JsonValue } from 'shared/explorer/devtool/reply';
 import type { SqlOps } from './ops';
@@ -137,6 +139,41 @@ function connIdOf(endpoint: SqlEndpoint): string {
 }
 
 /**
+ * A dropped request: its ticket expired (Stop waiting, a newer request, the
+ * view closing).
+ *
+ * @param tool - The tool.
+ * @returns The stale marker every caller ignores.
+ */
+function dropped(tool: string): ExplorerToolError {
+	return new ExplorerToolError({ kind: 'stale', tool, message: `The '${tool}' request was superseded; its answer is dropped.` });
+}
+
+/**
+ * Run one remote call under a generation ticket, FRAME-SIDE (port of
+ * 740b69c6d): the ticket is a function and never crosses the op channel. An
+ * expired ticket sends nothing; an answer (or failure) that arrives after it
+ * expired is dropped as `stale`. The controller's one retry after a
+ * TASK_STOPPED refusal cannot see it.
+ *
+ * @param ticket - The caller's ticket, if any.
+ * @param tool - The tool (named in the stale marker).
+ * @param send - The op call.
+ * @returns What the op answered.
+ */
+async function underTicket<T>(ticket: IGenerationTicket | undefined, tool: string, send: () => Promise<T>): Promise<T> {
+	if (ticket && !ticket.isCurrent()) throw dropped(tool);
+	try {
+		const value = await send();
+		if (ticket && !ticket.isCurrent()) throw dropped(tool);
+		return value;
+	} catch (error) {
+		if (ticket && !ticket.isCurrent()) throw dropped(tool);
+		throw error;
+	}
+}
+
+/**
  * An SqlSession whose four tools are controller ops. Stateless — the token
  * vault, the retry rule and the waits live in the CONTROLLER's session.
  *
@@ -148,13 +185,13 @@ function remoteSession(caller: IFrameCaller<SqlOps>, endpoint: SqlEndpoint): Sql
 	const connId = connIdOf(endpoint);
 	return {
 		endpoint,
-		execute: (sql: string, opts?: { params?: unknown[]; idempotent?: boolean }): Promise<SqlExecuteResult> =>
-			caller.callReply('sql.execute', {
+		execute: (sql: string, opts?: { params?: unknown[]; idempotent?: boolean; generation?: IGenerationTicket }): Promise<SqlExecuteResult> =>
+			underTicket(opts?.generation, 'execute', () => caller.callReply('sql.execute', {
 				connId,
 				sql,
 				...(opts?.params ? { params: opts.params as JsonValue[] } : {}),
 				...(opts?.idempotent !== undefined ? { idempotent: opts.idempotent } : {}),
-			}, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.execute'] }),
+			}, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.execute'] })),
 		getSchema: (table?: string): Promise<SqlSchemaResponse> =>
 			caller.callReply('sql.getSchema', { connId, ...(table ? { table } : {}) }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.getSchema'] }),
 		refreshSchema: (): Promise<SqlSchemaResponse> => caller.callReply('sql.refreshSchema', { connId }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.refreshSchema'] }),

@@ -31,6 +31,8 @@
 // changes, never the views, panels, or canvas.
 // =============================================================================
 
+import type { IGenerationTicket } from 'shared/explorer/generation';
+
 // =============================================================================
 // DIALECT
 // =============================================================================
@@ -178,9 +180,19 @@ export interface SqlSession {
 	 * @param opts.idempotent - Allow the ONE retry after a pre-dispatch
 	 *                          `TASK_STOPPED` refusal. Only for statements the
 	 *                          caller classifies as reads.
+	 * @param opts.generation - The caller's ticket for this request. Once it
+	 *                          expires (Stop waiting, a newer request, the view
+	 *                          closing, a change of account) nothing more is
+	 *                          sent for the call and its answer or failure is
+	 *                          dropped as `stale`. It never leaves the realm
+	 *                          that made it: in a dev-tool frame it is checked
+	 *                          by the frame's remote session (a function cannot
+	 *                          cross the op channel), so there it stops the
+	 *                          frame's own send and drops the answer, while the
+	 *                          controller's one retry cannot see it.
 	 * @returns Rows and affected-row count.
 	 */
-	execute(sql: string, opts?: { params?: unknown[]; idempotent?: boolean }): Promise<SqlExecuteResult>;
+	execute(sql: string, opts?: { params?: unknown[]; idempotent?: boolean; generation?: IGenerationTicket }): Promise<SqlExecuteResult>;
 	/**
 	 * Reflect the schema of the attached database (or a single table).
 	 *

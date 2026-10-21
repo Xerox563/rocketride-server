@@ -44,6 +44,7 @@
 
 import { isStaleError } from 'shared/explorer/errors';
 import type { IToolSession } from 'shared/explorer/connect/session';
+import type { IGenerationTicket } from 'shared/explorer/generation';
 import { statementWaitMs } from './tools';
 import type {
 	SqlEndpoint,
@@ -92,17 +93,21 @@ class SqlToolSession implements SqlSession {
 	}
 
 	/** @inheritdoc */
-	async execute(sql: string, opts?: { params?: unknown[]; idempotent?: boolean }): Promise<SqlExecuteResult> {
+	async execute(sql: string, opts?: { params?: unknown[]; idempotent?: boolean; generation?: IGenerationTicket }): Promise<SqlExecuteResult> {
 		// Omit `params` entirely when there is nothing to bind: the node's
 		// placeholder rewriting is skipped for an empty list, so an unbound
 		// statement keeps travelling exactly as it did before.
 		const params = opts?.params;
 		const input = params && params.length > 0 ? { sql, params } : { sql };
 		// Default NO retry: an unmarked statement may well be a write. The wait
-		// is the node's published statement deadline plus a pad, or none.
+		// is the node's published statement deadline plus a pad, or none. The
+		// caller's ticket goes down with the call (port of 740b69c6d), so a
+		// request it abandoned is never sent again by the session's retry.
+		const generation = opts?.generation;
 		return this.session.invoke<SqlExecuteResult>('execute', input, {
 			idempotent: opts?.idempotent === true,
 			timeoutMs: statementWaitMs(this.session.info()),
+			...(generation === undefined ? {} : { generation }),
 		});
 	}
 
