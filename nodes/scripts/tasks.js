@@ -39,6 +39,7 @@ const {
 	isDirectory,
 	removeDir,
 	PROJECT_ROOT,
+	BUILD_ROOT,
 	DIST_ROOT,
 	OVERLAY_ROOT,
 	startServer,
@@ -92,6 +93,53 @@ const CPP_NODES = [...SRC_NODE_DIRS]
 const CPP_NODE_BUILDS = [...SRC_NODE_DIRS]
 	.filter(([name, srcDir]) => fs.existsSync(path.join(srcDir, name, 'CMakeLists.txt')))
 	.map(([name]) => `${name}:build`);
+
+// Live database suites. Each one drives a real driver against a real server and
+// stubs the engine surface itself, so it needs no test server; but it must run
+// WITHOUT ROCKETRIDE_MOCK, because nodes/test/mocks shadows psycopg2 and
+// falkordb engine-wide. The mocked pass therefore ignores these files and a
+// separate pass runs them. Each suite skips when its server is unreachable,
+// unless the databases are required (nodes:test-db by default; nodes:test with
+// RR_REQUIRE_DB_TESTS, as CI runs it): then an unreachable server fails, and
+// so does a suite in which nothing passed or a test that skipped without a
+// deliberate "NOT RUN:" reason.
+const DB_LIVE_SUITES = [
+	'test_rocketride_db_full.py',
+	// rocketride_vector's agent tools and the vector-store writes, on pgvector.
+	'test_rocketride_vector_tools_full.py',
+	'test_vector_store_writes_full.py',
+	'test_rocketride_graph_full.py',
+	'test_graph_age_full.py',
+	'test_graph_drivers_full.py',
+	'test_graph_neo4j_full.py',
+	'test_graph_falkordb_full.py',
+	// Regenerates graph-ui's wire fixtures (apps/graph-ui/tests/fixtures/v1) and compares.
+	'test_graph_wire_fixtures_full.py',
+	// Starts dist/server's engine itself and calls the shipped Graph Explorer
+	// templates' graph tools through the SDK: the one suite that is not stubbed.
+	'test_graph_toolpath_full.py',
+];
+
+// Run a second time with RR_TEST_AGE_DSN pointing at a transaction-mode pooler
+// (RR_TEST_AGE_POOLER_DSN) and RR_TEST_AGE_ADMIN_DSN at the database itself:
+// the cloud reaches tenant databases through such a pooler.
+const DB_POOLER_SUITES = ['test_rocketride_graph_full.py', 'test_graph_age_full.py'];
+
+// A skip whose reason starts with this is deliberate (e.g. a test that needs a
+// Neo4j Enterprise role); any other skip under a required run fails it.
+const DB_EXPECTED_SKIP_PREFIX = 'NOT RUN:';
+
+/**
+ * Whether the live databases are required: RR_REQUIRE_DB_TESTS when set
+ * ('0', 'false', 'no' and 'off' mean no), otherwise the action's default.
+ */
+function dbTestsRequired(byDefault) {
+	const raw = String(process.env.RR_REQUIRE_DB_TESTS || '')
+		.trim()
+		.toLowerCase();
+	if (!raw) return !!byDefault;
+	return !['0', 'false', 'no', 'off'].includes(raw);
+}
 
 // ============================================================================
 // Action Factories
@@ -206,6 +254,11 @@ function makeRunPytestAction(options = {}) {
 
 			if (!options.test_full) {
 				extraArgs.push('--ignore-glob', '**/test_*_full.py', '--ignore-glob', '**/test_*_full/**');
+			} else {
+				// The live database suites run in their own unmocked pass.
+				for (const suite of DB_LIVE_SUITES) {
+					extraArgs.push('--ignore', path.join(TEST_DIR, suite));
+				}
 			}
 
 			// Exclude skip_node tests by default (same as skip_nodes in pytest_generate_tests for dynamic tests)
@@ -343,6 +396,122 @@ function makeInstallTestDepsAction() {
 	};
 }
 
+// Runs DB_LIVE_SUITES in one process (they share database fixtures, so no
+// xdist) without ROCKETRIDE_MOCK, then, when RR_TEST_AGE_POOLER_DSN is set,
+// DB_POOLER_SUITES again through that pooler. When the databases are required
+// (options.requireDb, nodes:test-db; or RR_REQUIRE_DB_TESTS) every suite must
+// pass at least one test, and no test may skip without a "NOT RUN:" reason: a
+// suite whose tests skip proves nothing about the database it was written for.
+function makeRunDbPytestAction(options = {}) {
+	return {
+		run: async (ctx, task) => {
+			require('dotenv').config({ path: path.join(PROJECT_ROOT, '.env') });
+			const required = dbTestsRequired(options.requireDb);
+			const testEnv = { ...process.env };
+			delete testEnv.ROCKETRIDE_MOCK;
+			// The suites read the variable themselves (unreachable server -> fail, not skip).
+			if (required) testEnv.RR_REQUIRE_DB_TESTS = '1';
+			else delete testEnv.RR_REQUIRE_DB_TESTS;
+
+			const reportDir = path.join(BUILD_ROOT, 'nodes-db-tests');
+			await fs.promises.mkdir(reportDir, { recursive: true });
+			const passes = [{ suites: DB_LIVE_SUITES, report: 'junit.xml', env: testEnv }];
+			const poolerDsn = String(process.env.RR_TEST_AGE_POOLER_DSN || '').trim();
+			if (poolerDsn) {
+				const directDsn = testEnv.RR_TEST_AGE_DSN || 'postgresql://rruser:rrpass@localhost:55433/rrtenant';
+				passes.push({
+					suites: DB_POOLER_SUITES,
+					report: 'junit-pooler.xml',
+					env: { ...testEnv, RR_TEST_AGE_DSN: poolerDsn, RR_TEST_AGE_ADMIN_DSN: directDsn },
+				});
+			} else if (required) {
+				task.output = 'RR_TEST_AGE_POOLER_DSN is not set: the transaction-mode pooler pass is not run';
+			}
+
+			const pytestTokens = splitPytestOpts(options.pytest);
+			for (const pass of passes) {
+				const suites = pass.suites.map((suite) => path.join(TEST_DIR, suite));
+				const report = path.join(reportDir, pass.report);
+				await fs.promises.rm(report, { force: true });
+				await runPytest({
+					engine: ENGINE,
+					testsDir: suites[0],
+					extraArgs: [
+						...suites.slice(1),
+						'-v',
+						'-rs',
+						'--rootdir',
+						PACKAGE_DIR,
+						'-p',
+						'no:xdist',
+						`--junitxml=${report}`,
+						...withoutXdistArgs(pytestTokens),
+					],
+					execOpts: { task, cwd: PACKAGE_DIR, env: pass.env },
+				});
+				if (required) {
+					checkRequiredDbResults(await fs.promises.readFile(report, 'utf8'), pass.suites, pass.report);
+				}
+			}
+		},
+	};
+}
+
+/**
+ * Throw unless every suite passed at least one test and every skip in the
+ * report is a deliberate "NOT RUN:" one.
+ */
+function checkRequiredDbResults(xml, suites, label = 'junit.xml') {
+	const counts = countJunitResults(xml);
+	const names = suites.map((suite) => path.basename(suite, '.py'));
+	const empty = names.filter((name) => !(counts[name]?.passed > 0));
+	if (empty.length > 0) {
+		throw new Error(`The live databases are required but no test passed in: ${empty.join(', ')} (${label})`);
+	}
+	const unexpected = names.flatMap((name) => counts[name].unexpectedSkips);
+	if (unexpected.length > 0) {
+		throw new Error(
+			`The live databases are required but ${unexpected.length} test(s) skipped without a ` +
+				`${DB_EXPECTED_SKIP_PREFIX} reason (${label}):\n  ${unexpected.join('\n  ')}`
+		);
+	}
+}
+
+function unescapeXml(text) {
+	return text
+		.replace(/&quot;/g, '"')
+		.replace(/&apos;/g, "'")
+		.replace(/&lt;/g, '<')
+		.replace(/&gt;/g, '>')
+		.replace(/&#(\d+);/g, (_m, code) => String.fromCharCode(Number(code)))
+		.replace(/&amp;/g, '&');
+}
+
+// Per-module passed/skipped/failed counts from a pytest JUnit report, with the
+// skips whose reason does not start with "NOT RUN:". Test cases are attributed
+// by the module name in their classname ("test_x" or "test_x.Class").
+function countJunitResults(xml) {
+	const counts = {};
+	const caseRe = /<testcase\b([^>]*?)(\/>|>([\s\S]*?)<\/testcase>)/g;
+	let match;
+	while ((match = caseRe.exec(xml)) !== null) {
+		const classname = (/classname="([^"]*)"/.exec(match[1]) || [])[1] || '';
+		const testName = unescapeXml((/\bname="([^"]*)"/.exec(match[1]) || [])[1] || '');
+		const module = classname.split('.').find((part) => part.startsWith('test_')) || classname;
+		const body = match[3] || '';
+		const entry = counts[module] || (counts[module] = { passed: 0, skipped: 0, failed: 0, unexpectedSkips: [] });
+		const skipped = /<skipped\b([^>]*)/.exec(body);
+		if (skipped) {
+			entry.skipped += 1;
+			const reason = unescapeXml((/message="([^"]*)"/.exec(skipped[1]) || [])[1] || '');
+			if (!reason.startsWith(DB_EXPECTED_SKIP_PREFIX))
+				entry.unexpectedSkips.push(`${module}::${testName}: ${reason}`);
+		} else if (/<(failure|error)\b/.test(body)) entry.failed += 1;
+		else entry.passed += 1;
+	}
+	return counts;
+}
+
 function makeTestAction(options = {}) {
 	if (options.warmup && !['plan', 'off'].includes(options.warmup)) {
 		throw new Error(`--warmup=${options.warmup}: expected 'plan' or 'off'`);
@@ -379,6 +548,10 @@ function makeTestAction(options = {}) {
 			steps: [{ name: runName, action: makeRunPytestAction(options) }],
 		})
 	);
+	// Live database suites need no test server, only their databases.
+	if (!options.taskserver) {
+		steps.push({ name: 'nodes:run-pytest-db', action: makeRunDbPytestAction(options) });
+	}
 	return { description: 'Testing nodes', steps };
 }
 
@@ -530,6 +703,20 @@ module.exports = {
 		},
 		{ name: 'nodes:test', action: (options) => makeTestAction({ ...options, test_full: false }) },
 		{ name: 'nodes:test-full', action: (options) => makeTestAction({ ...options, test_full: true }) },
+		// The live-database lane on its own: the databases are required unless
+		// RR_REQUIRE_DB_TESTS=0 (nodes:test keeps them optional by default).
+		{
+			name: 'nodes:test-db',
+			action: (options) => ({
+				description: 'Testing nodes (live databases)',
+				steps: [
+					'server:build',
+					parallel(['nodes:build', 'ai:build', 'client-python:build'], 'Build dependencies'),
+					{ name: 'nodes:install-test-deps', action: makeInstallTestDepsAction() },
+					{ name: 'nodes:run-pytest-db', action: makeRunDbPytestAction({ ...options, requireDb: true }) },
+				],
+			}),
+		},
 		{
 			name: 'nodes:test-contracts',
 			action: () => ({
@@ -552,6 +739,15 @@ module.exports = {
 
 // C++ node actions
 module.exports = [module.exports, ...CPP_NODES.map(makeNodeModule)];
+
+// The live-database lane's pure helpers (nodes/test/test_db_lane_guard.py).
+module.exports.dbLane = {
+	DB_LIVE_SUITES,
+	DB_POOLER_SUITES,
+	dbTestsRequired,
+	countJunitResults,
+	checkRequiredDbResults,
+};
 
 // Export paths for external use
 module.exports.DIST_DIR = DIST_DIR;
