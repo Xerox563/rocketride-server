@@ -284,3 +284,62 @@ describe('createFrameCaller — one subscription set per peer', () => {
 		assert.deepEqual(replyOk(1), { ok: true, value: 1 });
 	});
 });
+
+describe('createFrameCaller — waits for its controller (CE-9)', () => {
+	it('a call made before any controller is ready waits, then is sent within its own deadline', async () => {
+		const h = createDevToolHarness();
+		const seen: unknown[] = [];
+		const clock = manualNow(1_000_000);
+		const caller = createFrameCaller<FrameOps>({ peer: h.newFramePeer(), ...counted(), now: clock.now });
+		await settle();
+		assert.equal(caller.controllerReady(), false);
+		const call = caller.callReply('f.echo', { x: 3 }, { timeoutMs: 5_000 });
+		await settle();
+		const posted = h.wire.filter((entry) => (entry.value as { __rrtool?: string })?.__rrtool === 'call').length;
+		assert.equal(posted, 0, 'nothing is posted before the controller is ready');
+		const stop = serve(h, seen, clock.now);
+		assert.equal(await call, 3);
+		assert.deepEqual(seen, [{ x: 3, deadlineAt: 1_005_000 }], 'the deadline is the one stamped at call time');
+		assert.equal(caller.controllerReady(), true);
+		caller.dispose();
+		stop();
+	});
+
+	it('when readiness never comes, the call rejects as a timeout after its own timeoutMs, unsent', async () => {
+		const h = createDevToolHarness();
+		const caller = createFrameCaller<FrameOps>({ peer: h.newFramePeer(), ...counted() });
+		await settle();
+		await assert.rejects(caller.callReply('f.echo', { x: 1 }, { timeoutMs: 60 }), (error: unknown) => {
+			assert.ok(error instanceof ExplorerToolError);
+			assert.equal(error.kind, 'timeout');
+			assert.match(error.message, /not sent/);
+			return true;
+		});
+		assert.equal(caller.pending(), 0);
+		assert.equal(h.wire.filter((entry) => (entry.value as { __rrtool?: string })?.__rrtool === 'call').length, 0);
+		caller.dispose();
+	});
+
+	it('a call still waiting for readiness when host:connection turns false is rejected as unavailable (never sent)', async () => {
+		const h = createDevToolHarness();
+		h.setHostConnection(true);
+		const caller = createFrameCaller<FrameOps>({ peer: h.newFramePeer(), ...counted() });
+		await settle();
+		const call = caller.callReply('f.echo', { x: 1 }, { timeoutMs: 60_000 });
+		h.setHostConnection(false);
+		await assert.rejects(call, (error: unknown) => error instanceof ExplorerToolError && error.kind === 'unavailable');
+		caller.dispose();
+	});
+
+	it('waitForController: false sends at once (a frame on a controller that publishes no readiness)', async () => {
+		const h = createDevToolHarness();
+		const caller = createFrameCaller<FrameOps>({ peer: h.newFramePeer(), ...counted(), waitForController: false });
+		await settle();
+		const call = caller.callReply('f.echo', { x: 1 }, { timeoutMs: 60 });
+		await settle();
+		assert.equal(h.wire.filter((entry) => (entry.value as { __rrtool?: string })?.__rrtool === 'call').length, 1);
+		await assert.rejects(call, (error: unknown) => error instanceof ExplorerToolError && /did not answer/.test(error.message));
+		caller.dispose();
+	});
+});
+

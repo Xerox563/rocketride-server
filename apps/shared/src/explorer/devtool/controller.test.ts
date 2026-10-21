@@ -31,6 +31,7 @@ import { attachController } from './controller';
 import type { IDeadline } from './deadline';
 import type { DevToolPeer } from './realm';
 import type { Reply } from './reply';
+import { CONTROLLER_STATE_TOPIC, RESERVED_STATE_PREFIX } from './realm';
 import { createDevToolHarness, manualNow, settle, shellProtocol, spyPeer } from './testing';
 
 interface TestOps extends ToolOpMap {
@@ -100,7 +101,7 @@ describe('attachController — subscription order and lifetime (R6)', () => {
 		assert.equal(servers.counts.created - servers.counts.disposed, 1, 'disposing a superseded mount twice is a no-op');
 	});
 
-	it('posts nothing on the peer while mounting (a quiet sidebar, R7)', () => {
+	it('posts no event and no call while mounting, only its retained readiness state (a quiet sidebar, R7)', () => {
 		const h = createDevToolHarness();
 		const spy = spyPeer(h.sidebarPeer);
 		const attached = attachController<TestOps>({
@@ -109,7 +110,10 @@ describe('attachController — subscription order and lifetime (R6)', () => {
 			createToolOpServer: shellProtocol.createToolOpServer,
 			handlers: { 't.echo': ({ x }) => x },
 		});
-		assert.deepEqual(spy.posts, []);
+		assert.equal(spy.posts.length, 1);
+		const post = spy.posts[0] as { __rrtool: string; topic: string; snapshot: { ready: unknown } };
+		assert.equal(post.__rrtool, 'state', 'a retained state publish, which R7 allows');
+		assert.equal(post.topic, CONTROLLER_STATE_TOPIC);
 		assert.deepEqual(h.emitted, [], 'and summons nothing');
 		attached.dispose();
 	});
@@ -171,3 +175,38 @@ describe('attachController — every handler is served through the deadline guar
 		assert.equal(ran, 0);
 	});
 });
+
+describe('attachController — readiness (CE-9)', () => {
+	it('publishes { ready: <nonce> } on the reserved topic once its handlers are served, and { ready: null } on dispose', () => {
+		assert.ok(CONTROLLER_STATE_TOPIC.startsWith(RESERVED_STATE_PREFIX));
+		const h = createDevToolHarness();
+		const channel = shellProtocol.createToolChannel(h.sidebarPeer);
+		const seen: unknown[] = [];
+		channel.onState(CONTROLLER_STATE_TOPIC, (snapshot) => seen.push(snapshot));
+		const first = attachController<TestOps>({ peer: h.sidebarPeer, channel, createToolChannel: shellProtocol.createToolChannel, createToolOpServer: shellProtocol.createToolOpServer, handlers: {} });
+		first.dispose();
+		const second = attachController<TestOps>({ peer: h.sidebarPeer, channel, createToolChannel: shellProtocol.createToolChannel, createToolOpServer: shellProtocol.createToolOpServer, handlers: {} });
+		const readies = seen.map((snapshot) => (snapshot as { ready: string | null }).ready);
+		assert.equal(readies.length, 3);
+		assert.equal(typeof readies[0], 'string');
+		assert.equal(readies[1], null);
+		assert.equal(typeof readies[2], 'string');
+		assert.notEqual(readies[2], readies[0], 'a fresh nonce per mount');
+		second.dispose();
+	});
+
+	it("a superseded mount's late dispose does not retract the live mount's readiness", () => {
+		const h = createDevToolHarness();
+		const channel = shellProtocol.createToolChannel(h.sidebarPeer);
+		let last: unknown;
+		channel.onState(CONTROLLER_STATE_TOPIC, (snapshot) => { last = snapshot; });
+		const stale = attachController<TestOps>({ peer: h.sidebarPeer, channel, createToolChannel: shellProtocol.createToolChannel, createToolOpServer: shellProtocol.createToolOpServer, handlers: {} });
+		const live = attachController<TestOps>({ peer: h.sidebarPeer, channel, createToolChannel: shellProtocol.createToolChannel, createToolOpServer: shellProtocol.createToolOpServer, handlers: {} });
+		const ready = (last as { ready: string | null }).ready;
+		stale.dispose();
+		assert.deepEqual(last, { ready });
+		live.dispose();
+		assert.deepEqual(last, { ready: null });
+	});
+});
+

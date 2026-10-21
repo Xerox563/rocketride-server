@@ -50,6 +50,16 @@
 //   - A missing or unusable `timeoutMs` is a programming error: `call` and
 //     `callReply` THROW it synchronously (a RangeError), so it never reaches
 //     a `.catch` on the returned promise.
+//   - READINESS. A call is SENT only while the controller's readiness state
+//     (`devtool:controller`, controller.ts) carries a nonce. Until then it
+//     waits, inside its own timeout: the deadline stays the one stamped at
+//     call time, and the op lane gets what is left of it. If readiness never
+//     comes, the call rejects as kind `timeout`, unsent. This is what makes a
+//     call made in the host's render -> controller-effect window (when the
+//     host channel already holds the sidebar's live slot and would drop it)
+//     succeed. A stale nonce left by a dead controller is bounded the same
+//     way, by the deadline. `waitForController: false` sends at once (a
+//     controller that publishes no readiness).
 //   - `dispose` (the effect cleanup) stops following host:connection and
 //     rejects what is still pending as `stale`, which callers ignore.
 // =============================================================================
@@ -57,7 +67,7 @@
 import type { ToolChannel, ToolControllerFn, ToolOpMap, ToolOpParams, ToolOpResult } from 'shell';
 import { ExplorerToolError, readErrorMessage } from '../errors';
 import { isDeadlineExpiredText, stampDeadline } from './deadline';
-import { channelFor } from './realm';
+import { channelFor, CONTROLLER_STATE_TOPIC } from './realm';
 import type { DevToolPeer } from './realm';
 import { fromReply, isLaneTimeoutText } from './reply';
 import type { Reply, ReplyValue } from './reply';
@@ -87,6 +97,8 @@ export interface IFrameCallerOptions {
 	createToolChannel: (peer: DevToolPeer) => ToolChannel;
 	/** The clock deadlines are stamped from (default `Date.now`). */
 	now?: () => number;
+	/** Hold calls until the controller publishes readiness (default true; see the header). */
+	waitForController?: boolean;
 }
 
 /** A frame's way to call its controller. */
@@ -108,6 +120,8 @@ export interface IFrameCaller<O extends ToolOpMap> {
 	pending(): number;
 	/** The last `host:connection` snapshot: true / false, or null before the host published one. */
 	connected(): boolean | null;
+	/** Whether the controller's readiness state currently carries a nonce. */
+	controllerReady(): boolean;
 	/** Stop following host:connection and reject what is pending as `stale` (idempotent). */
 	dispose(): void;
 }
@@ -142,24 +156,44 @@ export function createFrameCaller<O extends ToolOpMap>(opts: IFrameCallerOptions
 	const send = controllerFor(opts.peer, opts.createToolController) as unknown as (op: string, params: unknown, options: { timeoutMs: number }) => Promise<unknown>;
 	const channel = opts.channel ?? channelFor(opts.peer, opts.createToolChannel);
 
-	/** One pending call: its op and how to reject it. */
+	const waitForController = opts.waitForController ?? true;
+
+	/** One pending call: its op, how to reject it, and whether it was sent yet. */
 	interface IPending {
 		op: string;
 		reject: (error: unknown) => void;
+		sent: boolean;
+		/** Sends it (calls waiting for readiness). */
+		go: (() => void) | null;
+		/** Its readiness-wait bound. */
+		timer: ReturnType<typeof setTimeout> | null;
 	}
 	const pending = new Set<IPending>();
 	let connected: boolean | null = null;
+	let ready: string | null = null;
 	let disposed = false;
+
+	/**
+	 * Forget a pending call.
+	 *
+	 * @param entry - The call.
+	 * @returns Whether it was still pending.
+	 */
+	const settle = (entry: IPending): boolean => {
+		if (entry.timer !== null) clearTimeout(entry.timer);
+		entry.timer = null;
+		entry.go = null;
+		return pending.delete(entry);
+	};
 
 	/**
 	 * Reject every pending call.
 	 *
-	 * @param make - Builds the error for one op.
+	 * @param make - Builds the error for one call (sent or not).
 	 */
-	const rejectAll = (make: (op: string) => ExplorerToolError): void => {
+	const rejectAll = (make: (op: string, sent: boolean) => ExplorerToolError): void => {
 		for (const entry of [...pending]) {
-			pending.delete(entry);
-			entry.reject(make(entry.op));
+			if (settle(entry)) entry.reject(make(entry.op, entry.sent));
 		}
 	};
 
@@ -169,11 +203,24 @@ export function createFrameCaller<O extends ToolOpMap>(opts: IFrameCallerOptions
 		if (typeof value !== 'boolean') return;
 		connected = value;
 		if (!value) {
-			rejectAll((op) => new ExplorerToolError({
-				kind: 'timeout',
-				tool: op,
-				message: `Lost the connection while '${op}' was running. It may still have run; there is no way to cancel it from here.`,
-			}));
+			rejectAll((op, sent) => (sent
+				? new ExplorerToolError({
+					kind: 'timeout',
+					tool: op,
+					message: `Lost the connection while '${op}' was running. It may still have run; there is no way to cancel it from here.`,
+				})
+				: new ExplorerToolError({ kind: 'unavailable', tool: op, message: `Lost the connection before '${op}' was sent; it did not run.` })));
+		}
+	});
+
+	const offReady = channel.onState(CONTROLLER_STATE_TOPIC, (snapshot) => {
+		if (disposed) return;
+		const value = snapshot !== null && typeof snapshot === 'object' ? (snapshot as { ready?: unknown }).ready : undefined;
+		ready = typeof value === 'string' && value !== '' ? value : null;
+		if (ready === null) return;
+		for (const entry of [...pending]) {
+			const go = entry.go;
+			if (go !== null) go();
 		}
 	});
 
@@ -198,13 +245,38 @@ export function createFrameCaller<O extends ToolOpMap>(opts: IFrameCallerOptions
 			return Promise.reject(new ExplorerToolError({ kind: 'unavailable', tool: op, message: `Not connected to a server, so '${op}' was not sent.` }));
 		}
 		const args = stampDeadline(params as object | undefined, timeoutMs, now);
+		const { deadlineAt } = args;
 		return new Promise<unknown>((resolve, reject) => {
-			const entry: IPending = { op, reject };
+			const entry: IPending = { op, reject, sent: false, go: null, timer: null };
 			pending.add(entry);
-			send(op, args, { timeoutMs }).then(
-				(value) => { if (pending.delete(entry)) resolve(value); },
-				(error: unknown) => { if (pending.delete(entry)) reject(mapFailure(op, error)); },
-			);
+			const notSent = (): ExplorerToolError => new ExplorerToolError({
+				kind: 'timeout',
+				tool: op,
+				message: `'${op}' was not sent: the tool's controller did not become ready within ${Math.round(timeoutMs / 1000)}s.`,
+			});
+			const go = (): void => {
+				if (entry.timer !== null) clearTimeout(entry.timer);
+				entry.timer = null;
+				entry.go = null;
+				if (!pending.has(entry)) return;
+				// The wait comes out of the call's own budget.
+				const left = Math.floor(deadlineAt - now());
+				if (left < 1) {
+					if (settle(entry)) reject(notSent());
+					return;
+				}
+				entry.sent = true;
+				send(op, args, { timeoutMs: left }).then(
+					(value) => { if (settle(entry)) resolve(value); },
+					(error: unknown) => { if (settle(entry)) reject(mapFailure(op, error)); },
+				);
+			};
+			if (!waitForController || ready !== null) {
+				go();
+				return;
+			}
+			entry.go = go;
+			entry.timer = setTimeout(() => { if (settle(entry)) reject(notSent()); }, timeoutMs);
 		});
 	};
 
@@ -213,10 +285,12 @@ export function createFrameCaller<O extends ToolOpMap>(opts: IFrameCallerOptions
 		callReply: (op, params, options) => call(op, params, options).then((reply) => fromReply(reply as Reply<unknown>, { tool: op })) as Promise<ReplyValue<ToolOpResult<O, typeof op>>>,
 		pending: () => pending.size,
 		connected: () => connected,
+		controllerReady: () => ready !== null,
 		dispose() {
 			if (disposed) return;
 			disposed = true;
 			offConnection();
+			offReady();
 			rejectAll(stale);
 		},
 	};

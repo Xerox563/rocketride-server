@@ -48,6 +48,35 @@ import type { DevToolProps, ToolChannel } from 'shell';
 /** A dev-tool mount's peer pipe. */
 export type DevToolPeer = DevToolProps['peer'];
 
+/**
+ * State topics whose names start with this prefix belong to this library;
+ * lanes never publish under it. (The shell reserves `host:` the same way,
+ * toolProtocol.ts.)
+ */
+export const RESERVED_STATE_PREFIX = 'devtool:';
+
+/**
+ * The retained state topic a controller publishes its readiness on:
+ * `{ ready: <nonce> }` once every handler is served, `{ ready: null }` when it
+ * unmounts. Frames hold calls until they see a nonce (frame.ts).
+ */
+export const CONTROLLER_STATE_TOPIC = `${RESERVED_STATE_PREFIX}controller`;
+
+/** What {@link CONTROLLER_STATE_TOPIC} carries. */
+export interface IControllerState {
+	/** A nonce per controller mount while it serves; null once it unmounted. */
+	ready: string | null;
+}
+
+/**
+ * A short random id (a controller mount's readiness nonce).
+ *
+ * @returns The id.
+ */
+export function mountNonce(): string {
+	return typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 /** What kind of realm a ConnectionManager lives in. */
 export type RealmKind = 'socketless' | 'client' | 'unknown';
 

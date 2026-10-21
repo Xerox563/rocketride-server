@@ -39,10 +39,21 @@
 // in a render steals every call); a lane test pins that with testing.ts
 // `assertSidebarSubscribers`.
 //
-// Nothing here calls `peer.subscribe` itself, and nothing posts at mount (a
-// quiet sidebar, R7). The React shell calls `attachController` inside a
-// `useEffect` and returns `dispose` as the cleanup; under StrictMode that is
-// mount -> dispose -> mount, which leaves one live op server.
+// Nothing here calls `peer.subscribe` itself, and nothing but retained state
+// is posted at mount (a quiet sidebar, R7). The React shell calls
+// `attachController` inside a `useEffect` and returns `dispose` as the
+// cleanup; under StrictMode that is mount -> dispose -> mount, which leaves
+// one live op server.
+//
+// READINESS. Once every handler is served, the controller publishes
+// `{ ready: <nonce> }` on the reserved state topic CONTROLLER_STATE_TOPIC
+// (`devtool:controller`), and `{ ready: null }` when it unmounts (a later
+// mount that superseded it is left alone). Frames hold their calls until they
+// see a nonce (frame.ts), because a call that arrives BEFORE the op server
+// subscribed is lost when anything else already holds the live slot: the
+// hosts build the sidebar channel during RENDER (VS Code
+// DevToolSidebarMount.tsx useMemo, rocket-ui DevToolMount.tsx), before this
+// effect runs, and the channel ignores calls.
 //
 // EVERY OP ANSWERS A REPLY (R3, applied uniformly). The op map must declare
 // a `Reply<T>` result and an IDeadline in the params of every op (void ops:
@@ -63,8 +74,13 @@
 // side of quirk 2 makes such an event arrive twice). The controller's channel
 // keeps its own subscription and still hears every event.
 //
-// HELD CALLS. While no controller is subscribed the peer holds frame calls
-// (up to 64) and hands them over SYNCHRONOUSLY inside the next subscribe.
+// HELD CALLS. While NO subscriber at all is on the sidebar peer (not even a
+// channel; e.g. after the op server unsubscribed and before the next mount,
+// with a fallback channel that already lost the live slot), the peer holds
+// frame calls (up to 64) and hands them over SYNCHRONOUSLY inside the next
+// subscribe. A call sent while some other subscriber holds the slot is NOT
+// held: it goes to that subscriber, which drops it; readiness above is what
+// keeps frames from sending then.
 // With Rod's op server that would be inside `createToolOpServer`, before any
 // handler could be served, so they would all be answered "No handler serves".
 // So the op server subscribes through the shim, which queues that synchronous
@@ -83,8 +99,8 @@
 import type { IToolOpServer, ToolChannel, ToolOpMap, ToolOpParams, ToolOpResult, ToolOpSpec } from 'shell';
 import { guardDeadline } from './deadline';
 import type { DeadlineError, IDeadline } from './deadline';
-import { channelFor } from './realm';
-import type { DevToolPeer } from './realm';
+import { channelFor, CONTROLLER_STATE_TOPIC, mountNonce } from './realm';
+import type { DevToolPeer, IControllerState } from './realm';
 import { asReply, toReplyError } from './reply';
 import type { Reply, ReplyValue } from './reply';
 
@@ -250,9 +266,13 @@ export function attachController<O extends ToolOpMap & DevToolOps<O>>(opts: IAtt
 			if (disposed) return;
 			disposed = true;
 			server.dispose();
-			if (live.get(peer) === attachment) live.delete(peer);
+			if (live.get(peer) !== attachment) return;
+			live.delete(peer);
+			channel.publishState(CONTROLLER_STATE_TOPIC, { ready: null } satisfies IControllerState);
 		},
 	};
 	live.set(peer, attachment);
+	// Every handler is served: frames may send now.
+	channel.publishState(CONTROLLER_STATE_TOPIC, { ready: mountNonce() } satisfies IControllerState);
 	return attachment;
 }

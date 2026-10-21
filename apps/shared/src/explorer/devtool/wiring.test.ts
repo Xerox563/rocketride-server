@@ -38,6 +38,7 @@ import { ExplorerToolError } from '../errors';
 import { attachController } from './controller';
 import type { IDeadline } from './deadline';
 import { createFrameCaller } from './frame';
+import { channelFor, CONTROLLER_STATE_TOPIC } from './realm';
 import type { DevToolPeer } from './realm';
 import { toReply } from './reply';
 import type { Reply } from './reply';
@@ -320,12 +321,12 @@ describe('T13 — a call held while no controller is subscribed and delivered af
 		});
 		const caller = createFrameCaller<WireOps>({ peer: h.newFramePeer(), createToolController: shellProtocol.createToolController, createToolChannel: shellProtocol.createToolChannel, now: clock.now });
 
-		// The controller mounted once (as at boot), then unmounted (a VS Code disconnect).
-		mount().dispose();
+		// The controller is ready, the frame calls, and the controller unmounts (a VS Code
+		// disconnect) while the call is still on the bus: the REAL busPeer holds it.
+		const first = mount();
 		await settle();
-
-		// The frame calls while no controller is subscribed: the REAL busPeer holds the call.
 		const late = caller.callReply('w.write', { key: 'k', text: 'late' }, { timeoutMs: 40 });
+		first.dispose();
 		await assert.rejects(late, (error: unknown) => error instanceof ExplorerToolError && error.kind === 'timeout');
 		assert.equal(caller.pending(), 0, 'the frame gave up');
 
@@ -345,8 +346,11 @@ describe('T13 — a call held while no controller is subscribed and delivered af
 		assert.deepEqual(refused, ['w.write:expired'], 'the held call DID reach the controller, which refused it');
 		again.dispose();
 
-		// Control: a held call still inside its deadline is executed on remount.
+		// Control: the same race, with the remount inside the deadline: the held call runs.
+		const second = mount();
+		await settle();
 		const onTime = caller.callReply('w.write', { key: 'k', text: 'on-time' }, { timeoutMs: 5_000 });
+		second.dispose();
 		await settle();
 		const third = mount();
 		assert.deepEqual(await onTime, { affected: 1 });
@@ -376,3 +380,69 @@ describe('held calls on the very FIRST mount without a host channel', () => {
 		attached.dispose();
 	});
 });
+
+describe('readiness — a call made in the render -> effect window (CE-9)', () => {
+	/**
+	 * The handler log and a mount over the harness.
+	 *
+	 * @param h - The harness.
+	 * @param channel - The host channel, when the host built one.
+	 * @returns The runs and the mount function.
+	 */
+	function lane(h: ReturnType<typeof createDevToolHarness>, channel?: ReturnType<typeof shellProtocol.createToolChannel>) {
+		const runs: string[] = [];
+		const mount = () => attachController<WireOps>({
+			peer: h.sidebarPeer,
+			...(channel ? { channel } : {}),
+			createToolChannel: shellProtocol.createToolChannel,
+			createToolOpServer: shellProtocol.createToolOpServer,
+			handlers: { 'w.write': (params) => { runs.push(params.text); return { affected: 1 }; } },
+		});
+		return { runs, mount };
+	}
+
+	it('the host channel subscribes at render (DevToolSidebarMount.tsx), before the controller effect: the call still succeeds', async () => {
+		const h = createDevToolHarness();
+		const hostChannel = shellProtocol.createToolChannel(h.sidebarPeer);
+		const { runs, mount } = lane(h, hostChannel);
+		const caller = createFrameCaller<WireOps>({ peer: h.newFramePeer(), ...frameProto });
+		await settle();
+		const call = caller.callReply('w.write', { key: 'k', text: 'reload' }, { timeoutMs: 2_000 });
+		await settle();
+		const attached = mount();
+		assert.deepEqual(await call, { affected: 1 });
+		assert.deepEqual(runs, ['reload']);
+		assert.deepEqual(h.violations, []);
+		caller.dispose();
+		attached.dispose();
+	});
+
+	it('the same when the lane built its channel (channelFor) before attachController', async () => {
+		const h = createDevToolHarness();
+		channelFor(h.sidebarPeer, shellProtocol.createToolChannel);
+		const { runs, mount } = lane(h);
+		const caller = createFrameCaller<WireOps>({ peer: h.newFramePeer(), ...frameProto });
+		await settle();
+		const call = caller.callReply('w.write', { key: 'k', text: 'early' }, { timeoutMs: 2_000 });
+		await settle();
+		const attached = mount();
+		assert.deepEqual(await call, { affected: 1 });
+		assert.deepEqual(runs, ['early']);
+		caller.dispose();
+		attached.dispose();
+	});
+
+	it('a stale ready left by a dead controller is still bounded by the deadline', async () => {
+		const h = createDevToolHarness();
+		const hostChannel = shellProtocol.createToolChannel(h.sidebarPeer);
+		// A controller whose realm died without its dispose running: its last word was "ready".
+		hostChannel.publishState(CONTROLLER_STATE_TOPIC, { ready: 'dead-controller' });
+		const caller = createFrameCaller<WireOps>({ peer: h.newFramePeer(), ...frameProto });
+		await settle();
+		assert.equal(caller.controllerReady(), true);
+		await assert.rejects(caller.callReply('w.write', { key: 'k', text: 'lost' }, { timeoutMs: 80 }), (error: unknown) => error instanceof ExplorerToolError && error.kind === 'timeout');
+		assert.equal(caller.pending(), 0);
+		caller.dispose();
+	});
+});
+
