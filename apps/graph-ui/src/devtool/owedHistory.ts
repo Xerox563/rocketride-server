@@ -144,7 +144,14 @@ export function parkHistory(path: string, owed: IOwedHistory, tracker: IIdentity
 		const done = (): void => release(path, earlier);
 		void earlier.owed.prefs.flush().then(done, done);
 	}
-	const setTimer = opts.setTimer ?? ((fn: () => void, ms: number): unknown => setTimeout(fn, ms));
+	// The time limit only frees memory: it must never keep a process alive (Node's `unref`; browsers return a number).
+	const setTimer =
+		opts.setTimer ??
+		((fn: () => void, ms: number): unknown => {
+			const handle = setTimeout(fn, ms) as unknown as { unref?: () => void };
+			handle.unref?.();
+			return handle;
+		});
 	const clearTimer = opts.clearTimer ?? ((handle: unknown): void => clearTimeout(handle as ReturnType<typeof setTimeout>));
 	owed.vouch.tracker = tracker;
 	const parked: IParked = { owed, tracker, off: () => undefined, timer: null, clearTimer, adopted: false, released: false };

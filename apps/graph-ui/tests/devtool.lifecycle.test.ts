@@ -9,6 +9,7 @@
 // =============================================================================
 
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, it } from 'node:test';
@@ -679,6 +680,14 @@ describe('owedHistory: parking, adoption and the time limit', () => {
 		assert.equal(adoptParkedHistory('p/other', 'B', theirs), null);
 		await settle();
 		assert.deepEqual(other.log, ['flush as B', 'prefs.dispose', 'tracker.dispose'], 'flushed while B is known (the base drops it), then released');
+	});
+
+	it('a parked accessor nobody claims does not keep the process alive for its time limit', () => {
+		const script = ["import { parkHistory } from './src/devtool/owedHistory.ts';", 'const tracker = { get: () => ({ known: false, identity: null, fingerprint: null }), subscribe: () => () => undefined, dispose: () => undefined };', "const owed = { owner: 'A', vouch: { tracker }, prefs: { flush: async () => undefined, dispose: () => undefined } };", "parkHistory('p/alive', owed, tracker, { ttlMs: 60000 });"].join('\n');
+		const started = Date.now();
+		const child = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], { cwd: path.resolve(__dirname, '..'), timeout: 10_000, encoding: 'utf8' });
+		assert.equal(child.error, undefined, `the process exited by itself (${Date.now() - started} ms): ${String(child.error)}`);
+		assert.equal(child.status, 0, child.stderr);
 	});
 
 	it('with no controller, a parked accessor settles itself when someone is known again', async () => {
