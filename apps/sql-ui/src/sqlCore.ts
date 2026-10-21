@@ -116,6 +116,16 @@ import {
 /** What the core needs from a realm's ConnectionManager (structural). */
 export type SqlCoreBus = IExplorerBus & IIdentityBus & IActivationBus & IDiscoveryBus;
 
+/** What a session's caller may ask besides the session itself. */
+export interface SessionContext {
+	/**
+	 * The node's dialect: the store's probe when it succeeded, else the
+	 * session's last answer, else one bounded `dialect` call. 'unknown' when
+	 * none answers, or the answer is not a dialect the app models.
+	 */
+	dialect(): Promise<SqlDialect>;
+}
+
 /** What {@link createSqlCore} needs. */
 export interface SqlCoreOptions {
 	/** The realm's ConnectionManager. */
@@ -163,11 +173,13 @@ export interface SqlCore {
 	/** A session whose every call resolves its connection first (`endpoint.connId` is required). */
 	sessionFor(endpoint: SqlEndpoint): SqlSession;
 	/**
-	 * Run calls on a connection's session (resolving it first). `ctx.dialect`
-	 * is the dialect the node answered the store's probe with ('unknown' until
-	 * it has), which the controller's own write checks classify with.
+	 * Run calls on a connection's session (resolving it first). `ctx.dialect()`
+	 * is the dialect the node answered, which the controller's own write
+	 * checks classify with: the store's probe when it succeeded, else the
+	 * session's last answer, else one bounded `dialect` call; 'unknown' only
+	 * when none answers (or the answer is not one the app models).
 	 */
-	withSession<T>(connId: string, fn: (session: SqlSession, ctx: { dialect: SqlDialect }) => Promise<T>): Promise<T>;
+	withSession<T>(connId: string, fn: (session: SqlSession, ctx: SessionContext) => Promise<T>, tool?: string): Promise<T>;
 	/** Stop a direct connection's temp pipeline, best effort (a no-op for a pipeline connection). */
 	release(connId: string): Promise<void>;
 	/** The New Connection picker's list: discovered endpoints a pipeline connection can be saved for. */
@@ -447,12 +459,26 @@ export function createSqlCore(opts: SqlCoreOptions): SqlCore {
 		return found;
 	};
 
-	const withSession = async <T,>(connId: string, fn: (session: SqlSession, ctx: { dialect: SqlDialect }) => Promise<T>, tool = 'connection'): Promise<T> => {
+	const withSession = async <T,>(connId: string, fn: (session: SqlSession, ctx: SessionContext) => Promise<T>, tool = 'connection'): Promise<T> => {
 		const record = await recordOf(connId, tool);
 		const endpoint = await locate(record, tool);
-		const probe = endpoints.getState().probes[endpoint.key];
-		const dialect = probe?.ok ? toDialect(probe.dialect) : 'unknown';
-		return fn(createSqlSession(endpoints.session(client, endpoint), endpointForConnection(record)), { dialect });
+		const shared = endpoints.session(client, endpoint);
+		const session = createSqlSession(shared, endpointForConnection(record));
+		const dialect = async (): Promise<SqlDialect> => {
+			// The store's probe, when it succeeded.
+			const probe = endpoints.getState().probes[endpoint.key];
+			if (probe?.ok) return toDialect(probe.dialect);
+			// The session's last answer (kept while the endpoint re-probes).
+			const kept = shared.info();
+			if (kept !== null && typeof kept.dialect === 'string') return toDialect(kept.dialect);
+			// Neither: ask the node once (bounded, DIALECT_WAIT_MS). No answer: unknown.
+			try {
+				return await session.dialect();
+			} catch {
+				return 'unknown';
+			}
+		};
+		return fn(session, { dialect });
 	};
 
 	const sessionFor = (endpoint: SqlEndpoint): SqlSession => {
@@ -482,7 +508,7 @@ export function createSqlCore(opts: SqlCoreOptions): SqlCore {
 		},
 		keyOf: async (connId) => endpointKeyForConnection(await recordOf(connId, 'history')),
 		sessionFor,
-		withSession: (connId, fn) => withSession(connId, fn),
+		withSession: (connId, fn, tool) => withSession(connId, fn, tool),
 		async release(connId) {
 			// Read before the first await: a delete that follows a release in the
 			// same turn must not hide the record from it.

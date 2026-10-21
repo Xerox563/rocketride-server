@@ -321,8 +321,10 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 		'sql.resolveEndpoint': ({ connId }) => core.resolve(connId),
 		'sql.releaseEndpoint': async ({ connId }) => { await core.release(connId); },
 		'sql.discoverEndpoints': () => core.pickable(),
-		'sql.execute': ({ connId, sql, params, idempotent }) => core.withSession(connId, (session, ctx) => {
-			const gate = gateStatement(sql, ctx.dialect, idempotent === true);
+		'sql.execute': ({ connId, sql, params, idempotent }) => core.withSession(connId, async (session, ctx) => {
+			// Classified with the node's own dialect (asked for when no probe has
+			// it); with none, the gate fails closed: sent once, never repeated.
+			const gate = gateStatement(sql, await ctx.dialect(), idempotent === true);
 			if (gate.refusal !== null) throw new ExplorerToolError({ kind: 'invalid', tool: 'execute', message: gate.refusal });
 			return session.execute(sql, { ...(params && params.length > 0 ? { params } : {}), idempotent: gate.idempotent });
 		}),

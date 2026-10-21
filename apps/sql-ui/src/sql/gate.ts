@@ -37,6 +37,19 @@
 //     SELECT ... INTO, or any text that holds more than one statement with
 //     a write among them, is sent at most once.
 //
+// UNKNOWN DIALECT: FAIL CLOSED. Where a statement ends, and what is a comment,
+// depend on the dialect (`--1` is arithmetic in MySQL, `$$ … $$` is a literal
+// in PostgreSQL), so a text split without the dialect cannot be trusted
+// either way: it could pass a write as a read, and it would refuse valid
+// PL/pgSQL (`CREATE FUNCTION … $$ BEGIN … END; $$`) as transaction control.
+// With no dialect the text is never repeated and never refused: it is sent
+// once, and the node decides.
+//
+// LIMITS. The classification reads the text, not the server: a server setting
+// that changes lexing (MySQL NO_BACKSLASH_ESCAPES, PostgreSQL
+// standard_conforming_strings off) is not seen, and a read with side effects
+// (`SELECT nextval('s')`) is a read.
+//
 // Pure (no engine), so it is tested directly.
 // =============================================================================
 
@@ -57,11 +70,12 @@ export interface StatementGate {
  * Classify a statement the way the controller will treat it.
  *
  * @param sql - The text as the frame sent it.
- * @param dialect - The dialect the node reported ('unknown' before it has).
+ * @param dialect - The dialect the node reported; 'unknown' fails closed (sent once, never repeated, never refused).
  * @param idempotentRequested - What the frame asked for.
  * @returns The gate.
  */
 export function gateStatement(sql: string, dialect: SqlDialect, idempotentRequested: boolean): StatementGate {
+	if (dialect === 'unknown') return { refusal: null, idempotent: false };
 	const statements = splitStatements(sql, dialect);
 	const kinds = statements.length > 0 ? statements.map((statement) => classifyStatement(statement.sql, dialect)) : [classifyStatement(sql, dialect)];
 	if (kinds.includes('tx')) return { refusal: TRANSACTION_REFUSAL_TEXT, idempotent: false };

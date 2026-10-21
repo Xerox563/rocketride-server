@@ -502,6 +502,61 @@ describe('T10 — write gates hold in the controller even when a frame calls the
 		}
 	});
 
+	it('the gate asks the node for its dialect when no probe has it: a MySQL-only batch the first probe missed is sent once', async () => {
+		// DA CE-2: the first probe fails (the node is restarting), so the store
+		// has no dialect; the text is two statements on MySQL (`--1` is
+		// arithmetic there), the second a DELETE.
+		let probes = 0;
+		let attempt = 0;
+		const r = await rig({ tool: (params) => {
+			if (params.tool === 'dialect') {
+				probes += 1;
+				if (probes === 1) throw new Error('connection refused');
+				return { dialect: 'mysql' };
+			}
+			if (params.tool === 'execute') {
+				attempt += 1;
+				if (attempt === 1) throw Object.assign(new Error('Task was stopped'), { code: 'TASK_STOPPED' });
+				return { rows: [{ ok: 1 }], affected_rows: 0 };
+			}
+			return postgres(params);
+		} });
+		try {
+			await r.env.resolveEndpoint(PIPELINE);
+			const probe = Object.values(r.mount.core.endpoints.getState().probes)[0];
+			assert.equal(probe?.ok, false, 'the store has no dialect');
+			await assert.rejects(r.frame.caller.callReply('sql.execute', { connId: 'c-pipe', sql: 'SELECT 1--1; DELETE FROM orders', idempotent: true }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.execute'] }), /Task was stopped/);
+			assert.equal(toolRequests(r.engine, 'execute').length, 1, 'a text that holds a write on MySQL is sent at most once');
+			assert.ok(probes >= 2, 'the node was asked for its dialect before the statement');
+		} finally {
+			r.dispose();
+		}
+	});
+
+	it('with no dialect at all the gate fails closed: a marked read is sent once, and valid PL/pgSQL is not refused', async () => {
+		let attempt = 0;
+		const r = await rig({ tool: (params) => {
+			if (params.tool === 'dialect') throw new Error('connection refused');
+			if (params.tool === 'execute') {
+				attempt += 1;
+				if (attempt === 1) throw Object.assign(new Error('Task was stopped'), { code: 'TASK_STOPPED' });
+				return { rows: [], affected_rows: 0 };
+			}
+			return postgres(params);
+		} });
+		try {
+			await r.env.resolveEndpoint(PIPELINE);
+			const call = (sql: string) => r.frame.caller.callReply('sql.execute', { connId: 'c-pipe', sql, idempotent: true }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.execute'] });
+			await assert.rejects(call('SELECT 1'), /Task was stopped/);
+			assert.equal(toolRequests(r.engine, 'execute').length, 1, 'never repeated without a dialect');
+			const fn = 'CREATE FUNCTION bump() RETURNS void AS $$\nDECLARE x int;\nBEGIN\n  PERFORM 1;\nEND;\n$$ LANGUAGE plpgsql';
+			assert.deepEqual(await call(fn), { rows: [], affected_rows: 0 }, 'sent, and the node decides');
+			assert.equal(toolRequests(r.engine, 'execute').length, 2);
+		} finally {
+			r.dispose();
+		}
+	});
+
 	it('a read the frame did not mark idempotent is not repeated either; a marked read is, once', async () => {
 		let attempt = 0;
 		const r = await rig({ tool: (params) => {

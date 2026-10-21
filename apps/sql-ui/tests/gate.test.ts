@@ -54,3 +54,23 @@ describe('T10 — every spelling of transaction control is refused in its dialec
 		});
 	}
 });
+
+describe('T10 — the gate needs the node\'s dialect: with it, PL/pgSQL passes; without it, nothing is repeated or refused', () => {
+	const DO_BLOCK = 'DO $$\nBEGIN\n  UPDATE orders SET paid = true WHERE id = 1;\nEND\n$$;';
+	const FUNCTION = 'CREATE FUNCTION bump() RETURNS void AS $$\nDECLARE x int;\nBEGIN\n  PERFORM 1;\nEND;\n$$ LANGUAGE plpgsql';
+
+	it('postgres: a DO block and a CREATE FUNCTION with DECLARE/BEGIN/END are not transaction control', () => {
+		for (const sql of [DO_BLOCK, FUNCTION]) assert.equal(gateStatement(sql, 'postgres', false).refusal, null);
+	});
+
+	it('unknown: never refused (the split cannot be trusted), never repeated', () => {
+		for (const sql of [DO_BLOCK, FUNCTION, 'SELECT 1', 'SELECT 1--1; DELETE FROM orders', 'SELECT $$ -- $$; DELETE FROM orders', 'BEGIN']) {
+			assert.deepEqual(gateStatement(sql, 'unknown', true), { refusal: null, idempotent: false }, sql);
+		}
+	});
+
+	it('with the dialect known, the DA batches are writes', () => {
+		assert.equal(gateStatement('SELECT 1--1; DELETE FROM orders', 'mysql', true).idempotent, false);
+		assert.equal(gateStatement('SELECT $$ -- $$; DELETE FROM orders', 'postgres', true).idempotent, false);
+	});
+});
