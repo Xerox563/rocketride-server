@@ -692,12 +692,28 @@ async def _dispatch(args) -> int:
     return 1
 
 
+# Commands that never connect to the engine and read no configuration.
+_LOCAL_ONLY_COMMANDS = frozenset({'diff'})
+
+
+def _is_local_only_command(argv: list) -> bool:
+    """
+    Report whether ``argv`` (without the program name) runs a local-only command.
+
+    The top-level parser defines no options that take a value, so the first
+    argument that is not an option is the command name.
+    """
+    command = next((arg for arg in argv if not arg.startswith('-')), None)
+    return command in _LOCAL_ONLY_COMMANDS
+
+
 def main() -> None:
     """
     Entry point for the CLI application.
 
-    Loads the workspace ``.env`` (real environment wins), parses the
-    command line, dispatches, and exits with the command's code.
+    Loads the workspace ``.env`` (real environment wins) unless the command
+    is local-only, parses the command line, dispatches, and exits with the
+    command's code.
     """
     # Tolerate Unicode output on non-Unicode consoles, which would otherwise
     # abort the command with UnicodeEncodeError.
@@ -709,8 +725,13 @@ def main() -> None:
             pass
 
     # The workspace .env must be in os.environ BEFORE the parser is
-    # built — argparse defaults read it at construction time
-    load_dot_env()
+    # built — argparse defaults read it at construction time. Local-only
+    # commands take no configuration, so they skip it: a .env they would not
+    # use must not be able to change what they compare or break them. That
+    # includes a NO_COLOR set only in the .env, which `diff` therefore ignores
+    # (a NO_COLOR in the shell still applies).
+    if not _is_local_only_command(sys.argv[1:]):
+        load_dot_env()
 
     parser = setup_parser()
     args = parser.parse_args()
