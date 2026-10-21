@@ -175,6 +175,30 @@ describe('§3.5 — the controller keeps SQL history in the user\'s history file
 	});
 });
 
+describe('§3.5 — a frame\'s view of the controller\'s history', () => {
+	it('reads a connection\'s entries, reads them again when the revision moves, and retries a read made before sign-in', async () => {
+		const r = await rig({ login: false });
+		try {
+			const endpoint = { key: KEY, connId: 'c-pipe', projectId: 'p1', pipelineName: 'Pipeline A', source: 's1', nodeId: 'db_1', nodeName: 'Orders', provider: 'db_postgres', running: true };
+			r.history.watch(endpoint);
+			await settle();
+			assert.deepEqual(r.history.entriesOf(endpoint), [], 'nothing to read while nobody is signed in');
+			r.engine.realm.login({ userId: 'u1', devTeam: 'team-1', organization: { id: 'org-1', teams: [{ id: 'team-1', permissions: ['task.data'] }] } });
+			await until(() => r.frame.owner() !== null, 'the identity');
+			const owner = r.frame.owner();
+			await r.frame.caller.callReply('sql.historyRecord', { connId: 'c-pipe', entry: entry('n1', 'SELECT 1', 10), owner }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.historyRecord'] });
+			await until(() => r.history.entriesOf(endpoint).length === 1, 'the view to read the entry');
+			r.history.record(endpoint, { ...entry('n2', 'SELECT 2', 20), error: undefined } as HistoryEntry);
+			await until(() => r.history.entriesOf(endpoint).length === 2, 'the view to follow the revision');
+			r.history.togglePin(endpoint, 'n1');
+			await until(() => r.history.entriesOf(endpoint).find((e) => e.id === 'n1')?.pinned === true, 'the pin');
+			assert.deepEqual(r.h.violations, [], 'an entry with an undefined field crossed as clean JSON');
+		} finally {
+			r.dispose();
+		}
+	});
+});
+
 describe('§3.5 — no usePrefs on any dev-tool path; switches are session-only there', () => {
 	it('nothing reachable from the frame mount or the controller calls usePrefs or mounts the preferences bridge', () => {
 		const reach = (entry: string): string[] => {

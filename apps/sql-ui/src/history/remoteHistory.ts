@@ -56,6 +56,10 @@ const NO_ENTRIES: HistoryEntry[] = [];
 
 /** A frame's history view, with its lifetime. */
 export interface RemoteHistory extends SqlHistoryApi {
+	/** Start following one connection outside React (the hooks call it from an effect). */
+	watch(endpoint: SqlEndpoint): void;
+	/** One connection's entries as last read (outside React). */
+	entriesOf(endpoint: SqlEndpoint): HistoryEntry[];
 	/** Forget every entry read (identity change, sign-out, a dropped connection). */
 	reset(): void;
 	/** Stop following the channel. */
@@ -91,7 +95,7 @@ function jsonEntry(entry: HistoryEntry): HistoryEntry {
 export function createRemoteHistory(opts: RemoteHistoryOptions): RemoteHistory {
 	const { caller, channel, owner } = opts;
 	/** What this frame has read, per endpoint key. */
-	const read = new Map<string, { endpoint: SqlEndpoint; entries: HistoryEntry[]; rev: number | null; loading: boolean; again: boolean }>();
+	const read = new Map<string, { endpoint: SqlEndpoint; entries: HistoryEntry[]; rev: number | null; loaded: boolean; loading: boolean; again: boolean }>();
 	let state: HistoryState | undefined;
 	let epoch = 0;
 	const listeners = new Set<() => void>();
@@ -121,6 +125,7 @@ export function createRemoteHistory(opts: RemoteHistoryOptions): RemoteHistory {
 				if (asked !== epoch || read.get(key) !== slot) return;
 				slot.entries = Array.isArray(entries) ? entries : NO_ENTRIES;
 				slot.rev = rev;
+				slot.loaded = true;
 				notify();
 			})
 			.catch(() => undefined)
@@ -137,7 +142,9 @@ export function createRemoteHistory(opts: RemoteHistoryOptions): RemoteHistory {
 		state = snapshot;
 		for (const [key, slot] of read) {
 			const rev = snapshot?.keys?.[key]?.rev;
-			if (rev !== undefined && rev !== slot.rev) fetch(key);
+			// A revision moved on, or a read that failed (the controller could not
+			// vouch for anyone yet) can now succeed.
+			if ((rev !== undefined && rev !== slot.rev) || (!slot.loaded && snapshot?.storage !== 'none')) fetch(key);
 		}
 		notify();
 	});
@@ -149,7 +156,7 @@ export function createRemoteHistory(opts: RemoteHistoryOptions): RemoteHistory {
 	 */
 	const watch = (endpoint: SqlEndpoint): void => {
 		if (read.has(endpoint.key)) return;
-		read.set(endpoint.key, { endpoint, entries: NO_ENTRIES, rev: null, loading: false, again: false });
+		read.set(endpoint.key, { endpoint, entries: NO_ENTRIES, rev: null, loaded: false, loading: false, again: false });
 		fetch(endpoint.key);
 	};
 
@@ -186,6 +193,8 @@ export function createRemoteHistory(opts: RemoteHistoryOptions): RemoteHistory {
 		setNote: (endpoint, id, note) => edit(endpoint, { action: 'note', id, note }),
 		clearForKey: (endpoint) => edit(endpoint, { action: 'clear' }),
 		setRecording: (endpoint, on) => edit(endpoint, { action: 'recording', on }),
+		watch,
+		entriesOf: (endpoint) => read.get(endpoint.key)?.entries ?? NO_ENTRIES,
 		reset() {
 			epoch += 1;
 			read.clear();
