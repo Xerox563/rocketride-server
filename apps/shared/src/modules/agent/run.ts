@@ -26,8 +26,8 @@
 
 /**
  * `runAgent` builds everything one run needs and drives the Wave loop: the
- * toolkits in mount order (the guides come through read_guide, not the
- * workspace), the save hook, the prompt start (built once, never changed), the
+ * workspace view with the guides at `.rocketride/`, the toolkits in mount
+ * order, the save hook, the prompt start (built once, never changed), the
  * model, and the record of check results, which is also the loop's finish
  * rule. It streams each wave's progress as `thinking` chunks and sends the
  * answer as one `content` chunk, with the checks line the code builds from the
@@ -41,6 +41,7 @@
 import { Question } from 'rocketride';
 import type { ChatMessage } from 'shell';
 
+import { GuideFileSystem } from './guides';
 import type { AgentHost } from './host';
 import { CORE_PROMPT } from './prompts';
 import { APP_CHECK_TOOL, AppCheckToolkit, monacoMarkerSource, reportPassed, typesNote } from './toolkits/appCheck';
@@ -48,7 +49,6 @@ import type { CheckReport, MarkerSource } from './toolkits/appCheck';
 import { AppToolkit, DEPLOY_APP_TIMEOUT_MS } from './toolkits/appTools';
 import { NOT_CONNECTED_MESSAGE, shellConfirm, type ClientGetter, type ConfirmFn } from './toolkits/common';
 import { FilesystemTools, normalizePath } from './toolkits/filesystem';
-import { GuideToolkit } from './toolkits/guides';
 import { findApp, InventoryToolkit, readApps } from './toolkits/inventory';
 import { PipelineDeployToolkit } from './toolkits/pipelineDeploy';
 import { PipelineDesignToolkit, validateNote, validateSaved, type SaveValidation } from './toolkits/pipelineDesign';
@@ -632,27 +632,26 @@ export async function runAgent(request: string, callback: (type: string, content
 		}
 	});
 
-	// step: every save that works returns the types of an app's TypeScript file or the
-	// validate of a pipeline, and the validate is recorded for the finish rule
+	// step: the workspace with the guides; every save that works returns the types of an app's
+	// TypeScript file or the validate of a pipeline, and the validate is recorded for the finish rule
+	const vfs = new GuideFileSystem(host.vfs, host.guides);
 	const afterSave = async (path: string): Promise<string> => {
 		const appFile = APP_TYPESCRIPT_FILE.exec(path);
-		if (appFile) return typesNote(host.vfs, markers, appFile[1], appFile[2]);
+		if (appFile) return typesNote(vfs, markers, appFile[1], appFile[2]);
 		if (!path.endsWith('.pipe')) return '';
-		const validation = await validateSaved(client, host.vfs, path);
+		const validation = await validateSaved(client, vfs, path);
 		checks.pipelineSaved(path, validation);
 		return validateNote(validation);
 	};
 
-	// step: the toolkits in mount order; the guide toolkit records the guides read, for the log line
-	const guides = new GuideToolkit(host.guides);
+	// step: the toolkits in mount order
 	const composed = composeToolkits([
 		// one file toolkit per run, so reads never carry over; its saves run the hook above
-		new FilesystemTools(host.vfs, undefined, afterSave),
-		guides,
-		new InventoryToolkit(host.vfs, (id) => host.devSession(id) !== null),
-		new PipelineDesignToolkit(client, host.vfs),
-		new PipelineRunToolkit(client, host.vfs),
-		new PipelineDeployToolkit(client, host.vfs, confirm),
+		new FilesystemTools(vfs, undefined, afterSave),
+		new InventoryToolkit(vfs, (id) => host.devSession(id) !== null),
+		new PipelineDesignToolkit(client, vfs),
+		new PipelineRunToolkit(client, vfs),
+		new PipelineDeployToolkit(client, vfs, confirm),
 		new AppToolkit(client, host, confirm),
 		// check_app hands each report to the record
 		new AppCheckToolkit(host, markers, (folder, report) => checks.appChecked(folder, report)),
@@ -670,5 +669,5 @@ export async function runAgent(request: string, callback: (type: string, content
 	});
 
 	callback('content', finalText(result, checks));
-	console.log(`[agent] stop=${result.stopReason} waves=${result.waves} modelCalls=${result.modelMs.length} medianMs=${median(result.modelMs)} guides=[${[...guides.guidesRead].join(',')}]`);
+	console.log(`[agent] stop=${result.stopReason} waves=${result.waves} modelCalls=${result.modelMs.length} medianMs=${median(result.modelMs)} guides=[${[...vfs.guidesRead].join(',')}]`);
 }

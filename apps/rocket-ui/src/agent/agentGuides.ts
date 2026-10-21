@@ -29,33 +29,12 @@
  * rocket-ui's rsbuild loads `.md` as source text, so each guide is a lazy
  * chunk that resolves to the file's text. The bundling lives here,
  * not in shared, because shared's test runner and the VS Code build have no
- * `.md` rule. guidePathFor, below, decides which bundle files are guides and
- * the path of each; the agent's read_guide shows that path under '.rocketride/'.
+ * `.md` rule. Which bundle files are guides, and where they appear, is
+ * guidePathFor's rule (shared, where it is tested).
  */
 
 import type { GuideSource } from 'shared/modules/agent/host';
-
-// =============================================================================
-// GUIDE PATHS
-// =============================================================================
-
-/**
- * Maps a docs/agents bundle key to its guide path.
- * './context/X.md' becomes 'docs/X.md' (the installer stubs under
- * './context/stubs/' are not guides), and './skills/<path>.md' keeps its path.
- * Everything else, such as the folder README, the task battery and scripts,
- * is not a guide.
- *
- * @param contextKey - A key from the docs/agents bundle, e.g. './context/ROCKETRIDE_APPS.md'.
- * @returns The guide path (e.g. 'docs/ROCKETRIDE_APPS.md'), or null when the file is not a guide.
- */
-function guidePathFor(contextKey: string): string | null {
-	const key = contextKey.replace(/^\.\//, '');
-	if (!key.endsWith('.md') || key.startsWith('context/stubs/')) return null;
-	if (key.startsWith('context/')) return `docs/${key.slice('context/'.length)}`;
-	if (key.startsWith('skills/')) return key;
-	return null;
-}
+import { guidePathFor } from 'shared/modules/agent/guides';
 
 // =============================================================================
 // GUIDE SOURCE
@@ -65,7 +44,7 @@ function guidePathFor(contextKey: string): string | null {
  * Builds the guide source over the bundled docs/agents folder. The guide
  * paths are computed once here, so paths() stays cheap on every listing.
  *
- * @returns The guides, by guide path (e.g. 'docs/ROCKETRIDE_APPS.md').
+ * @returns The guides, by path relative to '.rocketride/'.
  */
 export function createRocketGuideSource(): GuideSource {
 	const bundle = import.meta.webpackContext('../../../../docs/agents', { recursive: true, regExp: /\.md$/, mode: 'lazy' });
@@ -81,7 +60,7 @@ export function createRocketGuideSource(): GuideSource {
 	return {
 		paths: () => paths.slice(),
 		read: async (path) => {
-			const noGuide = () => new Error(`No guide at .rocketride/${path}. Call read_guide with no path to see the guides.`);
+			const noGuide = () => new Error(`No guide at .rocketride/${path}. List .rocketride/ to see the guides.`);
 			const key = keys.get(path);
 			if (!key) throw noGuide();
 			// step: rspack resolves an asset/source module to its text itself; a toolchain that wraps it as { default } still works

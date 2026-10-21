@@ -21,7 +21,7 @@
 // SOFTWARE.
 
 // =============================================================================
-// TOOLKIT TESTS — read before edit, no overwriting unsaved editor changes, read_guide,
+// TOOLKIT TESTS — read before edit, no overwriting unsaved editor changes, read-only guides,
 // the user says yes first, secrets stay out, deploy_app keeps its version, check_app
 // =============================================================================
 
@@ -32,13 +32,13 @@ import type { RocketRideClient } from 'rocketride';
 
 import type { ConsoleRow, WatchStatus } from '../../../tools/appdev/types';
 import type { IWorkspaceFileSystem, VfsEntry } from '../../vfs/vfsTypes';
+import { GuideFileSystem } from '../guides';
 import type { AgentDevSession, AgentHost } from '../host';
 import type { AgentTool } from '../tools';
 import { AppCheckToolkit, type AppCheckOptions, type CheckReport, type MarkerInfo } from './appCheck';
 import { AppToolkit } from './appTools';
 import { declined, type ConfirmFn } from './common';
 import { FilesystemTools } from './filesystem';
-import { GuideToolkit } from './guides';
 import { PipelineDeployToolkit } from './pipelineDeploy';
 
 // =============================================================================
@@ -415,14 +415,25 @@ test('edit_file and write_file refuse a dirty file, even after reading it', asyn
 });
 
 // =============================================================================
-// GUIDES — read_guide opens a guide by the path the guides use, and lists them for any other
+// GUIDES — the agent reads guides at .rocketride/ but cannot change them
 // =============================================================================
 
-test('read_guide reads a guide by its .rocketride/ path; an unknown path lists the guides', async () => {
-	const readGuide = toolOf(new GuideToolkit({ paths: () => ['docs/ROCKETRIDE_APPS.md'], read: async () => '# Apps\nBuild apps here.\n' }), 'read_guide');
+test('the file tools read guides but cannot change them', async () => {
+	const base = createMemoryWorkspace({ 'apps/a.ts': 'const a = 1;\n' });
+	const guides = { paths: () => ['docs/ROCKETRIDE_APPS.md'], read: async () => '# Apps\nBuild apps here.\n' };
+	const tools = new Map(new FilesystemTools(new GuideFileSystem(base, guides)).tools().map((t) => [t.name, t]));
+	const run = (name: string, args: Record<string, unknown>) => (tools.get(name) as NonNullable<ReturnType<typeof tools.get>>).execute(args);
+	const guide = '.rocketride/docs/ROCKETRIDE_APPS.md';
+	const readOnly = /Guides under \.rocketride\/ are read-only\./;
 
-	assert.match(await readGuide.execute({ path: '.rocketride/docs/ROCKETRIDE_APPS.md' }), /Build apps here\./);
-	await assert.rejects(readGuide.execute({ path: '.rocketride/docs/NOPE.md' }), /No guide '\.rocketride\/docs\/NOPE\.md'\. Guides: \.rocketride\/docs\/ROCKETRIDE_APPS\.md$/);
+	assert.match(await run('read_file', { path: guide }), /Build apps here\./);
+	await assert.rejects(run('write_file', { path: guide, content: 'x' }), readOnly);
+	await assert.rejects(run('edit_file', { path: guide, oldString: 'Apps', newString: 'Mine' }), readOnly);
+	await assert.rejects(run('delete_file', { path: guide }), readOnly);
+	await assert.rejects(run('rename', { oldPath: guide, newPath: 'a.md' }), readOnly);
+	await assert.rejects(run('write_file', { path: '.rocketride/notes.md', content: 'x' }), readOnly);
+	await assert.rejects(run('create_directory', { path: '.rocketride/mine' }), readOnly);
+	assert.deepEqual(base.log, [], 'nothing reached the workspace');
 });
 
 // =============================================================================

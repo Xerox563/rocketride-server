@@ -38,10 +38,10 @@ import type { IWorkspaceFileSystem } from '../vfs/vfsTypes';
 // THE SEAM
 // =============================================================================
 
-/** Read-only access to the guides the agent opens with read_guide, by guide path. */
+/** Read-only access to the RocketRide guides, by path relative to '.rocketride/'. */
 export interface GuideSource {
 	/**
-	 * Every guide path (e.g. 'docs/ROCKETRIDE_APPS.md'); read_guide shows each one under '.rocketride/'.
+	 * Every guide path, relative to '.rocketride/' (e.g. 'docs/ROCKETRIDE_APPS.md').
 	 *
 	 * @returns The guide paths.
 	 */

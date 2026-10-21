@@ -169,7 +169,7 @@ Rules:
 ${WAVE_RULES}`;
 
 /** 4. How to approach a task. */
-const DOING_THE_TASK = `- Get oriented first: call list_workspace, then open the guide the Guides section names for the task with read_guide, because the guides hold rules you would otherwise guess. Skip this for a question you can already answer.
+const DOING_THE_TASK = `- Get oriented first: call list_workspace, then read the guide the Guides section names for the task (guides are read-only, under .rocketride/), because they hold rules you would otherwise guess. Skip this for a question you can already answer.
 - Plan, then make small changes, so each one is easy to check and fix.
 - Stay in scope: do what was asked, and mention other problems instead of fixing them, except what check_app or a pipeline's validate reports, because the run can't finish until they pass. Finish the whole task, though, because a half-done change leaves the user's app or pipeline broken.
 - The guides describe a command line and the SDK; do the same things with your tools.`;
@@ -233,7 +233,7 @@ export const CORE_PROMPT: CorePrompt = {
  * (the CLI and Python API docs, and the README, whose task router this
  * replaces).
  *
- * Every path is one read_guide opens: `.rocketride/docs/<file>` is
+ * Every path is a path the agent can read: `.rocketride/docs/<file>` is
  * `docs/agents/context/<file>` and `.rocketride/skills/<path>` is
  * `docs/agents/skills/<path>`. Each line stays within 200 characters and the
  * whole router within 3,000, so the prompt's start stays small and cacheable.
@@ -264,7 +264,7 @@ const ROUTER_ENTRIES: Array<{ when: string; paths: string[] }> = [
 // =============================================================================
 
 /** The instruction that opens the router: read first, then act. */
-const OPENING = 'Before acting, you must open the guide that matches the task with read_guide.';
+const OPENING = 'Before acting, you must read the guide that matches the task.';
 
 /** Closing note: the guides were written for local agents, so say what replaces their commands (wrapped to keep each line short). */
 const CLOSING = ['These guides were written for local agents. Where one says to run a `rocketride` command, read `.rocketride/schema/` or `services-catalog.json`,', 'or run a Python script, use the matching tool instead (list_components, describe_component, validate_pipeline, run_pipeline, …).'].join('\n');
@@ -285,7 +285,7 @@ const ROUTER = [OPENING, '', ...ROUTER_ENTRIES.map((e) => `- ${e.when}: ${e.path
  * environment. The core already carries secrets and checking, so they are not
  * repeated.
  */
-const WORKSPACE_MAP = `The workspace has three top-level directories and nothing else. The guides are not part of it: open them with read_guide.
+const WORKSPACE_MAP = `The workspace has three top-level directories and nothing else. The guides under .rocketride/ are read-only reference outside it: read them, don't edit them.
 
 apps/       - platform apps. Each apps/<folder>/ is a React + TypeScript project.
               package.json carries the control-plane "appManifest" block: id
