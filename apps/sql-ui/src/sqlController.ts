@@ -468,8 +468,14 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 		},
 		'sql.refreshSchema': ({ connId }) => core.withSession(connId, (session) => session.refreshSchema(), 'refresh_schema'),
 		'sql.dialect': ({ connId }) => core.withSession(connId, (session) => session.dialect(), 'dialect'),
-		'sql.getService': async ({ provider }) => (await core.getService(provider)) as JsonValue,
-		'sql.validate': async ({ pipeline }) => (await core.validate(pipeline)) as JsonValue,
+		'sql.getService': async ({ provider }) => {
+			if (typeof provider !== 'string' || provider === '') throw invalidInput('get_service', 'The provider must be a name.');
+			return (await core.getService(provider)) as JsonValue;
+		},
+		'sql.validate': async ({ pipeline }) => {
+			if (pipeline === null || typeof pipeline !== 'object' || Array.isArray(pipeline) || Object.getPrototypeOf(pipeline) !== Object.prototype) throw invalidInput('validate', 'The pipeline must be an object.');
+			return (await core.validate(pipeline)) as JsonValue;
+		},
 		'sql.envKeys': () => core.envKeys(),
 		'sql.connection': ({ connId }) => core.connection(connId),
 		'sql.saveConnection': async ({ connection, owner }) => {

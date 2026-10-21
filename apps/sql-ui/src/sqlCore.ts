@@ -571,6 +571,8 @@ export function createSqlCore(opts: SqlCoreOptions): SqlCore {
 		async deleteConnection(connId, stillAllowed = sameAccount('deleteConnection')) {
 			await listReady('deleteConnection');
 			stillAllowed();
+			// An id the list does not hold changes nothing (and writes nothing).
+			if (getSavedConnection(connId) === undefined) return;
 			await this.release(connId);
 			stillAllowed();
 			deleteSavedConnection(connId);

@@ -56,7 +56,7 @@ import type { ConnectionsState, HistoryState } from '../src/ops';
 import { connectionDocState, directReleaseKey, routeDocKey, sqlChannel } from '../src/sqlFrame';
 import { RESOLVE_BUDGET_MS, SQL_OP_TIMEOUT_MS } from '../src/sqlTimeouts';
 import { DIALECT_WAIT_MS, GET_SCHEMA_WAIT_MS, REFRESH_SCHEMA_WAIT_MS } from '../src/connect/tools';
-import { USER, engineScript, scriptedClientRealm, until } from './realm';
+import { SAVED_PATH, USER, engineScript, scriptedClientRealm, until } from './realm';
 import { taskRow } from './support';
 import { DIRECT, PIPELINE, postgres, rig, toolRequests } from './devtoolRig';
 
@@ -596,8 +596,14 @@ describe('T10 — write gates hold in the controller even when a frame calls the
 		try {
 			await r.env.resolveEndpoint(PIPELINE);
 			const before = r.engine.requests.length;
-			const call = (op: 'sql.execute' | 'sql.getSchema', params: Record<string, unknown>) => r.frame.caller.callReply(op, { connId: 'c-pipe', ...params } as never, { timeoutMs: SQL_OP_TIMEOUT_MS[op] });
-			const bad: Array<['sql.execute' | 'sql.getSchema', Record<string, unknown>]> = [
+			type Checked = 'sql.execute' | 'sql.getSchema' | 'sql.getService' | 'sql.validate';
+			const call = (op: Checked, params: Record<string, unknown>) => r.frame.caller.callReply(op, { connId: 'c-pipe', ...params } as never, { timeoutMs: SQL_OP_TIMEOUT_MS[op] });
+			const bad: Array<[Checked, Record<string, unknown>]> = [
+				['sql.getService', { provider: 42 }],
+				['sql.getService', { provider: '' }],
+				['sql.validate', { pipeline: 'x' }],
+				['sql.validate', { pipeline: [1] }],
+				['sql.validate', { pipeline: null }],
 				['sql.execute', { sql: 42 }],
 				['sql.execute', { sql: null }],
 				['sql.execute', { sql: ['SELECT 1'] }],
@@ -616,6 +622,19 @@ describe('T10 — write gates hold in the controller even when a frame calls the
 				assert.throws(() => checkExecuteInput({ sql: 'SELECT ?', params }), (error: unknown) => error instanceof ExplorerToolError && error.kind === 'invalid');
 			}
 			assert.throws(() => checkSchemaInput({ table: ['t'] }), (error: unknown) => error instanceof ExplorerToolError && error.kind === 'invalid');
+		} finally {
+			r.dispose();
+		}
+	});
+
+	it('deleting an id the list does not hold changes nothing and writes nothing', async () => {
+		const r = await rig();
+		try {
+			await until(() => getSavedConnectionsStatus() === 'ready', 'the list');
+			await r.frame.caller.callReply('sql.deleteConnection', { connId: 'c-none', owner: r.frame.owner() }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.deleteConnection'] });
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			assert.equal(r.engine.requests.some((q) => q.op === 'client.fsWriteJson' && (q.params as { path: string }).path === SAVED_PATH), false);
+			assert.deepEqual(getSavedConnections().map((c) => c.id), ['c-pipe', 'c-direct']);
 		} finally {
 			r.dispose();
 		}
