@@ -33,7 +33,7 @@
 // tool pipeline is stopped when its last document closes.
 // =============================================================================
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import type { ShellAppProps } from 'shell';
 import { ConnectionManager, DocTabs, DocSplitLayout, AppLayout, usePrefs, useShellConnection } from 'shell';
@@ -49,6 +49,7 @@ import type { SqlSidebarBridge } from './sidebarBridge';
 import { createSqlCore } from './sqlCore';
 import type { SqlCore } from './sqlCore';
 import { SQL_APP_ID } from './appId';
+import { sqlIdentityScope } from './identityScope';
 import { SqlEnvProvider, useSqlEnv } from './sqlEnv';
 import type { SqlEndpoint } from './connect';
 import ConnectionView from './views/ConnectionView';
@@ -157,6 +158,18 @@ const SqlApp: React.FC<ShellAppProps> = (_props) => {
 		setCore(created);
 		return () => created.dispose();
 	}, []);
+
+	// A different user, organization or team closes the previous account's
+	// tabs and schema; an identity nobody can vouch for (signed out, dropped)
+	// forgets the schema (identityScope.ts, R9). A layout effect, so a render
+	// after the change is never painted with the old results.
+	useLayoutEffect(() => {
+		if (!core) return undefined;
+		sqlIdentityScope.apply(core.identity.get().known ? core.identity.fingerprint : null);
+		return core.identity.subscribe((snapshot) => {
+			sqlIdentityScope.apply(snapshot.known ? snapshot.fingerprint : null);
+		});
+	}, [core]);
 
 	// Create the Documents instance once.
 	useEffect(() => {

@@ -66,6 +66,7 @@ import { applyReplicaConnections } from './connect';
 import type { SavedConnectionsStatus } from './connect';
 import { parseConnectionEditorDocKey } from './docs';
 import { getActiveConnection, subscribeActiveConnection } from './navigation';
+import { clearSchemas } from './schema/schemaStore';
 import type { SqlEventMap, SqlOps, SqlStateMap } from './ops';
 
 // =============================================================================
@@ -233,7 +234,11 @@ export interface SqlFrameOptions {
 	documents?: DevToolProps['documents'];
 	/** The protocol factories. */
 	protocol: SqlToolProtocol;
-	/** Clear what this frame holds for the connection (schemas, results) — identity change, sign-out, a dropped connection. */
+	/**
+	 * Clear what the mount holds for the connection (its history view) —
+	 * identity change, sign-out, a dropped connection. The realm's schema
+	 * snapshots are cleared before it is called.
+	 */
 	onReset?: (reason: FrameResetReason) => void;
 	/** The clock deadlines are stamped from (tests). */
 	now?: () => number;
@@ -272,7 +277,14 @@ export function attachSqlFrame(opts: SqlFrameOptions): SqlFrameMount {
 		channel,
 		docKey: opts.docKey ?? null,
 		...(opts.documents ? { documents: opts.documents } : {}),
-		onReset: (reason) => opts.onReset?.(reason),
+		// The controller's identity changed (the guard closes this document),
+		// cannot be vouched for, or the host connection dropped: forget what
+		// this realm holds for the previous session, then let the mount clear
+		// its own (R9).
+		onReset: (reason) => {
+			clearSchemas();
+			opts.onReset?.(reason);
+		},
 	});
 	let disposed = false;
 	return {

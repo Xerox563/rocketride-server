@@ -67,6 +67,38 @@ export function destroyDocs(): void {
 	_docs = null;
 }
 
+/** The part of a Documents instance {@link closeConnectionDocuments} needs. */
+export interface ConnectionDocsHost {
+	/** The current state: every open editor and the document it shows. */
+	getState(): { editors: Readonly<Record<string, { documentUri: string }>> };
+	/** Close one editor (the document is released with its last editor). */
+	closeEditor(editorId: string): void;
+}
+
+/**
+ * Close every tab that belongs to the signed-in account's connections —
+ * workbench, query, table, designer and diagram, in every editor group — and
+ * every connection editor (it shows a record from that account's list).
+ *
+ * Used when the signed-in account changes: those tabs hold the previous
+ * account's query results, schema and records. Every SQL Explorer document is
+ * static, so none is ever dirty and closing its last editor releases it.
+ * (Port of 98277843b; this app has no Connections landing to keep.)
+ *
+ * @param docs - The app's Documents instance.
+ * @returns How many editors were closed.
+ */
+export function closeConnectionDocuments(docs: ConnectionDocsHost): number {
+	const editors = Object.entries(docs.getState().editors);
+	let closed = 0;
+	for (const [editorId, editor] of editors) {
+		if (endpointKeyFromAnyUri(editor.documentUri) === null && !isConnectionEditorUri(editor.documentUri)) continue;
+		docs.closeEditor(editorId);
+		closed += 1;
+	}
+	return closed;
+}
+
 /**
  * Closes every editor showing one document URI (Documents has no close-by-uri
  * of its own — editors are the closable unit).

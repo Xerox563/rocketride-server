@@ -199,6 +199,8 @@ export const SqlDevTool: React.FC<DevToolProps> = ({ peer, channel, docKey, docu
 			docKey: docKey ?? null,
 			...(documents ? { documents } : {}),
 			protocol: SQL_TOOL_PROTOCOL,
+			// Identity changed, unknown, or the host connection dropped: the
+			// frame wiring clears the realm's schemas; the history view is ours.
 			onReset: () => history?.reset(),
 		});
 		history = createRemoteHistory({ caller: frame.caller, channel: sqlChannel(frame.channel), owner: frame.owner });
