@@ -580,13 +580,21 @@ with `attachWhenLoaded(prefs, (api, owner) => store.attachPrefs(api, owner))`.
     session falls back to memory.
   - A file that exists but cannot be read, or is in an unknown or newer
     format, is never written; history stays in memory for that session.
-- **One bag per identity fingerprint.** At most 8 bags are kept.
+- **One bag per identity fingerprint.** At most 8 bags are kept. The owner is
+  checked before every file request and again after every awaited one (a
+  write's mkdir, a load's stat and read).
   - A write that falls due while nobody is vouched for (`ownerNow()` null, a
-    reconnect) is held and lands once the same owner is back.
-  - A different owner drops it.
+    reconnect) is held. It looks again at most every 30 s, without using up
+    the failure retries, and lands once the same owner is back. A load waits
+    the same way before its next request.
+  - A different owner drops a pending write and stops a load.
+  - An answer that arrives after the owner changed is discarded: a load reads
+    again once the owner is back. A write is composed only after its mkdir
+    settled and the owner was checked again.
+  - After `dispose()`, nothing is sent and nothing read is accepted.
 - **Writes.** They are debounced and serialised, and the first one runs
   `client.fsMkdir` on the folder.
-  - A failed or held write retries with backoff (`PREFS_WRITE_RETRIES`).
+  - A failed write retries with backoff (`PREFS_WRITE_RETRIES`).
   - The file is capped at twice the 256 KB history bag, measured as the SDK
     writes it (two-space indented JSON).
   - Every fs request has an explicit timeout.

@@ -429,3 +429,132 @@ describe('createFsPrefs — round 3: nothing a person changed is lost to timing'
 	});
 });
 
+describe('createFsPrefs — the owner is re-checked after every file request', () => {
+	const B = 'user-b|org-1|team-1';
+
+	/**
+	 * An adapter whose fsMkdir is held until released, over a first-run store.
+	 *
+	 * @param ownerNow - Who is signed in now.
+	 * @returns The adapter, its clock, the release and the request log.
+	 */
+	function heldMkdir(ownerNow: () => string | null) {
+		let release: () => void = () => undefined;
+		let mkdirs = 0;
+		const writes: unknown[] = [];
+		const { cm, requests } = fakeFs({
+			'client.fsStat': () => ({ exists: false }),
+			'client.fsMkdir': () => { mkdirs += 1; return new Promise<void>((resolve) => { release = resolve; }); },
+			'client.fsWriteJson': (params) => { writes.push(params.value); },
+		});
+		const { clock, opts } = options(cm, { ownerNow });
+		return { prefs: createFsPrefs(opts), clock, writes, requests, release: () => release(), mkdirs: () => mkdirs };
+	}
+
+	it('mkdir in flight, then nobody is vouched for: nothing is sent until the owner is back, then exactly one write', async () => {
+		let current: string | null = OWNER;
+		const r = heldMkdir(() => current);
+		await r.prefs.load();
+		r.prefs.setPref('k', 'a-run');
+		await r.clock.advance(PREFS_WRITE_DEBOUNCE_MS);
+		assert.equal(r.mkdirs(), 1, 'the first write is waiting on its mkdir');
+		current = null;
+		r.release();
+		await r.clock.advance(60_000);
+		await settle();
+		assert.equal(r.writes.length, 0, 'nothing sent while unknown');
+		current = OWNER;
+		await r.clock.advance(60_000);
+		await settle();
+		assert.equal(r.writes.length, 1);
+		assert.deepEqual((r.writes[0] as { owners: Record<string, { prefs: unknown }> }).owners[OWNER].prefs, { k: 'a-run' });
+	});
+
+	it('mkdir in flight, then another account: nothing is ever sent', async () => {
+		let current: string | null = OWNER;
+		const r = heldMkdir(() => current);
+		await r.prefs.load();
+		r.prefs.setPref('k', 'a-run');
+		await r.clock.advance(PREFS_WRITE_DEBOUNCE_MS);
+		current = B;
+		r.release();
+		await r.clock.advance(30 * 60_000);
+		await r.prefs.flush();
+		await r.prefs.close();
+		assert.equal(r.writes.length, 0);
+		assert.equal(r.requests.some((q) => q.op === 'client.fsWriteJson'), false);
+	});
+
+	it('mkdir in flight, then dispose(): nothing is sent', async () => {
+		const r = heldMkdir(() => OWNER);
+		await r.prefs.load();
+		r.prefs.setPref('k', 'a-run');
+		await r.clock.advance(PREFS_WRITE_DEBOUNCE_MS);
+		r.prefs.dispose();
+		r.release();
+		await r.clock.advance(30 * 60_000);
+		await settle();
+		assert.equal(r.writes.length, 0);
+	});
+
+	it('a read that answers after the owner changed is discarded: another account stops the load, a return of the same owner reads again', async () => {
+		for (const next of [B, null]) {
+			let current: string | null = OWNER;
+			const reads: Array<(value: unknown) => void> = [];
+			const { cm, requests } = fakeFs({
+				'client.fsStat': () => ({ exists: true }),
+				'client.fsReadJson': () => new Promise((resolve) => { reads.push(resolve); }),
+			});
+			const { clock, opts } = options(cm, { ownerNow: () => current });
+			const prefs = createFsPrefs(opts);
+			const loading = prefs.load();
+			await settle();
+			assert.equal(reads.length, 1);
+			current = next;
+			reads[0](file({ secret: 'read while the owner was not signed in' }));
+			await settle();
+			if (next === B) {
+				assert.equal(await loading, 'failed', 'another account: the load stops');
+				assert.equal(prefs.getPref('secret'), undefined, 'and keeps nothing it read');
+				continue;
+			}
+			assert.equal(prefs.status(), 'loading', 'unknown: the result is discarded and the load waits');
+			assert.equal(prefs.getPref('secret'), undefined);
+			current = OWNER;
+			await clock.advance(5_000);
+			assert.equal(reads.length, 2, 'read again once the owner is back');
+			reads[1](file({ fresh: true }));
+			assert.equal(await loading, 'ready');
+			assert.equal(prefs.getPref('fresh'), true);
+			assert.equal(prefs.getPref('secret'), undefined);
+			assert.equal(requests.filter((q) => q.op === 'client.fsStat').length, 2);
+		}
+	});
+
+	it('no fs request, first or retry, while nobody is vouched for', async () => {
+		let current: string | null = null;
+		let failures = 1;
+		const { cm, requests } = fakeFs({
+			'client.fsStat': () => {
+				if (failures > 0) { failures -= 1; throw new Error('Not connected to server'); }
+				return { exists: false };
+			},
+		});
+		const { clock, opts } = options(cm, { ownerNow: () => current });
+		const prefs = createFsPrefs(opts);
+		const loading = prefs.load();
+		await clock.advance(10_000);
+		assert.equal(requests.length, 0, 'nothing before the owner is known');
+		current = OWNER;
+		await clock.advance(1_000);
+		assert.equal(requests.length, 1, 'the first attempt, which fails');
+		current = null;
+		await clock.advance(60_000);
+		assert.equal(requests.length, 1, 'no retry while unknown');
+		current = OWNER;
+		await clock.advance(5_000);
+		assert.equal(requests.length, 2);
+		assert.equal(await loading, 'ready');
+	});
+});
+

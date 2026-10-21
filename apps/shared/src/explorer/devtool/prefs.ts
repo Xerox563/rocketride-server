@@ -53,19 +53,27 @@
 //     organization, development team). The file keeps one bag per owner and
 //     an accessor reads and writes only its own; the others are written back
 //     untouched (at most MAX_PREFS_OWNERS bags, the least recently written
-//     dropped once a write succeeds). An accessor is made for ONE owner:
+//     dropped once a write succeeds). An accessor is made for ONE owner, and
+//     the owner is checked before every file request AND again after every
+//     awaited one (a write's mkdir, a load's stat and read):
 //       - `ownerNow()` null (a reconnect: nobody is vouched for yet) HOLDS a
-//         due write, which is retried and lands once the same owner is back;
-//       - `ownerNow()` naming someone else DROPS it (an identity change), as
-//         the history store drops its own.
+//         due write, which looks again (at most every 30 s, without using up
+//         the failure retries) and lands once the same owner is back, and
+//         makes a load wait before its next request;
+//       - `ownerNow()` naming someone else DROPS a pending write (an identity
+//         change), as the history store drops its own, and stops a load;
+//       - an answer that arrives after the owner changed is discarded (a load
+//         reads again once the owner is back), and a write is composed only
+//         after its mkdir settled and the owner was checked again;
+//       - after dispose() nothing is sent and nothing read is accepted.
 //   CAPS. The history store trims its bag to MAX_HISTORY_BAG_CHARS (256 KB);
 //     the whole file, measured as the SDK writes it (two-space indented
 //     JSON, client.ts fsWriteJson), is capped at MAX_PREFS_FILE_CHARS, other
 //     owners' bags being dropped first, and a file still over it is refused,
 //     not written.
 //   WRITES are debounced (PREFS_WRITE_DEBOUNCE_MS), serialised, and made
-//     after one `client.fsMkdir` of the folder. A failed or held write keeps
-//     the change and retries with backoff, PREFS_WRITE_RETRIES times; the next
+//     after one `client.fsMkdir` of the folder. A failed write keeps the
+//     change and retries with backoff, PREFS_WRITE_RETRIES times; the next
 //     change, flush() or close() tries again after that. Every fs request
 //     names its bus timeout (PREFS_FS_TIMEOUT_MS).
 //   LAST WRITER WINS across windows: each window writes the whole file from
@@ -98,7 +106,10 @@ export const PREFS_LOAD_ATTEMPTS = 3;
 /** Pause before load retry n (1-based): 1 s, then 3 s. */
 const LOAD_RETRY_DELAYS_MS = [1_000, 3_000];
 
-/** Retries of a failed or held write before it waits for the next change, flush() or close(). */
+/** How often a load waiting for its owner to be signed in again looks. */
+const OWNER_POLL_MS = 1_000;
+
+/** Retries of a FAILED write before it waits for the next change, flush() or close() (a write held while nobody is signed in does not use them). */
 export const PREFS_WRITE_RETRIES = 5;
 
 /** The longest pause between write retries (the backoff doubles from the debounce up to this). */
@@ -264,22 +275,54 @@ export function createFsPrefs(opts: IFsPrefsOptions): IFsPrefs {
 		}, delayMs);
 	};
 
-	/** Schedule the next retry of a failed or held write, if any are left. */
+	/** Schedule the next retry of a FAILED write, if any are left. */
 	const retryLater = (): void => {
 		if (retries >= PREFS_WRITE_RETRIES) return;
 		retries += 1;
 		schedule(Math.min(debounceMs * 2 ** retries, MAX_WRITE_RETRY_DELAY_MS));
 	};
 
-	/** One attempt at reading the file. */
-	const readOnce = async (): Promise<void> => {
+	/** Look again for a write HELD while nobody is signed in: not a failure, so no budget; at most every 30 s. */
+	let holds = 0;
+	const holdForOwner = (): void => {
+		holds = Math.min(holds + 1, 16);
+		schedule(Math.min(debounceMs * 2 ** holds, MAX_WRITE_RETRY_DELAY_MS));
+	};
+
+	/** Still this owner's accessor, signed in as this owner, after an await. */
+	const stillOwner = (): boolean => !disposed && ownerState() === 'owner';
+
+	/**
+	 * Wait until the owner is signed in (or someone else is, or the accessor is disposed).
+	 *
+	 * @returns Which.
+	 */
+	const untilOwnerKnown = async (): Promise<'owner' | 'other' | 'disposed'> => {
+		for (;;) {
+			if (disposed) return 'disposed';
+			const who = ownerState();
+			if (who !== 'unknown') return who;
+			await sleep(OWNER_POLL_MS);
+		}
+	};
+
+	/**
+	 * One attempt at reading the file. Each request's answer is used only while
+	 * the owner is still the one signed in.
+	 *
+	 * @returns The owner's bag and the others, or 'stale' when the owner changed during a request.
+	 */
+	const readOnce = async (): Promise<{ mine: Record<string, unknown>; others: Record<string, IOwnerBag> } | 'stale'> => {
 		const stat = await busRequest(cm, 'client.fsStat', { path }, timeoutMs);
-		if (isPlainObject(stat) && stat.exists === false) return;
+		if (!stillOwner()) return 'stale';
+		if (isPlainObject(stat) && stat.exists === false) return { mine: {}, others: {} };
 		if (!isPlainObject(stat) || stat.exists !== true) throw new Error('client.fsStat gave no answer about the history file.');
-		const owners = readFile(await busRequest(cm, 'client.fsReadJson', { path }, timeoutMs));
-		mine = { ...(owners[owner]?.prefs ?? {}) };
+		const raw = await busRequest(cm, 'client.fsReadJson', { path }, timeoutMs);
+		if (!stillOwner()) return 'stale';
+		const owners = readFile(raw);
+		const own = { ...(owners[owner]?.prefs ?? {}) };
 		delete owners[owner];
-		others = owners;
+		return { mine: own, others: owners };
 	};
 
 	const load = (): Promise<FsPrefsStatus> => {
@@ -287,23 +330,43 @@ export function createFsPrefs(opts: IFsPrefsOptions): IFsPrefs {
 		status = 'loading';
 		loading = (async (): Promise<FsPrefsStatus> => {
 			let lastError: unknown = null;
-			for (let attempt = 1; attempt <= PREFS_LOAD_ATTEMPTS && !disposed; attempt += 1) {
-				if (ownerState() === 'other') {
+			let failures = 0;
+			let loaded = false;
+			for (;;) {
+				// No request, first or retry, unless the owner is the one signed in.
+				const who = await untilOwnerKnown();
+				if (who === 'disposed') break;
+				if (who === 'other') {
 					lastError = new Error('The signed-in identity changed before the history file was read.');
 					break;
 				}
+				let result: Awaited<ReturnType<typeof readOnce>>;
 				try {
-					await readOnce();
-					lastError = null;
-					break;
+					result = await readOnce();
 				} catch (error) {
+					// An answer that came back after the owner changed proves nothing.
+					if (!stillOwner()) continue;
 					lastError = error;
+					failures += 1;
 					// A file in a foreign format will not change on a retry.
-					if (error instanceof FileFormatError) break;
-					if (attempt < PREFS_LOAD_ATTEMPTS) await sleep(LOAD_RETRY_DELAYS_MS[attempt - 1] ?? LOAD_RETRY_DELAYS_MS[LOAD_RETRY_DELAYS_MS.length - 1]);
+					if (error instanceof FileFormatError || failures >= PREFS_LOAD_ATTEMPTS) break;
+					await sleep(LOAD_RETRY_DELAYS_MS[failures - 1] ?? LOAD_RETRY_DELAYS_MS[LOAD_RETRY_DELAYS_MS.length - 1]);
+					continue;
 				}
+				// Read while the owner was not signed in: discarded; look again.
+				if (result === 'stale') continue;
+				mine = result.mine;
+				others = result.others;
+				lastError = null;
+				loaded = true;
+				break;
 			}
-			if (lastError !== null) {
+			if (disposed) {
+				// A disposed accessor accepts nothing and writes nothing.
+				status = 'failed';
+				return status;
+			}
+			if (!loaded) {
 				mine = {};
 				status = 'failed';
 				opts.onError?.(lastError, 'load');
@@ -341,22 +404,33 @@ export function createFsPrefs(opts: IFsPrefsOptions): IFsPrefs {
 		return null;
 	};
 
-	const write = async (): Promise<void> => {
-		if (status !== 'ready' || !dirty) return;
+	/**
+	 * Whether a write may go on now: the accessor is live and its owner is the
+	 * one signed in. Another identity drops the pending change; nobody signed
+	 * in keeps it and tries again later.
+	 *
+	 * @returns True to go on.
+	 */
+	const mayWrite = (): boolean => {
+		if (disposed) return false;
 		const who = ownerState();
 		if (who === 'other') {
 			// The identity changed: this owner's pending change is dropped.
 			dirty = false;
-			return;
+			return false;
 		}
 		if (who === 'unknown') {
-			// Nobody is vouched for (a reconnect): keep the change, try again later.
-			retryLater();
-			return;
+			// Nobody is vouched for (a reconnect): keep the change, look again later.
+			holdForOwner();
+			return false;
 		}
-		const composed = compose();
-		dirty = false;
-		if (composed === null) return;
+		holds = 0;
+		return true;
+	};
+
+	const write = async (): Promise<void> => {
+		if (disposed || status !== 'ready' || !dirty) return;
+		if (!mayWrite()) return;
 		try {
 			if (!madeDir && dir !== '') {
 				try {
@@ -365,11 +439,19 @@ export function createFsPrefs(opts: IFsPrefsOptions): IFsPrefs {
 					// Usually "already exists"; a real failure surfaces on the write.
 				}
 				madeDir = true;
+				// The owner may have changed, or the accessor gone, while the folder was made.
+				if (!mayWrite()) return;
 			}
+			// Composed only now, from the bag of an owner who is signed in now.
+			const composed = compose();
+			dirty = false;
+			if (composed === null) return;
 			await busRequest(cm, 'client.fsWriteJson', { path, value: composed.file }, timeoutMs);
+			if (disposed) return;
 			others = composed.kept;
 			retries = 0;
 		} catch (error) {
+			if (disposed) return;
 			dirty = true;
 			opts.onError?.(error, 'write');
 			retryLater();
