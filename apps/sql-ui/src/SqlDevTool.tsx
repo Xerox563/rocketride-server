@@ -148,7 +148,7 @@ const SqlConnectionDocument: React.FC<{ connId: string; sidebarClosed: boolean; 
 	// env is read through a ref. The 15-minute idle TTL backstops teardowns
 	// this cleanup never sees.
 	const envRef = useRef(env);
-	envRef.current = env;
+	useEffect(() => { envRef.current = env; }, [env]);
 	const releaseKey = directReleaseKey(endpoint);
 	useEffect(() => {
 		if (releaseKey === null) return undefined;
@@ -234,7 +234,7 @@ export const SqlDevTool: React.FC<DevToolProps> = ({ peer, channel, docKey, docu
 	// The host's documents API, read at call time: a new object on a re-render
 	// must not remount the frame wiring (which drops pending calls).
 	const documentsRef = useRef(documents);
-	documentsRef.current = documents;
+	useEffect(() => { documentsRef.current = documents; }, [documents]);
 	const [mount, setMount] = useState<{ frame: SqlFrameMount; history: RemoteHistory } | null>(null);
 	useEffect(() => {
 		let history: RemoteHistory | null = null;

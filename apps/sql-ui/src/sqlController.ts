@@ -428,23 +428,21 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 	 * @param owner - The account.
 	 */
 	const attachFile = (owner: string): void => {
-		{
-			let accessor: IFsPrefs;
-			if (parked !== null && parked.owner === owner) {
-				// The same account is back: its accessor carries on, and what it
-				// still holds is written now.
-				accessor = parked;
-				parked = null;
-				void accessor.flush();
-			} else {
-				parked?.dispose();
-				parked = null;
-				accessor = historyFile(owner);
-			}
-			prefs = accessor;
-			// Load FIRST, then attach (the store reads its preferences at attach).
-			detachHistory = attachWhenLoaded(accessor, (api, fingerprint) => history.attachPrefs(api, fingerprint));
+		let accessor: IFsPrefs;
+		if (parked !== null && parked.owner === owner) {
+			// The same account is back: its accessor carries on, and what it
+			// still holds is written now.
+			accessor = parked;
+			parked = null;
+			void accessor.flush();
+		} else {
+			parked?.dispose();
+			parked = null;
+			accessor = historyFile(owner);
 		}
+		prefs = accessor;
+		// Load FIRST, then attach (the store reads its preferences at attach).
+		detachHistory = attachWhenLoaded(accessor, (api, fingerprint) => history.attachPrefs(api, fingerprint));
 	};
 
 	const handlers: RequiredControllerHandlers<SqlOps> = {
