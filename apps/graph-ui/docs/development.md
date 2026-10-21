@@ -48,10 +48,24 @@ live here.
   report through `endpoints`.
 - History changes are ops. The History panel announces a change ("Note
   saved.") only when the controller's Reply confirms it, and says why when it
-  fails. A history store attaches under one identity at a time: on a change
-  the controller forgets the previous owner's entries at once (before the new
-  owner's file has loaded), and when it unmounts it flushes the store's pending
-  batch before the last detach.
+  fails. A history store attaches under one identity at a time, through one fs
+  accessor per identity whose `ownerNow` reads the controller's identity
+  tracker (owner known: write; nobody known: the base holds the write; someone
+  else: the base drops it). A disconnect, a sign-out or an account switch
+  reaches the tracker before anything unmounts, so `syncHistory` hands the
+  store's pending batch to the outgoing owner's accessor (`flush()`) BEFORE the
+  detach, and still forgets that owner's entries in memory at once, so nothing
+  of A is served to B while B's file loads. While nobody is known the accessor
+  is HELD and re-used for the same owner (its change goes out at once). For
+  another owner it is flushed while that owner is known, so the base drops the
+  change. When the controller unmounts with an owed accessor (VS Code, on a
+  disconnect) the accessor and its tracker are PARKED for the realm
+  (`devtool/owedHistory.ts`): the next controller adopts it; otherwise it
+  writes when its owner is back, drops for another, and is released after 10
+  minutes. Known limit: a run recorded after a switch, while the new owner's
+  file is still loading (it waits, unhydrated, in the store), is dropped if the
+  identity changes again before that load ends. It is never given to another
+  owner.
 - A disconnect does not keep a document's work. The controller resets its
   store (the identity is unknown), and both hosts unmount the documents while
   the server is unreachable (rocket-ui's DevToolMount, VS Code's panel), so the
