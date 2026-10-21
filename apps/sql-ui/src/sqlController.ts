@@ -73,8 +73,9 @@
 // before the first write, writes are debounced, one bag per identity
 // fingerprint, the 256 KB bag cap holds, and a file that exists but cannot be
 // read is never written (history is kept for the session). A new identity
-// gets a new accessor and the store forgets what it held at once. Last writer
-// wins across windows (a known limitation the privacy line states).
+// gets a new accessor and the store forgets what it held at once. An unmount
+// writes the batch still in the debounce first. Last writer wins across
+// windows (a known limitation the privacy line states).
 //
 // LIFETIME (R6, R7). `attachSqlController` runs inside the sidebar's
 // `useEffect` and its `dispose` is the cleanup: exactly one op server per
@@ -484,7 +485,10 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 			offIdentity();
 			offHistory();
 			offHistoryOwner();
-			// Unmounting under the same identity: write what is pending, then stop.
+			// Unmounting under the same identity (a VS Code disconnect unmounts the
+			// controller): write the batch still in the store's debounce FIRST
+			// (the last detach drops it), then stop.
+			history.flush();
 			detachHistory?.();
 			void prefs?.close();
 			offActive();

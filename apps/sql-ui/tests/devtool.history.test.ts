@@ -106,6 +106,24 @@ describe('§3.5 — the controller keeps SQL history in the user\'s history file
 		}
 	});
 
+	it('a run recorded within the store\'s debounce just before the controller unmounts is still written', async () => {
+		const files: Record<string, unknown> = {};
+		const r = await rig({ files });
+		try {
+			await until(() => r.engine.ops().includes('client.fsStat'), 'the history file check');
+			await settle();
+			const owner = r.frame.owner();
+			await r.frame.caller.callReply('sql.historyRecord', { connId: 'c-pipe', entry: entry('last', 'SELECT 9', 90), owner }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.historyRecord'] });
+			// The controller unmounts at once (a VS Code disconnect), inside the 300 ms debounce.
+			r.mount.dispose();
+			await until(() => files[HISTORY_PATH] !== undefined, 'the flushed write', 5_000);
+			const written = files[HISTORY_PATH] as { owners: Record<string, { prefs: Record<string, Record<string, Array<{ id: string }>>> }> };
+			assert.deepEqual(written.owners[OWNER]!.prefs['sql.history']![KEY]!.map((e) => e.id), ['last']);
+		} finally {
+			r.dispose();
+		}
+	});
+
 	it('moves a connection\'s revision when its history changes, and carries the recording switch, on the retained topic', async () => {
 		const r = await rig();
 		try {
