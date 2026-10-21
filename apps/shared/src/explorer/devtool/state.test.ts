@@ -26,7 +26,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { assertRetainedStateSize, guardRetainedState, jsonByteLength, MAX_RETAINED_STATE_BYTES, RetainedStateTooLargeError } from './state';
+import { assertRetainedStateSize, guardRetainedState, jsonByteLength, MAX_RETAINED_STATE_BYTES, MAX_RETAINED_TOTAL_BYTES, RetainedStateTooLargeError, truncateLists } from './state';
 import { createDevToolHarness, settle, shellProtocol } from './testing';
 
 describe('jsonByteLength', () => {
@@ -58,9 +58,9 @@ describe('the retained-state cap', () => {
 });
 
 describe('guardRetainedState — a channel that refuses bulk state', () => {
-	it('publishes small snapshots and THROWS on a bulk one, which never reaches the wire', async () => {
+	it('strict: publishes small snapshots and THROWS on a bulk one, which never reaches the wire (for tests)', async () => {
 		const h = createDevToolHarness();
-		const channel = guardRetainedState(shellProtocol.createToolChannel(h.sidebarPeer), { maxBytes: 1_024 });
+		const channel = guardRetainedState(shellProtocol.createToolChannel(h.sidebarPeer), { maxBytes: 1_024, strict: true });
 		channel.publishState('schemas', { k1: ['users'] });
 		await settle();
 		const writes = h.wire.length;
@@ -72,7 +72,7 @@ describe('guardRetainedState — a channel that refuses bulk state', () => {
 		assert.deepEqual(seen, [{ k1: ['users'] }], 'the rest of the channel is the original');
 	});
 
-	it('with onOversize: reports and refuses instead of throwing', () => {
+	it('a snapshot nothing can shrink is withheld and reported, never thrown', () => {
 		const h = createDevToolHarness();
 		const reported: RetainedStateTooLargeError[] = [];
 		const channel = guardRetainedState(shellProtocol.createToolChannel(h.sidebarPeer), { maxBytes: 10, onOversize: (error) => reported.push(error) });
@@ -81,3 +81,94 @@ describe('guardRetainedState — a channel that refuses bulk state', () => {
 		assert.equal(reported[0].topic, 'big');
 	});
 });
+
+describe('guardRetainedState — round 3: degrade, never withhold by default (CE-6)', () => {
+	/** A realistic endpoint summary (the DA measured ~312 bytes each). */
+	const endpoint = (i: number) => ({
+		key: `k1|dev|user|u1|team-1|proj-${i}|tools=tools_1|db_${i}`, nodeId: `db_${i}`, nodeName: `Warehouse replica ${i}`,
+		pipelineName: `nightly-etl-${i}`, provider: 'db_postgres', state: 'ready', dialect: 'postgres', readOnly: false,
+	});
+
+	it('an oversize list reaches the frames truncated, with an honest count, instead of leaving them on the stale list', async () => {
+		const h = createDevToolHarness();
+		const reported: RetainedStateTooLargeError[] = [];
+		const channel = guardRetainedState(shellProtocol.createToolChannel(h.sidebarPeer), { onOversize: (error) => reported.push(error) });
+		const frame = shellProtocol.createToolChannel(h.newFramePeer());
+		let seen: { items: unknown[]; truncated?: Record<string, { kept: number; total: number }> } = { items: [] };
+		frame.onState('endpoints', (snapshot) => { seen = snapshot as typeof seen; });
+		await settle();
+		channel.publishState('endpoints', { items: Array.from({ length: 10 }, (_, i) => endpoint(i)) });
+		await settle();
+		assert.equal(seen.items.length, 10);
+		const total = Math.ceil(MAX_RETAINED_STATE_BYTES / jsonByteLength(endpoint(123))) + 50;
+		assert.doesNotThrow(() => channel.publishState('endpoints', { items: Array.from({ length: total }, (_, i) => endpoint(i)) }));
+		await settle();
+		assert.ok(seen.items.length > 10, 'the frames moved on from the stale list');
+		assert.ok(seen.truncated !== undefined, 'and are told it is truncated');
+		assert.deepEqual(seen.truncated, { items: { kept: seen.items.length, total } });
+		assert.ok(jsonByteLength(seen) <= MAX_RETAINED_STATE_BYTES);
+		assert.equal(reported.length, 1, 'the lane is told too');
+		assert.equal(reported[0].outcome, 'degraded');
+		assert.deepEqual(h.violations, []);
+	});
+
+	it('a lane shrink() replaces the snapshot with its own bounded summary', async () => {
+		const h = createDevToolHarness();
+		const channel = guardRetainedState(shellProtocol.createToolChannel(h.sidebarPeer), {
+			maxBytes: 2_048,
+			shrink: (topic, snapshot, info) => ({ count: (snapshot as { items: unknown[] }).items.length, sample: [], over: info.bytes > info.maxBytes, topic }),
+		});
+		const seen: unknown[] = [];
+		channel.onState('endpoints', (snapshot) => seen.push(snapshot));
+		channel.publishState('endpoints', { items: Array.from({ length: 100 }, (_, i) => endpoint(i)) });
+		assert.deepEqual(seen, [{ count: 100, sample: [], over: true, topic: 'endpoints' }]);
+	});
+
+	it('withhold: true is the opt-in to refuse (the stale snapshot stays)', () => {
+		const h = createDevToolHarness();
+		const reported: RetainedStateTooLargeError[] = [];
+		const channel = guardRetainedState(shellProtocol.createToolChannel(h.sidebarPeer), { maxBytes: 1_024, withhold: true, onOversize: (error) => reported.push(error) });
+		const seen: unknown[] = [];
+		channel.onState('endpoints', (snapshot) => seen.push(snapshot));
+		channel.publishState('endpoints', { items: [endpoint(1)] });
+		channel.publishState('endpoints', { items: Array.from({ length: 100 }, (_, i) => endpoint(i)) });
+		assert.equal(seen.length, 1);
+		assert.equal(reported[0].outcome, 'withheld');
+	});
+
+	it('enforces a TOTAL budget across topics (the whole map is republished on every publish) and reports the sizes', () => {
+		assert.equal(MAX_RETAINED_TOTAL_BYTES, 128 * 1024);
+		const h = createDevToolHarness();
+		const channel = guardRetainedState(shellProtocol.createToolChannel(h.sidebarPeer), { maxBytes: 10_000, maxTotalBytes: 15_000 });
+		const list = (n: number) => ({ items: Array.from({ length: n }, (_, i) => endpoint(i)) });
+		const n = Math.floor(9_000 / jsonByteLength(endpoint(1)));
+		channel.publishState('a', list(n));
+		const seen: Array<{ items: unknown[]; truncated?: unknown }> = [];
+		channel.onState('b', (snapshot) => seen.push(snapshot as { items: unknown[] }));
+		channel.publishState('b', list(n));
+		const sizes = channel.retainedBytes();
+		assert.ok(sizes.total <= 15_000, `total ${sizes.total}`);
+		assert.ok(seen[0].items.length < n && seen[0].truncated !== undefined, 'b was cut to what the total leaves');
+		channel.publishState('a', list(1));
+		channel.publishState('b', list(n));
+		assert.equal(seen.at(-1)?.items.length, n, 'a smaller a frees the budget for b');
+		assert.equal(channel.retainedBytes().byTopic.b, jsonByteLength(list(n)));
+	});
+});
+
+describe('truncateLists — the default shrink', () => {
+	it('cuts the largest list properties to fit, recording kept and total; a top-level list keeps a prefix', () => {
+		const snapshot = { title: 'x', items: Array.from({ length: 50 }, (_, i) => `item-${i}`), tags: ['a', 'b'] };
+		const out = truncateLists(snapshot, 200);
+		assert.ok(out.truncated);
+		const cut = out.snapshot as { items: string[]; tags: string[]; title: string; truncated: Record<string, { kept: number; total: number }> };
+		assert.ok(jsonByteLength(cut) <= 200);
+		assert.equal(cut.title, 'x');
+		assert.deepEqual(cut.truncated.items, { kept: cut.items.length, total: 50 });
+		assert.deepEqual(cut.items, snapshot.items.slice(0, cut.items.length));
+		const list = truncateLists(Array.from({ length: 50 }, (_, i) => i), 30);
+		assert.ok(list.truncated && jsonByteLength(list.snapshot) <= 30);
+		assert.deepEqual(truncateLists({ text: 'x'.repeat(100) }, 20), { snapshot: { text: 'x'.repeat(100) }, truncated: false }, 'nothing to cut');
+	});
+});
+
