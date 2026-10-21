@@ -88,6 +88,11 @@ export interface SqlEnv {
 	saveConnection(conn: SavedSqlConnection): Promise<void>;
 	/** Delete a saved connection (a direct one's temp pipeline is stopped first, best effort). */
 	deleteConnection(conn: SavedSqlConnection): Promise<void>;
+	/**
+	 * One saved connection by id, from the list's owner (null: no such
+	 * connection). For a record a partial replica does not hold.
+	 */
+	getConnection(connId: string): Promise<SavedSqlConnection | null>;
 	/** A provider's display title from the realm's cached service list, when it has one. */
 	serviceTitle(provider: string): string | undefined;
 	/** Statement history: read, record and edit (where it lives depends on the mount). */
@@ -231,6 +236,7 @@ export function createRemoteSqlEnv(caller: IFrameCaller<SqlOps>, ready: boolean,
 		deleteConnection: async (conn) => {
 			await caller.callReply('sql.deleteConnection', { connId: conn.id, owner: owner() }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.deleteConnection'] });
 		},
+		getConnection: (connId) => caller.callReply('sql.connection', { connId }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.connection'] }),
 		// A frame has no service cache of its own; the dialog falls back to its titles.
 		serviceTitle: () => undefined,
 	};

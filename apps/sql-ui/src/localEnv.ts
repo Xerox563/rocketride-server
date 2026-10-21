@@ -85,6 +85,7 @@ export function createLocalSqlEnv(core: SqlCore, isConnected: boolean, serviceTi
 		},
 		saveConnection: (conn) => core.saveConnection(conn),
 		deleteConnection: (conn) => core.deleteConnection(conn.id),
+		getConnection: (connId) => core.connection(connId),
 		serviceTitle,
 	};
 }

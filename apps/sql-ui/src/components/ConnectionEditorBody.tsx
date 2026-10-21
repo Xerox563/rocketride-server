@@ -33,7 +33,7 @@
 import React from 'react';
 import type { CSSProperties } from 'react';
 import { EmptyState } from 'shell';
-import { useSavedConnections, useSavedConnectionsStatus } from '../connect';
+import { useConnectionRecord } from '../connectionRecord';
 import type { SavedSqlConnection } from '../connect';
 import NewConnectionModal from './NewConnectionModal';
 import { DatabaseIcon } from '../icons';
@@ -61,9 +61,7 @@ export const ConnectionEditorBody: React.FC<{
 	/** Open the workbench of a freshly added connection. */
 	onOpenSaved: (saved: SavedSqlConnection) => void;
 }> = ({ connId, onCloseSelf, onOpenSaved }) => {
-	const connections = useSavedConnections();
-	const status = useSavedConnectionsStatus();
-	const editing = connId ? connections.find((c) => c.id === connId) ?? null : null;
+	const { record: editing, status } = useConnectionRecord(connId);
 
 	// An edit target that is not in the store yet (list still loading) or is
 	// gone (deleted elsewhere) must not silently become an ADD form.

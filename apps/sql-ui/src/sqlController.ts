@@ -33,14 +33,22 @@
 //                           against its `deadlineAt` (a call held while no
 //                           controller was mounted, delivered after its frame
 //                           gave up, never runs), and answers a Reply.
-//   STATE  'connections'   { status, list }: the saved-connection list the
-//                           core read for the signed-in identity, republished
-//                           on every change (never over the retained-state
-//                           size cap).
+//   STATE  'connections'   { status, list, partial }: the saved-connection
+//                           list the core read for the signed-in identity,
+//                           republished on every change. A list too long for
+//                           the retained-state budget is published in part
+//                           (its first records, and `partial: { kept, total }`)
+//                           and frames ask for any other record by op.
 //   STATE  'identity'      { fingerprint }: who the core vouches for (R9).
 //   STATE  'history'       { storage, keys }: where history is kept and, per
-//                           connection a frame has read, a revision and the
-//                           recording switch. Entries travel as op results.
+//                           connection a frame has read (the 128 read most
+//                           recently), a revision and the recording switch.
+//                           Entries travel as op results.
+//
+//   Each topic stays within 64 KiB and all of them within 128 KiB (the whole
+//   map is republished on every publish): shrinkSqlState replaces an
+//   oversize snapshot with an honest bounded one, never silently.
+//   (`devtool:controller`, the readiness state, is the library's.)
 //   EVENT  'active'        heard: a frame's active endpoint key.
 //   EVENT  'openError'     heard: a connection a frame could not open.
 //
@@ -51,9 +59,10 @@
 //     repeated (T10);
 //   - a saved-connection record must be a usable record naming a database
 //     node (sqlCore.ts checkSavedConnection);
-//   - a mutation (save, delete) is refused unless the calling frame belongs
-//     to the identity signed in now (`owner`), so a call from before a change
-//     of account can never write into the next account's list.
+//   - a mutation (save, delete, a history record or edit) is refused unless
+//     the calling frame belongs to the identity signed in now (`owner`),
+//     checked again after every wait, so a call from before a change of
+//     account can never write into the next account's list or history.
 //
 // HISTORY (§3.5). The controller owns SQL history in dev-tool mounts: its
 // own history store (same keys, field and bounds as the full app's), kept in
@@ -64,8 +73,8 @@
 // before the first write, writes are debounced, one bag per identity
 // fingerprint, the 256 KB bag cap holds, and a file that exists but cannot be
 // read is never written (history is kept for the session). A new identity
-// gets a new accessor and the store forgets what it held. Last writer wins
-// across windows (a known limitation the privacy line states).
+// gets a new accessor and the store forgets what it held at once. Last writer
+// wins across windows (a known limitation the privacy line states).
 //
 // LIFETIME (R6, R7). `attachSqlController` runs inside the sidebar's
 // `useEffect` and its `dispose` is the cleanup: exactly one op server per
@@ -78,11 +87,12 @@
 import type { DevToolProps, ToolChannel } from 'shell';
 import { ExplorerToolError } from 'shared/explorer/errors';
 import { attachController } from 'shared/explorer/devtool/controller';
-import type { ControllerHandlers } from 'shared/explorer/devtool/controller';
+import type { RequiredControllerHandlers } from 'shared/explorer/devtool/controller';
 import type { DeadlineError } from 'shared/explorer/devtool/deadline';
 import { publishIdentityState } from 'shared/explorer/devtool/frameIdentity';
 import type { JsonValue } from 'shared/explorer/devtool/reply';
-import { guardRetainedState } from 'shared/explorer/devtool/state';
+import { guardRetainedState, jsonByteLength } from 'shared/explorer/devtool/state';
+import type { IOversizeInfo } from 'shared/explorer/devtool/state';
 import { attachWhenLoaded, createFsPrefs, historyPrefsPath } from 'shared/explorer/devtool/prefs';
 import type { IFsPrefs } from 'shared/explorer/devtool/prefs';
 import type { IIdentitySnapshot } from 'shared/explorer/devtool/identity';
@@ -152,7 +162,65 @@ export interface SqlControllerMount {
  */
 function connectionsState(): ConnectionsState {
 	const status = getSavedConnectionsStatus();
-	return { status, list: status === 'ready' ? getSavedConnections() : [] };
+	return { status, list: status === 'ready' ? getSavedConnections() : [], partial: null };
+}
+
+/**
+ * How many connections' history the controller follows at once (the
+ * `history` topic's keys): the ones read most recently. A frame whose key is
+ * dropped reads it again, which follows it again; only more open history
+ * views than this, at once, would take turns.
+ */
+export const MAX_WATCHED_HISTORY_KEYS = 128;
+
+/**
+ * The longest prefix of a list whose snapshot fits a budget.
+ *
+ * @param total - The list's length.
+ * @param fits - Whether a snapshot holding the first `kept` items fits.
+ * @returns How many to keep.
+ */
+function longestFittingPrefix(total: number, fits: (kept: number) => boolean): number {
+	let lo = 0;
+	let hi = total;
+	while (lo < hi) {
+		const mid = Math.ceil((lo + hi) / 2);
+		if (fits(mid)) lo = mid;
+		else hi = mid - 1;
+	}
+	return lo;
+}
+
+/**
+ * The retained-state guard's shrink hook: an honest, bounded snapshot in
+ * place of one over its budget (never the library's generic `truncated` cut,
+ * which frames would not act on).
+ *
+ *   connections   the first records that fit, and `partial: { kept, total }`:
+ *                 a frame asks for any other record with `sql.connection`.
+ *   history       the most recently read keys that fit: a frame whose key is
+ *                 not listed reads it again (remoteHistory.ts).
+ *
+ * @param topic - The state topic.
+ * @param snapshot - The oversize snapshot.
+ * @param info - The budget this publish may use.
+ * @returns The snapshot to publish instead.
+ */
+export function shrinkSqlState(topic: string, snapshot: unknown, info: IOversizeInfo): unknown {
+	if (topic === 'connections') {
+		const state = snapshot as ConnectionsState;
+		const total = state.list.length;
+		const at = (kept: number): ConnectionsState => ({ ...state, list: state.list.slice(0, kept), partial: { kept, total } });
+		return at(longestFittingPrefix(total, (kept) => jsonByteLength(at(kept)) <= info.budgetBytes));
+	}
+	if (topic === 'history') {
+		const state = snapshot as HistoryState;
+		const keys = Object.keys(state.keys);
+		// Insertion order is oldest read first: keep the newest.
+		const at = (kept: number): HistoryState => ({ ...state, keys: Object.fromEntries(keys.slice(keys.length - kept).map((key) => [key, state.keys[key]!])) });
+		return at(longestFittingPrefix(keys.length, (kept) => jsonByteLength(at(kept)) <= info.budgetBytes));
+	}
+	return snapshot;
 }
 
 /**
@@ -248,7 +316,7 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 		publishHistory();
 	};
 
-	const handlers: ControllerHandlers<SqlOps> = {
+	const handlers: RequiredControllerHandlers<SqlOps> = {
 		'sql.resolveEndpoint': ({ connId }) => core.resolve(connId),
 		'sql.releaseEndpoint': async ({ connId }) => { await core.release(connId); },
 		'sql.discoverEndpoints': () => core.pickable(),
@@ -263,6 +331,7 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 		'sql.getService': async ({ provider }) => (await core.getService(provider)) as JsonValue,
 		'sql.validate': async ({ pipeline }) => (await core.validate(pipeline)) as JsonValue,
 		'sql.envKeys': () => core.envKeys(),
+		'sql.connection': ({ connId }) => core.connection(connId),
 		'sql.saveConnection': async ({ connection, owner }) => {
 			requireOwner(owner, 'saveConnection');
 			// Checked again where the list changes: the account may change while
@@ -279,8 +348,17 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 			// The account changed while the connection was looked up: the
 			// answer would be another account's history.
 			if (historyOwner !== askedFor) throw new ExplorerToolError({ kind: 'stale', tool: 'history', message: 'The signed-in account changed, so this history was not read.' });
-			if (!watched.has(key)) {
+			const seen = watched.get(key);
+			if (seen) {
+				// Most recently read last (the eviction order).
+				watched.delete(key);
+				watched.set(key, seen);
+			} else {
 				watched.set(key, { entries: history.getHistory(key), rev: 1, recording: history.getRecording(key) });
+				for (const oldest of watched.keys()) {
+					if (watched.size <= MAX_WATCHED_HISTORY_KEYS) break;
+					watched.delete(oldest);
+				}
 				publishHistory();
 			}
 			return history.getHistory(key) as HistoryEntry[];
@@ -314,14 +392,18 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 		onFirstOp: () => core.activation.open('op'),
 	});
 
-	// Retained state, size-capped: a snapshot over the cap is never published.
-	const state = sqlChannel(guardRetainedState(attached.channel, {
-		onOversize: (error) => console.log('[sql-ui] a state snapshot was not published:', error.message),
-	}));
+	// Retained state, within 64 KiB per topic and 128 KiB together (identity
+	// included): an oversize snapshot is replaced by an honest bounded one
+	// (shrinkSqlState), never dropped silently.
+	const guarded = guardRetainedState(attached.channel, {
+		shrink: shrinkSqlState,
+		onOversize: (error) => console.log(`[sql-ui] state '${error.topic}' ${error.outcome === 'degraded' ? 'was published in part' : 'was not published'}:`, error.message),
+	});
+	const state = sqlChannel(guarded);
 	const publishConnections = (): void => state.publishState('connections', connectionsState());
 	publishConnections();
 	const offConnections = subscribeSavedConnections(publishConnections);
-	const offIdentity = publishIdentityState(attached.channel, core.identity);
+	const offIdentity = publishIdentityState(guarded, core.identity);
 
 	// History revisions: a key's revision moves whenever its list or its
 	// switch changes, so frames know to read it again.

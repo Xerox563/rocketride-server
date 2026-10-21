@@ -95,7 +95,7 @@ function jsonEntry(entry: HistoryEntry): HistoryEntry {
 export function createRemoteHistory(opts: RemoteHistoryOptions): RemoteHistory {
 	const { caller, channel, owner } = opts;
 	/** What this frame has read, per endpoint key. */
-	const read = new Map<string, { endpoint: SqlEndpoint; entries: HistoryEntry[]; rev: number | null; loaded: boolean; loading: boolean; again: boolean }>();
+	const read = new Map<string, { endpoint: SqlEndpoint; entries: HistoryEntry[]; rev: number | null; loaded: boolean; loading: boolean; again: boolean; recording: boolean | null }>();
 	let state: HistoryState | undefined;
 	let epoch = 0;
 	const listeners = new Set<() => void>();
@@ -139,12 +139,19 @@ export function createRemoteHistory(opts: RemoteHistoryOptions): RemoteHistory {
 	};
 
 	const offState = channel.onState('history', (snapshot) => {
+		const before = state;
 		state = snapshot;
 		for (const [key, slot] of read) {
-			const rev = snapshot?.keys?.[key]?.rev;
+			const followed = snapshot?.keys?.[key];
+			if (followed) slot.recording = followed.recording;
+			const rev = followed?.rev;
+			// The controller stopped following this key (it follows the keys read
+			// most recently): reading it again follows it again. Only on the
+			// change itself: the same snapshot delivered again reads nothing.
+			const unfollowed = rev === undefined && before?.keys?.[key] !== undefined && snapshot?.storage !== 'none' && snapshot?.storage === before?.storage;
 			// A revision moved on, or a read that failed (the controller could not
 			// vouch for anyone yet) can now succeed.
-			if ((rev !== undefined && rev !== slot.rev) || (!slot.loaded && snapshot?.storage !== 'none')) fetch(key);
+			if ((rev !== undefined && rev !== slot.rev) || (!slot.loaded && snapshot?.storage !== 'none') || unfollowed) fetch(key);
 		}
 		notify();
 	});
@@ -156,7 +163,7 @@ export function createRemoteHistory(opts: RemoteHistoryOptions): RemoteHistory {
 	 */
 	const watch = (endpoint: SqlEndpoint): void => {
 		if (read.has(endpoint.key)) return;
-		read.set(endpoint.key, { endpoint, entries: NO_ENTRIES, rev: null, loaded: false, loading: false, again: false });
+		read.set(endpoint.key, { endpoint, entries: NO_ENTRIES, rev: null, loaded: false, loading: false, again: false, recording: state?.keys?.[endpoint.key]?.recording ?? null });
 		fetch(endpoint.key);
 	};
 
@@ -182,7 +189,8 @@ export function createRemoteHistory(opts: RemoteHistoryOptions): RemoteHistory {
 		useRecording(endpoint) {
 			const seen = useSyncExternalStore(subscribe, () => epoch);
 			useEffect(() => { watch(endpoint); }, [endpoint, seen]);
-			return useSyncExternalStore(subscribe, () => state?.keys?.[endpoint.key]?.recording ?? true);
+			// While a key is between being dropped and read again, the last switch seen stands.
+			return useSyncExternalStore(subscribe, () => state?.keys?.[endpoint.key]?.recording ?? read.get(endpoint.key)?.recording ?? true);
 		},
 		usePrivacyNotice() {
 			return useSyncExternalStore(subscribe, () => devToolPrivacyNotice(state?.storage ?? 'none'));

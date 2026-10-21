@@ -43,7 +43,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react';
 import type { DevToolProps, ToolChannel } from 'shell';
 import { EmptyState, useConnectionReady } from 'shell';
-import { isDirectEndpointKey, useSavedConnections, useSavedConnectionsStatus } from './connect';
+import { isDirectEndpointKey } from './connect';
+import { useConnectionRecord } from './connectionRecord';
 import type { SqlEndpoint } from './connect';
 import { setActiveConnection } from './navigation';
 import { SQL_TOOL_PROTOCOL, frameChannel } from './sqlBridge';
@@ -110,9 +111,7 @@ const OverlayHost: React.FC = () => {
  */
 const SqlConnectionDocument: React.FC<{ connId: string; onOpenError: (message: string) => void }> = ({ connId, onOpenError }) => {
 	const env = useSqlEnv();
-	const status = useSavedConnectionsStatus();
-	const connections = useSavedConnections();
-	const conn = connections.find((c) => c.id === connId);
+	const { record: conn, status } = useConnectionRecord(connId);
 	const [endpoint, setEndpoint] = useState<SqlEndpoint | null>(null);
 	const [resolveError, setResolveError] = useState<string | null>(null);
 
@@ -148,7 +147,7 @@ const SqlConnectionDocument: React.FC<{ connId: string; onOpenError: (message: s
 	}, [endpoint, env, connId]);
 
 	let body: React.ReactNode;
-	switch (connectionDocState({ ready: env.ready, listStatus: status, found: conn !== undefined, failed: resolveError !== null, opened: endpoint !== null })) {
+	switch (connectionDocState({ ready: env.ready, listStatus: status, found: conn !== null, failed: resolveError !== null, opened: endpoint !== null })) {
 		case 'not-connected':
 			body = <div style={styles.welcome}><EmptyState icon={<DatabaseIcon />} title="Not connected" description="Connect to a RocketRide server to open this connection." /></div>;
 			break;

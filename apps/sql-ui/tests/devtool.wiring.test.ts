@@ -45,10 +45,14 @@ import path from 'node:path';
 import { ExplorerToolError } from 'shared/explorer/errors';
 import { assertJsonSafe, assertSidebarSubscribers, findToolFactoryImports, manualNow, settle } from 'shared/explorer/devtool/testing';
 import { BUS_TOOL_MARGIN_MS, FRAME_OP_MARGIN_MS, SDK_TIMEOUT_SLACK_MS, UNBOUNDED_TOOL_TIMEOUT_MS } from 'shared/explorer/devtool/timeouts';
-import { MAX_RETAINED_STATE_BYTES } from 'shared/explorer/devtool/state';
+import { MAX_RETAINED_STATE_BYTES, MAX_RETAINED_TOTAL_BYTES, jsonByteLength } from 'shared/explorer/devtool/state';
+import { CONTROLLER_STATE_TOPIC, RESERVED_STATE_PREFIX } from 'shared/explorer/devtool/realm';
 import { SQL_APP_ID } from '../src/appId';
-import { applyReplicaConnections, deleteSavedConnection, getSavedConnections, getSavedConnectionsStatus, ownSavedConnections, resetSavedConnections } from '../src/connect';
-import type { SavedSqlConnection } from '../src/connect';
+import { applyReplicaConnections, deleteSavedConnection, endpointForConnection, endpointKeyForConnection, getSavedConnections, getSavedConnectionsPartial, getSavedConnectionsStatus, ownSavedConnections, resetSavedConnections } from '../src/connect';
+import type { PipelineBoundConnection, SavedSqlConnection } from '../src/connect';
+import { lookupConnection } from '../src/connectionRecord';
+import { MAX_WATCHED_HISTORY_KEYS } from '../src/sqlController';
+import type { ConnectionsState, HistoryState } from '../src/ops';
 import { connectionDocState, routeDocKey, sqlChannel } from '../src/sqlFrame';
 import { RESOLVE_BUDGET_MS, SQL_OP_TIMEOUT_MS } from '../src/sqlTimeouts';
 import { DIALECT_WAIT_MS, GET_SCHEMA_WAIT_MS, REFRESH_SCHEMA_WAIT_MS } from '../src/connect/tools';
@@ -56,6 +60,32 @@ import { USER, until } from './realm';
 import { DIRECT, PIPELINE, postgres, rig, toolRequests } from './devtoolRig';
 
 const SRC = path.resolve(__dirname, '..', 'src');
+
+/**
+ * Many saved connections, each bound to its own pipeline (about 230 bytes of
+ * JSON each, so a few hundred exceed the 64 KiB retained-state cap).
+ *
+ * @param n - How many.
+ * @returns The records.
+ */
+function many(n: number): PipelineBoundConnection[] {
+	return Array.from({ length: n }, (_, i) => ({ id: `c-${i}`, mode: 'pipeline' as const, name: `Warehouse connection ${i}`, projectId: `p-${i}-0f8fad5b-d9cb-469f-a165-70867728950e`, pipelineName: 'Pipeline A', source: 's1', nodeId: 'db_1', provider: 'db_postgres' }));
+}
+
+/**
+ * The last snapshot the controller retained on each topic.
+ *
+ * @param posts - The sidebar peer's posts.
+ * @returns Snapshot by topic.
+ */
+function retained(posts: unknown[]): Map<string, unknown> {
+	const last = new Map<string, unknown>();
+	for (const post of posts) {
+		const p = post as { __rrtool?: string; topic?: string; snapshot?: unknown };
+		if (p.__rrtool === 'state' && typeof p.topic === 'string') last.set(p.topic, p.snapshot);
+	}
+	return last;
+}
 
 /**
  * Read a source file of the app.
@@ -172,7 +202,11 @@ describe('T3 — every op round-trips JSON-safe; failures come back as equal Exp
 				service: await r.env.getService('db_mysql'),
 				validate: await r.env.validate({ version: 1, component: { id: 'db_mysql_1', provider: 'db_mysql', config: {} } }),
 				envKeys: await r.env.getEnvironmentKeys(),
+				connection: await r.env.getConnection('c-pipe'),
+				noConnection: await r.env.getConnection('c-none'),
 			};
+			assert.deepEqual(results.connection, PIPELINE);
+			assert.equal(results.noConnection, null);
 			const owner = r.frame.owner();
 			const entry = { id: 'h1', sql: 'SELECT 1', at: 1, ms: 2, outcome: 'rows' as const, rows: 1, kind: 'read' as const };
 			await r.frame.caller.callReply('sql.historyRecord', { connId: 'c-pipe', entry, owner }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.historyRecord'] });
@@ -261,7 +295,10 @@ describe('T4 — the frame\'s timeouts and the controller\'s bus timeouts match 
 	});
 
 	it('the frame waits longer than the controller can take for every op, and never relies on the 120 s default', async () => {
-		const r = await rig();
+		// A clock that stands still: the frame sends what is left of a call's
+		// timeout after the readiness wait, which a running clock can shave by 1 ms.
+		const clock = manualNow(Date.now());
+		const r = await rig({ now: clock.now });
 		try {
 			const session = r.env.getSession(await r.env.resolveEndpoint(PIPELINE));
 			await session.dialect();
@@ -508,32 +545,105 @@ describe('T10 — write gates hold in the controller even when a frame calls the
 // T11 — RETAINED STATE STAYS SMALL
 // =============================================================================
 
-describe('T11 — no bulk result is retained state, and a size guard exists', () => {
-	it('the controller retains only its fixed topics; statement rows travel as op results', async () => {
+describe('T11 — no bulk result is retained state; each topic stays within 64 KiB and all within 128 KiB, honestly', () => {
+	it('the controller retains its fixed topics (and the library\'s readiness), never one under the reserved prefix; statement rows travel as op results', async () => {
 		const r = await rig();
 		try {
 			await r.env.getSession(await r.env.resolveEndpoint(PIPELINE)).execute('SELECT * FROM orders');
 			const states = r.spy.posts.filter((post) => (post as { __rrtool?: string }).__rrtool === 'state').map((post) => (post as { topic: string }).topic);
-			assert.deepEqual([...new Set(states)].sort(), ['connections', 'history', 'identity']);
+			assert.deepEqual([...new Set(states)].sort(), ['connections', CONTROLLER_STATE_TOPIC, 'history', 'identity'].sort());
+			assert.deepEqual([...new Set(states)].filter((topic) => topic.startsWith(RESERVED_STATE_PREFIX) && topic !== CONTROLLER_STATE_TOPIC), []);
 			assert.equal(JSON.stringify(r.spy.posts.filter((post) => (post as { __rrtool?: string }).__rrtool === 'state')).includes('"rows"'), false);
+			assert.doesNotMatch(source('sqlController.ts'), /publishState\(\s*['`"]devtool:/);
 		} finally {
 			r.dispose();
 		}
 	});
 
-	it('a connection list over the 64 KiB cap is never published (the last good snapshot stands)', async () => {
-		const big: SavedSqlConnection = { ...DIRECT, id: 'c-big', config: { blob: 'x'.repeat(MAX_RETAINED_STATE_BYTES) } };
-		const r = await rig({ saved: [PIPELINE] });
+	it('at scale (400 saved connections, 200 histories read) every topic stays within 64 KiB and the map within 128 KiB; nothing is withheld or marked truncated', async () => {
+		const saved = many(400);
+		assert.ok(jsonByteLength({ status: 'ready', list: saved, partial: null }) > MAX_RETAINED_STATE_BYTES, 'the whole list does not fit');
+		const r = await rig({ saved });
 		try {
-			await until(() => getSavedConnections().length === 1, 'the list');
-			const before = r.spy.posts.length;
-			const owner = r.frame.owner();
-			await r.frame.caller.callReply('sql.saveConnection', { connection: big, owner }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.saveConnection'] });
-			const published = r.spy.posts.slice(before).filter((post) => (post as { __rrtool?: string; topic?: string }).__rrtool === 'state' && (post as { topic?: string }).topic === 'connections');
-			assert.deepEqual(published, [], 'the oversize snapshot was refused');
+			await until(() => getSavedConnections().length === 400, 'the list');
+			for (const conn of saved.slice(0, 200)) await r.frame.caller.callReply('sql.history', { connId: conn.id }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] });
+			await settle();
+			const last = retained(r.spy.posts);
+			let total = 0;
+			for (const [topic, snapshot] of last) {
+				const bytes = jsonByteLength(snapshot);
+				assert.ok(bytes <= MAX_RETAINED_STATE_BYTES, `${topic}: ${bytes} bytes`);
+				assert.equal(JSON.stringify(snapshot).includes('"truncated"'), false, `${topic} carries no generic truncated marker`);
+				total += bytes;
+			}
+			assert.ok(total <= MAX_RETAINED_TOTAL_BYTES, `the whole map: ${total} bytes`);
+			// The list is published in part, and says so.
+			const connections = last.get('connections') as ConnectionsState;
+			assert.equal(connections.status, 'ready');
+			assert.ok(connections.partial !== null && connections.partial.total === 400 && connections.partial.kept === connections.list.length && connections.list.length > 0 && connections.list.length < 400);
+			assert.deepEqual(connections.list, saved.slice(0, connections.list.length));
+			// History follows the connections read most recently.
+			const history = last.get('history') as HistoryState;
+			assert.deepEqual(Object.keys(history.keys), saved.slice(200 - MAX_WATCHED_HISTORY_KEYS, 200).map((conn) => endpointKeyForConnection(conn)));
 		} finally {
 			r.dispose();
 		}
+	});
+
+	it('a record the partial list left out is asked for, never reported gone; a whole list that lacks it means it is gone', async () => {
+		const saved = many(400);
+		const r = await rig({ saved });
+		try {
+			await until(() => getSavedConnections().length === 400, 'the list');
+			assert.deepEqual(await r.env.getConnection('c-399'), saved[399]);
+			assert.equal(await r.env.getConnection('c-none'), null);
+		} finally {
+			r.dispose();
+		}
+		// A realm that does not own the list (a VS Code frame) holds the replica.
+		resetSavedConnections({ force: true });
+		try {
+			applyReplicaConnections({ status: 'ready', list: saved.slice(0, 10), partial: { kept: 10, total: 400 } });
+			assert.deepEqual(getSavedConnectionsPartial(), { kept: 10, total: 400 });
+			const view = { list: getSavedConnections(), status: getSavedConnectionsStatus(), partial: getSavedConnectionsPartial() };
+			assert.deepEqual(lookupConnection('c-5', view), { kind: 'found', record: saved[5] });
+			assert.deepEqual(lookupConnection('c-399', view), { kind: 'ask' });
+			assert.deepEqual(lookupConnection('c-399', { ...view, partial: null }), { kind: 'missing' });
+			assert.deepEqual(lookupConnection('c-399', { ...view, status: 'loading' }), { kind: 'loading' });
+			// A whole list replaces the note.
+			applyReplicaConnections({ status: 'ready', list: saved.slice(0, 10), partial: null });
+			assert.equal(getSavedConnectionsPartial(), null);
+		} finally {
+			resetSavedConnections({ force: true });
+		}
+	});
+
+	it('a frame whose history the controller stopped following reads it again, which follows it again', async () => {
+		const saved = many(MAX_WATCHED_HISTORY_KEYS + 2);
+		const r = await rig({ saved });
+		const snapshots: HistoryState[] = [];
+		const off = r.frame.channel.onState('history', (snapshot) => { snapshots.push(snapshot as HistoryState); });
+		try {
+			await until(() => getSavedConnections().length === saved.length, 'the list');
+			const mine = endpointForConnection(saved[0]!);
+			r.history.watch(mine);
+			await until(() => snapshots.at(-1)?.keys[mine.key] !== undefined, 'the frame\'s key to be followed');
+			// Other documents read as many other connections as the controller follows.
+			for (const conn of saved.slice(1, MAX_WATCHED_HISTORY_KEYS + 1)) await r.frame.caller.callReply('sql.history', { connId: conn.id }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.history'] });
+			assert.ok(snapshots.some((snapshot) => snapshot.keys[mine.key] === undefined), 'it was dropped');
+			await until(() => snapshots.at(-1)?.keys[mine.key] !== undefined, 'the frame to read it again');
+			assert.ok(Object.keys(snapshots.at(-1)!.keys).length <= MAX_WATCHED_HISTORY_KEYS);
+		} finally {
+			off();
+			r.dispose();
+		}
+	});
+
+	it('the shrink is the lane\'s (a partial list, the newest keys), and every op has a handler', () => {
+		const controller = source('sqlController.ts');
+		assert.match(controller, /shrink: shrinkSqlState,/);
+		assert.match(controller, /const handlers: RequiredControllerHandlers<SqlOps> = \{/);
+		assert.match(controller, /publishIdentityState\(guarded, core\.identity\)/, 'identity counts toward the total budget');
 	});
 });
 

@@ -48,9 +48,9 @@ export {
 	loadSavedConnections, resetSavedConnections, useSavedConnections, useSavedConnectionsStatus,
 	upsertSavedConnection, newConnectionId, deleteSavedConnection, getSavedConnection,
 	applySavedConnections, subscribeSavedConnections, getSavedConnections, getSavedConnectionsStatus,
-	ownSavedConnections, applyReplicaConnections,
+	ownSavedConnections, applyReplicaConnections, getSavedConnectionsPartial, useSavedConnectionsPartial,
 } from './savedConnections';
-export type { SavedSqlConnection, PipelineBoundConnection, DirectConnection, SavedConnectionsStatus, SavedConnectionsFs } from './savedConnections';
+export type { SavedSqlConnection, PipelineBoundConnection, DirectConnection, SavedConnectionsStatus, SavedConnectionsFs, ReplicaPartial } from './savedConnections';
 export {
 	endpointForConnection, endpointKeyForConnection, isDirectEndpointKey, connIdFromDirectKey,
 	directProjectId, directUseOptions, TOOLS_SOURCE_ID,

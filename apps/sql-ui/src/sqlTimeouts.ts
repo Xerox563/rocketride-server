@@ -96,6 +96,8 @@ export const SQL_OP_TIMEOUT_MS = {
 	'sql.getService': frameOpTimeoutMs(SERVICE_TIMEOUT_MS),
 	'sql.validate': frameOpTimeoutMs(VALIDATE_TIMEOUT_MS),
 	'sql.envKeys': frameOpTimeoutMs(ENV_KEYS_TIMEOUT_MS),
+	// Once the saved list is read, a lookup in memory.
+	'sql.connection': frameOpTimeoutMs(LIST_WAIT_MS),
 	'sql.saveConnection': frameOpTimeoutMs(LIST_WAIT_MS + FS_TIMEOUT_MS),
 	'sql.deleteConnection': frameOpTimeoutMs(LIST_WAIT_MS + 2 * RELEASE_STEP_TIMEOUT_MS + FS_TIMEOUT_MS),
 	// History ops only touch the controller's memory (the file is written

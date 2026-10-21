@@ -179,6 +179,14 @@ export interface SqlCore {
 	/** Environment-variable names (the config form's `${}` autocomplete). */
 	envKeys(): Promise<string[]>;
 	/**
+	 * One saved connection, once the list is read for the signed-in identity.
+	 *
+	 * @param connId - The connection id.
+	 * @returns The record, or null when there is no such connection.
+	 * @throws ExplorerToolError `unavailable` (not signed in, list unreadable).
+	 */
+	connection(connId: string): Promise<SavedSqlConnection | null>;
+	/**
 	 * Insert or replace a saved connection, once the list is read for the
 	 * signed-in identity (never queued onto someone else's list).
 	 *
@@ -508,6 +516,10 @@ export function createSqlCore(opts: SqlCoreOptions): SqlCore {
 			await this.release(connId);
 			stillAllowed();
 			deleteSavedConnection(connId);
+		},
+		async connection(connId) {
+			await listReady('connection');
+			return getSavedConnection(connId) ?? null;
 		},
 		async envKeys() {
 			const keys = await busRequest(cm, 'client.getEnvironmentKeys', {}, ENV_KEYS_TIMEOUT_MS);

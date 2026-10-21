@@ -101,6 +101,12 @@ export interface SqlOps extends ToolOpMap {
 	'sql.validate': ToolOpSpec<IDeadline & { pipeline: { [key: string]: JsonValue } }, Reply<JsonValue>>;
 	/** Environment-variable names for the config form's `${}` autocomplete. */
 	'sql.envKeys': ToolOpSpec<IDeadline, Reply<string[]>>;
+	/**
+	 * One saved connection by id (null: no such connection). Frames ask for it
+	 * when the published list is partial (`ConnectionsState.partial`) and the
+	 * record they need is not in it.
+	 */
+	'sql.connection': ToolOpSpec<IDeadline & { connId: string }, Reply<SavedSqlConnection | null>>;
 	// ── Saved-connection mutations (the controller owns the list) ───────────
 	/** Insert or replace a saved connection (the editor document's save). */
 	'sql.saveConnection': ToolOpSpec<IDeadline & IOwnedCall & { connection: SavedSqlConnection }, Reply<null>>;
@@ -119,8 +125,15 @@ export interface SqlOps extends ToolOpMap {
 export interface ConnectionsState {
 	/** 'ready' once the controller has read the list for the signed-in identity. */
 	status: SavedConnectionsStatus;
-	/** The list (empty unless ready). */
+	/** The list (empty unless ready); only its first `partial.kept` records when partial. */
 	list: SavedSqlConnection[];
+	/**
+	 * Null when `list` is the whole list. Otherwise the whole list did not fit
+	 * the retained-state budget: `list` holds its first `kept` of `total`
+	 * records, and a frame asks for any other record with `sql.connection`
+	 * (it never reports a connection missing from a partial list as gone).
+	 */
+	partial: { kept: number; total: number } | null;
 }
 
 /**
@@ -128,7 +141,9 @@ export interface ConnectionsState {
  * and, per connection a frame has read, a revision that moves on every change
  * plus the recording switch. The entries themselves are an op result
  * (`sql.history`): a history bag (up to 256 KB) does not fit the retained
- * state cap.
+ * state cap. The keys are bounded: the controller follows the connections
+ * read most recently (MAX_WATCHED_HISTORY_KEYS); a frame whose key is no
+ * longer listed reads it again, which lists it again.
  */
 export interface HistoryState {
 	/** Where the controller keeps history (the privacy line says so). */

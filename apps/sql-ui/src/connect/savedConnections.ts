@@ -123,6 +123,18 @@ export type SavedConnectionsStatus = 'idle' | 'loading' | 'ready';
 
 let status: SavedConnectionsStatus = 'idle';
 let connections: SavedSqlConnection[] = [];
+/**
+ * A replica's note that the controller published only part of the list (its
+ * first `kept` of `total` records; see ops.ts ConnectionsState). Always null
+ * in the realm that owns the list.
+ */
+export interface ReplicaPartial {
+	/** Records in the replica. */
+	kept: number;
+	/** Records in the controller's list. */
+	total: number;
+}
+let partial: ReplicaPartial | null = null;
 /** Writes the list back to the server store (installed by load). */
 let persist: ((list: SavedSqlConnection[]) => void) | null = null;
 const listeners = new Set<() => void>();
@@ -211,6 +223,7 @@ export function resetSavedConnections(opts: { force?: boolean } = {}): void {
 	loadSeq++;
 	status = 'idle';
 	connections = [];
+	partial = null;
 	persist = null;
 	pendingUpserts.length = 0;
 	notify();
@@ -240,18 +253,48 @@ export function ownSavedConnections(): () => void {
 }
 
 /**
- * Applies a snapshot the controller published (`{ status, list }`) in a
- * realm that does NOT own the list: a ready list becomes the read-only
- * replica, anything else shows as loading. A no-op where an owner is alive.
+ * A published partial note, if it is one.
+ *
+ * @param value - What the snapshot carried.
+ * @returns The note, or null (the list is whole).
+ */
+function readPartial(value: unknown): ReplicaPartial | null {
+	if (value === null || typeof value !== 'object') return null;
+	const { kept, total } = value as { kept?: unknown; total?: unknown };
+	return typeof kept === 'number' && typeof total === 'number' && kept < total ? { kept, total } : null;
+}
+
+/**
+ * Applies a snapshot the controller published (`{ status, list, partial }`)
+ * in a realm that does NOT own the list: a ready list becomes the read-only
+ * replica (with its partial note), anything else shows as loading. A no-op
+ * where an owner is alive.
  *
  * @param snapshot - The controller's snapshot.
  * @param snapshot.status - The list's status in the controller.
  * @param snapshot.list - The list (empty unless ready).
+ * @param snapshot.partial - Null, or how much of the list it holds.
  */
-export function applyReplicaConnections(snapshot: { status: SavedConnectionsStatus; list: SavedSqlConnection[] } | undefined): void {
+export function applyReplicaConnections(snapshot: { status: SavedConnectionsStatus; list: SavedSqlConnection[]; partial?: ReplicaPartial | null } | undefined): void {
 	if (owners > 0) return;
-	if (snapshot?.status === 'ready' && Array.isArray(snapshot.list)) applySavedConnections(snapshot.list);
-	else resetSavedConnections({ force: true });
+	if (snapshot?.status === 'ready' && Array.isArray(snapshot.list)) {
+		const next = readPartial(snapshot.partial);
+		const changed = JSON.stringify(next) !== JSON.stringify(partial);
+		partial = next;
+		applySavedConnections(snapshot.list);
+		if (changed) notify();
+	} else {
+		resetSavedConnections({ force: true });
+	}
+}
+
+/**
+ * The replica's partial note (non-React consumers).
+ *
+ * @returns Null when the list is whole (always, where the list is owned).
+ */
+export function getSavedConnectionsPartial(): ReplicaPartial | null {
+	return partial;
 }
 
 /**
@@ -382,5 +425,17 @@ export function useSavedConnectionsStatus(): SavedConnectionsStatus {
 	return useSyncExternalStore(
 		(cb) => { listeners.add(cb); return () => listeners.delete(cb); },
 		() => status,
+	);
+}
+
+/**
+ * Subscribes to the replica's partial note (see {@link getSavedConnectionsPartial}).
+ *
+ * @returns Null when the list is whole.
+ */
+export function useSavedConnectionsPartial(): ReplicaPartial | null {
+	return useSyncExternalStore(
+		(cb) => { listeners.add(cb); return () => listeners.delete(cb); },
+		() => partial,
 	);
 }
