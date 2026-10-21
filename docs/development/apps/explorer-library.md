@@ -403,6 +403,14 @@ controller budget.
   - The controller's refusal of a call that arrived after its deadline (timers
     throttled in a hidden webview) reaches a still-waiting frame as kind
     `timeout`.
+  - **It waits for its controller.** A call is sent only while the controller's
+    readiness state carries a nonce (see below). Until then it waits, inside
+    its own timeout: the deadline stays the one stamped at call time, and the
+    op lane gets what is left of it. If readiness never comes, the call
+    rejects as kind `timeout`, unsent. A wait cut short by `host:connection`
+    turning false rejects as `unavailable`. `controllerReady()` reports the
+    state, and `waitForController: false` sends at once (for a controller
+    that publishes no readiness).
 
 **Controller wiring** ([`controller.ts`](../../../apps/shared/src/explorer/devtool/controller.ts)).
 `attachController({ peer, channel, createToolChannel, createToolOpServer, handlers })`
@@ -423,13 +431,32 @@ in `useMemo`, because StrictMode mounts twice.
 
   A returned object counts as a Reply only when its keys are exactly `ok` and
   `value` (or `ok` and a valid `error`). So a plain result that has an `ok`
-  field, such as a probe result, is wrapped as data.
+  field, such as a probe result, is wrapped as data. **Those two shapes are
+  reserved:** a domain value that has exactly one of them is taken for a
+  Reply, so a handler answering one returns `replyOk(value)` explicitly.
+- **The types refuse what cannot work.** An op whose params or result is
+  `any`, or whose result is `never`, does not compile (an op that never
+  answers is `Reply<never>`). Handlers are optional in `ControllerHandlers`;
+  annotate production wiring with `RequiredControllerHandlers<Ops>` so that a
+  missing or misspelt op is a compile error.
 - **The op server sees calls only.** It subscribes through a shim that drops
   every other envelope, so a channel event that shares an op's name can never
   run a handler. The controller's channel still hears every event.
-- **Held calls.** Calls the peer held while no controller was subscribed reach
-  the handlers once they are all registered, and the deadline decides whether
-  each one runs.
+- **Readiness.** Once every handler is served, the controller publishes
+  `{ ready: <nonce> }` on the state topic `devtool:controller`
+  (`CONTROLLER_STATE_TOPIC`), and `{ ready: null }` when the live mount
+  unmounts. Frames send nothing before they see a nonce. The `devtool:` prefix
+  (`RESERVED_STATE_PREFIX`) is reserved for this library: lanes never publish
+  under it (the shell reserves `host:` the same way).
+- **Held calls, and dropped ones.** The peer holds a frame call only while NO
+  subscriber at all is on the sidebar peer, and hands it to the next
+  subscriber. The calls held that way reach the handlers once they are all
+  registered, and the deadline decides whether each one runs. But both hosts
+  build the sidebar channel during render (VS Code `DevToolSidebarMount.tsx`,
+  rocket-ui `DevToolMount.tsx`), before the controller's effect, and that
+  channel holds the live slot until the op server subscribes. A call that
+  arrives in that window goes to the channel, which drops it. Readiness is
+  what keeps frames from sending then.
 - **Without a host channel** (a test-only path: both real hosts pass a sidebar
   channel), the fallback channel's first subscription hands any held calls
   over to the op server instead of swallowing them.
@@ -481,20 +508,45 @@ nothing.
 The controller publishes `{ fingerprint }` on the `identity` state topic with
 `publishIdentityState(channel, tracker)`. In each frame,
 `createFrameIdentityGuard({ channel, docKey, documents, onReset })` remembers
-the first fingerprint it sees:
+the first fingerprint it sees and keeps following:
 
-- a different one closes the document (`documents.close(docKey)`) and calls
-  `onReset('identity')`, so the frame clears its caches; a landing frame
-  (`docKey` undefined or `''`) is reset but never closed;
+- every different one calls `onReset('identity')`, so the frame clears its
+  caches, and is adopted. A document frame also closes
+  (`documents.close(docKey)`), at most once. `closed()` latches only on a
+  close that returned: with no `documents`, or a close that threw, the next
+  change tries again. A landing frame (`docKey` undefined or `''`) is reset
+  but never closed;
 - `null` calls `onReset('unknown')`;
 - `host:connection` turning false calls `onReset('disconnected')`.
 
+`publishIdentityState` publishes nothing until the tracker settles
+(`whenSettled`: at once in a client realm, after the root read in a socketless
+one) or knows an identity. So a controller remount, whose new tracker starts
+unknown, does not make live frames reset for nothing.
+
 **Retained state stays small** ([`state.ts`](../../../apps/shared/src/explorer/devtool/state.ts)).
-The sidebar peer republishes the whole state map on every publish, and every
-frame replays it. So one snapshot may hold at most `MAX_RETAINED_STATE_BYTES`
-(64 KiB of JSON, measured by `jsonByteLength`). `guardRetainedState(channel)`
-refuses a bigger one, and `assertRetainedStateSize` lets a test pin the largest
-snapshots. Bulk data (rows, samples) travels as op results.
+The cost of a publish is the whole state map. The sidebar peer republishes the
+WHOLE map on every publish, and the VS Code bridge posts it to every frame
+realm. So every publish of any topic re-delivers EVERY topic to every frame
+there, and **a frame's `onState` handlers must be idempotent**. Every frame
+also replays the map when it attaches.
+
+**Lanes publish summaries that are bounded by construction**, and bulk data
+(rows, samples) travels as op results. `guardRetainedState(channel)` is the
+backstop:
+
+- **Limits.** It holds each snapshot to `MAX_RETAINED_STATE_BYTES` (64 KiB of
+  JSON, measured by `jsonByteLength`) and all of its topics together to
+  `MAX_RETAINED_TOTAL_BYTES` (128 KiB). It tracks the last size per topic, and
+  `retainedBytes()` reports them.
+- **It degrades.** It replaces an oversize snapshot with the lane's
+  `shrink(topic, snapshot, info)`, or else with `truncateLists`. That cuts the
+  largest list properties and records `truncated: { <prop>: { kept, total } }`
+  (the key `truncated` is reserved in guarded snapshots).
+- **Withholding is the opt-in** (`withhold: true`), and throwing is
+  `strict: true`, for tests. By default nothing is thrown into the publisher.
+- **Reports.** `onOversize` reports every case, with its `outcome`, and
+  `assertRetainedStateSize` lets a test pin the largest snapshots.
 
 **History in dev-tool mounts** ([`prefs.ts`](../../../apps/shared/src/explorer/devtool/prefs.ts)).
 Store tools get no workspace preferences, so the controller passes the history
@@ -504,15 +556,29 @@ with `attachWhenLoaded(prefs, (api, owner) => store.attachPrefs(api, owner))`.
 
 - **Load first.** `client.fsStat` then `client.fsReadJson` run before the
   attach, so the store never starts empty and its first write never clobbers
-  the file.
-- **First run vs unreadable file.** A missing file is a first run. A file that
-  exists but cannot be read, or is in an unknown or newer format, is never
-  written; history stays in memory for that session.
-- **One bag per identity fingerprint.** At most 8 bags are kept. An identity
-  change drops a pending write.
+  the file. A change made before or during the load is queued, applied over
+  what the load read, and written once it is ready.
+- **First run vs unreadable file.**
+  - The engine's `fs_stat` answers `{ exists: false }` for a missing file AND
+    for a missing parent folder (`FileStore.stat`,
+    `packages/ai/src/ai/account/file_store.py`), so a first run is always
+    ready.
+  - A failed request is retried (`PREFS_LOAD_ATTEMPTS` in all) before the
+    session falls back to memory.
+  - A file that exists but cannot be read, or is in an unknown or newer
+    format, is never written; history stays in memory for that session.
+- **One bag per identity fingerprint.** At most 8 bags are kept.
+  - A write that falls due while nobody is vouched for (`ownerNow()` null, a
+    reconnect) is held and lands once the same owner is back.
+  - A different owner drops it.
 - **Writes.** They are debounced and serialised, and the first one runs
-  `client.fsMkdir` on the folder. The file is capped at twice the 256 KB
-  history bag. Every fs request has an explicit timeout.
+  `client.fsMkdir` on the folder.
+  - A failed or held write retries with backoff (`PREFS_WRITE_RETRIES`).
+  - The file is capped at twice the 256 KB history bag, measured as the SDK
+    writes it (two-space indented JSON).
+  - Every fs request has an explicit timeout.
+  - `@/User/.workspace/…` and SQL's scope-less `.workspace/…` are the same
+    folder.
 - **Last writer wins across windows** (a known limitation). Drafts and
   captions stay session-only.
 
@@ -526,7 +592,9 @@ and `toolOps.ts`):
   - **One wiring module.** `createToolChannel`, `createToolOpServer` and
     `createToolController` are imported in ONE wiring module per app. A
     source-reading test pins this with `findToolFactoryImports` from
-    `testing.ts`.
+    `testing.ts`. That helper is an accident guard, not a boundary: it reads
+    text, and catches named, aliased, namespace, default, re-export and
+    dynamic imports in either quote style.
   - **A mount test.** The lane's mount test ends with
     `assertSidebarSubscribers(spy)`, which requires exactly two live
     subscriptions: the channel, then the op server.
@@ -535,10 +603,13 @@ and `toolOps.ts`):
   op server would run an event that shares an op's name, so
   `attachController`'s shim drops events before the op server sees them. Even
   so, keep event and op names disjoint.
-- Calls made while no controller is subscribed are held and handed to the next
-  subscriber. `attachController` passes them to the handlers, so the deadline
-  decides whether each one runs.
-- A sidebar mount posts nothing, opens no document and registers no monitor.
+- Calls are held only while no subscriber at all is on the sidebar peer, and
+  `attachController` passes held calls to the handlers, so the deadline
+  decides whether each one runs. A call that arrives while another subscriber
+  (the host channel) holds the slot is dropped; frames wait for readiness to
+  avoid that.
+- A sidebar mount posts no event and no call, opens no document and registers
+  no monitor; its only posts are retained state (readiness, identity).
 
 **What the platform loses.** In VS Code, the controller's own `client.tool`
 failures arrive without `code`: the bus bridge carries messages only. So the
@@ -553,8 +624,10 @@ retained registry, imported from source by relative path.
 - **The JSON wire.** By default `createDevToolHarness` carries every bus
   payload as its JSON image, as VS Code's postMessage does, and records each
   payload that JSON would change in `h.violations`. A test that asserts
-  `h.violations` is empty proves R4 end to end. `{ json: false }` models
-  rocket-ui's in-process realm.
+  `h.violations` is empty proves R4 end to end. The shell envelope's own
+  optional fields (`payload`, `args`, `result`, `error`) may be absent;
+  whatever they hold is judged in full. `{ json: false }` models rocket-ui's
+  in-process realm.
 - **Helpers.** It adds `assertJsonSafe`, `settle()`, `spyPeer`, the two quirk-1
   guards above, and fake VS Code and rocket-ui realms whose rules cite
   `connection.ts`.
