@@ -216,6 +216,44 @@ export function resetSavedConnections(opts: { force?: boolean } = {}): void {
 	notify();
 }
 
+/** Owners alive in this realm (engine cores that load and write the list). */
+let owners = 0;
+
+/**
+ * Mark this realm as an OWNER of the list for as long as the returned release
+ * is not called (the engine core does, for its lifetime). While a realm owns
+ * the list, a replica snapshot never overwrites it: in one realm (rocket-ui)
+ * the frames and the controller share this module, and a snapshot the
+ * controller could not publish (over the retained-state cap) or one that is
+ * still loading must not wipe the owner's list or cancel its load.
+ *
+ * @returns Release the claim (idempotent).
+ */
+export function ownSavedConnections(): () => void {
+	owners++;
+	let released = false;
+	return () => {
+		if (released) return;
+		released = true;
+		owners--;
+	};
+}
+
+/**
+ * Applies a snapshot the controller published (`{ status, list }`) in a
+ * realm that does NOT own the list: a ready list becomes the read-only
+ * replica, anything else shows as loading. A no-op where an owner is alive.
+ *
+ * @param snapshot - The controller's snapshot.
+ * @param snapshot.status - The list's status in the controller.
+ * @param snapshot.list - The list (empty unless ready).
+ */
+export function applyReplicaConnections(snapshot: { status: SavedConnectionsStatus; list: SavedSqlConnection[] } | undefined): void {
+	if (owners > 0) return;
+	if (snapshot?.status === 'ready' && Array.isArray(snapshot.list)) applySavedConnections(snapshot.list);
+	else resetSavedConnections({ force: true });
+}
+
 /**
  * Applies the controller's published list as a READ-ONLY replica — document
  * realms render from this; no writer is installed, so a mutation attempted

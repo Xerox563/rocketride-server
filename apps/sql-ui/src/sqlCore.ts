@@ -62,8 +62,8 @@
 //
 // A connection that resolves to nothing fails with an ExplorerToolError of
 // kind `unavailable` (the controller answers it as Reply data). Every wait
-// here is bounded (see the constants), so a frame's timeout can be derived
-// from them (sqlTimeouts in ops.ts).
+// here is bounded (sqlTimeouts.ts), so a frame's timeout can be derived
+// from them.
 // =============================================================================
 
 import { ExplorerToolError } from 'shared/explorer/errors';
@@ -77,9 +77,12 @@ import { createActivationGate } from 'shared/explorer/devtool/activation';
 import type { IActivationBus, IActivationGate } from 'shared/explorer/devtool/activation';
 import { createDevToolDiscovery } from 'shared/explorer/devtool/watch';
 import type { IDevToolDiscovery, IDiscoveryBus, IFocusTarget } from 'shared/explorer/devtool/watch';
+import { isPlainObject } from 'shared/explorer/checks';
 import {
+	DATABASE_PROVIDERS,
 	createSqlEndpoints,
 	createSqlSession,
+	deleteSavedConnection,
 	directProjectId,
 	directUseOptions,
 	endpointForConnection,
@@ -87,46 +90,24 @@ import {
 	getSavedConnection,
 	getSavedConnectionsStatus,
 	loadSavedConnections,
+	ownSavedConnections,
 	resetSavedConnections,
 	subscribeSavedConnections,
 	TOOLS_SOURCE_ID,
+	toDialect,
+	upsertSavedConnection,
 } from './connect';
-import type { SavedConnectionsFs, SavedSqlConnection, SqlEndpoint, SqlSession } from './connect';
-
-// =============================================================================
-// WAITS (every one explicit; see ops.ts for how a frame derives its own)
-// =============================================================================
-
-/** Bus timeout of each user-store request (the saved-connection file). */
-export const FS_TIMEOUT_MS = 15_000;
-
-/** How long a call waits for the saved-connection list to finish loading (mkdir + read). */
-export const LIST_WAIT_MS = 2 * FS_TIMEOUT_MS;
-
-/** Bus timeout of `client.use` (starting or reattaching a direct connection's pipeline). */
-export const USE_TIMEOUT_MS = 60_000;
-
-/**
- * How long resolution waits for a discovery it asked for: the store's own
- * discovery bound (30 s) plus one probe (15 s). Discovery merges endpoints
- * before it probes them, so an endpoint is usually found well before this.
- */
-export const DISCOVERY_WAIT_MS = 45_000;
-
-/** The longest a resolution can take: the list, a direct pipeline's start, and a discovery. */
-export const RESOLVE_BUDGET_MS = LIST_WAIT_MS + USE_TIMEOUT_MS + DISCOVERY_WAIT_MS;
-
-/** Bus timeout of `client.getTaskToken` and `client.terminate` (releasing a direct pipeline). */
-export const RELEASE_STEP_TIMEOUT_MS = 15_000;
-
-/** Bus timeout of `client.getService` (one service definition). */
-export const SERVICE_TIMEOUT_MS = 30_000;
-
-/** Bus timeout of `client.validate` (one component). */
-export const VALIDATE_TIMEOUT_MS = 30_000;
-
-/** Bus timeout of `client.getEnvironmentKeys`. */
-export const ENV_KEYS_TIMEOUT_MS = 15_000;
+import type { SavedConnectionsFs, SavedSqlConnection, SqlDialect, SqlEndpoint, SqlSession } from './connect';
+import {
+	DISCOVERY_WAIT_MS,
+	ENV_KEYS_TIMEOUT_MS,
+	FS_TIMEOUT_MS,
+	LIST_WAIT_MS,
+	RELEASE_STEP_TIMEOUT_MS,
+	SERVICE_TIMEOUT_MS,
+	USE_TIMEOUT_MS,
+	VALIDATE_TIMEOUT_MS,
+} from './sqlTimeouts';
 
 // =============================================================================
 // TYPES
@@ -176,8 +157,12 @@ export interface SqlCore {
 	resolve(connId: string): Promise<SqlEndpoint>;
 	/** A session whose every call resolves its connection first (`endpoint.connId` is required). */
 	sessionFor(endpoint: SqlEndpoint): SqlSession;
-	/** Run calls on a connection's session (resolving it first). */
-	withSession<T>(connId: string, fn: (session: SqlSession) => Promise<T>): Promise<T>;
+	/**
+	 * Run calls on a connection's session (resolving it first). `ctx.dialect`
+	 * is the dialect the node answered the store's probe with ('unknown' until
+	 * it has), which the controller's own write checks classify with.
+	 */
+	withSession<T>(connId: string, fn: (session: SqlSession, ctx: { dialect: SqlDialect }) => Promise<T>): Promise<T>;
 	/** Stop a direct connection's temp pipeline, best effort (a no-op for a pipeline connection). */
 	release(connId: string): Promise<void>;
 	/** The New Connection picker's list: discovered endpoints a pipeline connection can be saved for. */
@@ -188,6 +173,15 @@ export interface SqlCore {
 	validate(pipeline: Record<string, unknown>): Promise<unknown>;
 	/** Environment-variable names (the config form's `${}` autocomplete). */
 	envKeys(): Promise<string[]>;
+	/**
+	 * Insert or replace a saved connection, once the list is read for the
+	 * signed-in identity (never queued onto someone else's list).
+	 *
+	 * @throws ExplorerToolError `invalid` (not a usable record) or `unavailable` (not signed in, list unreadable).
+	 */
+	saveConnection(connection: SavedSqlConnection): Promise<void>;
+	/** Delete a saved connection; a direct one's temp pipeline is stopped first, best effort. */
+	deleteConnection(connId: string): Promise<void>;
 	/** Stop everything the core follows (idempotent). */
 	dispose(): void;
 }
@@ -236,6 +230,36 @@ function bounded(work: Promise<unknown>, ms: number): Promise<void> {
 }
 
 /**
+ * Check a saved-connection record that arrived from outside (a frame's
+ * save): the shape the file holds, and a provider this app serves (a direct
+ * record is started with `client.use`, so it must name a database node).
+ *
+ * @param value - The record.
+ * @returns The record.
+ * @throws ExplorerToolError `invalid` naming what is wrong.
+ */
+export function checkSavedConnection(value: unknown): SavedSqlConnection {
+	const fail = (why: string): never => { throw new ExplorerToolError({ kind: 'invalid', tool: 'saveConnection', message: `The connection was not saved: ${why}.` }); };
+	if (!isPlainObject(value)) return fail('it is not a connection record');
+	const text = (field: string): string => {
+		const field_ = value[field];
+		return typeof field_ === 'string' && field_ !== '' ? field_ : fail(`'${field}' is missing`);
+	};
+	text('id');
+	if (typeof value.name !== 'string') fail("'name' is missing");
+	const provider = text('provider');
+	if (!DATABASE_PROVIDERS.has(provider)) fail(`'${provider}' is not a database node this app opens`);
+	if (value.mode === 'pipeline') {
+		for (const field of ['projectId', 'pipelineName', 'source', 'nodeId']) text(field);
+	} else if (value.mode === 'direct') {
+		if (!isPlainObject(value.config)) fail("'config' is missing");
+	} else {
+		fail("'mode' must be 'pipeline' or 'direct'");
+	}
+	return value as unknown as SavedSqlConnection;
+}
+
+/**
  * An `unavailable` failure (nothing was sent to a node).
  *
  * @param tool - What was being done.
@@ -280,6 +304,9 @@ export function createSqlCore(opts: SqlCoreOptions): SqlCore {
 		fsReadJson: (path) => busRequest(cm, 'client.fsReadJson', { path }, FS_TIMEOUT_MS),
 		fsWriteJson: (path, value) => busRequest(cm, 'client.fsWriteJson', { path, value }, FS_TIMEOUT_MS),
 	};
+	// This realm owns the list for the core's lifetime: a replica snapshot
+	// (a frame in the same realm) never overwrites it.
+	const releaseList = ownSavedConnections();
 	let listOwner: string | null = null;
 	const followIdentity = (snapshot: IIdentitySnapshot): void => {
 		const owner = snapshot.known ? snapshot.fingerprint : null;
@@ -299,13 +326,11 @@ export function createSqlCore(opts: SqlCoreOptions): SqlCore {
 	};
 
 	/**
-	 * The saved connection, once the list has been read.
+	 * Wait (bounded) until the saved-connection list is read for the signed-in identity.
 	 *
-	 * @param connId - The connection id.
 	 * @param tool - What is being done (named in errors).
-	 * @returns The record.
 	 */
-	const recordOf = async (connId: string, tool: string): Promise<SavedSqlConnection> => {
+	const listReady = async (tool: string): Promise<void> => {
 		requireIdentity(tool);
 		if (getSavedConnectionsStatus() !== 'ready') {
 			await new Promise<void>((resolve) => {
@@ -319,6 +344,17 @@ export function createSqlCore(opts: SqlCoreOptions): SqlCore {
 			});
 		}
 		if (getSavedConnectionsStatus() !== 'ready') throw unavailable(tool, 'Your saved connections could not be read from the server yet. Try again.');
+	};
+
+	/**
+	 * The saved connection, once the list has been read.
+	 *
+	 * @param connId - The connection id.
+	 * @param tool - What is being done (named in errors).
+	 * @returns The record.
+	 */
+	const recordOf = async (connId: string, tool: string): Promise<SavedSqlConnection> => {
+		await listReady(tool);
 		const record = getSavedConnection(connId);
 		if (!record) throw new ExplorerToolError({ kind: 'invalid', tool, message: `There is no saved connection '${connId}'.` });
 		return record;
@@ -374,10 +410,12 @@ export function createSqlCore(opts: SqlCoreOptions): SqlCore {
 		return found;
 	};
 
-	const withSession = async <T,>(connId: string, fn: (session: SqlSession) => Promise<T>, tool = 'connection'): Promise<T> => {
+	const withSession = async <T,>(connId: string, fn: (session: SqlSession, ctx: { dialect: SqlDialect }) => Promise<T>, tool = 'connection'): Promise<T> => {
 		const record = await recordOf(connId, tool);
 		const endpoint = await locate(record, tool);
-		return fn(createSqlSession(endpoints.session(client, endpoint), endpointForConnection(record)));
+		const probe = endpoints.getState().probes[endpoint.key];
+		const dialect = probe?.ok ? toDialect(probe.dialect) : 'unknown';
+		return fn(createSqlSession(endpoints.session(client, endpoint), endpointForConnection(record)), { dialect });
 	};
 
 	const sessionFor = (endpoint: SqlEndpoint): SqlSession => {
@@ -428,6 +466,16 @@ export function createSqlCore(opts: SqlCoreOptions): SqlCore {
 		},
 		getService: (provider) => busRequest(cm, 'client.getService', { service: provider }, SERVICE_TIMEOUT_MS),
 		validate: (pipeline) => busRequest(cm, 'client.validate', { pipeline }, VALIDATE_TIMEOUT_MS),
+		async saveConnection(connection) {
+			const record = checkSavedConnection(connection);
+			await listReady('saveConnection');
+			upsertSavedConnection(record);
+		},
+		async deleteConnection(connId) {
+			await listReady('deleteConnection');
+			await this.release(connId);
+			deleteSavedConnection(connId);
+		},
 		async envKeys() {
 			const keys = await busRequest(cm, 'client.getEnvironmentKeys', {}, ENV_KEYS_TIMEOUT_MS);
 			return Array.isArray(keys) ? keys.filter((key): key is string => typeof key === 'string') : [];
@@ -436,6 +484,7 @@ export function createSqlCore(opts: SqlCoreOptions): SqlCore {
 			if (disposed) return;
 			disposed = true;
 			offIdentity();
+			releaseList();
 			detachStore();
 			discovery.dispose();
 			activation.dispose();

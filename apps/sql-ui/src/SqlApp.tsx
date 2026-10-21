@@ -35,28 +35,25 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
-import type { DevToolProps, ShellAppProps } from 'shell';
+import type { ShellAppProps } from 'shell';
 import { ConnectionManager, DocTabs, DocSplitLayout, AppLayout, useShellConnection } from 'shell';
 import type { Documents } from 'shell';
 import { EmptyState } from 'shell';
 import { commonStyles } from 'shell';
-import { closeDocumentByUri, connectionEditorIdFromUri, createDocs, destroyDocs, endpointKeyFromAnyUri, endpointKeyFromUri, getDocs, isConnectionEditorUri, isDesignUri, isDiagramUri, isQueryUri, isTableDataUri, parseConnectionEditorDocKey } from './docs';
+import { closeDocumentByUri, connectionEditorIdFromUri, createDocs, destroyDocs, endpointKeyFromAnyUri, endpointKeyFromUri, getDocs, isConnectionEditorUri, isDesignUri, isDiagramUri, isQueryUri, isTableDataUri } from './docs';
 import type { QueryDocPayload } from './docs';
 import { setActiveConnection } from './navigation';
-import { connIdFromDirectKey, resetSavedConnections, isDirectEndpointKey, useSavedConnections, useSavedConnectionsStatus } from './connect';
-import type { SavedSqlConnection } from './connect';
-import { createToolChannel, createToolController, useConnectionReady } from 'shell';
-import type { SqlOps } from './ops';
-import { attachSqlDocumentHost, createLocalSidebarBridge, sendConnectionSave } from './sqlBridge';
-import type { SqlSidebarBridge } from './sqlBridge';
+import { connIdFromDirectKey, resetSavedConnections, isDirectEndpointKey } from './connect';
+import { createLocalSidebarBridge, createLocalSqlEnv } from './localEnv';
+import type { SqlSidebarBridge } from './sidebarBridge';
 import { createSqlCore } from './sqlCore';
 import type { SqlCore } from './sqlCore';
 import { SQL_APP_ID } from './appId';
-import { SqlEnvProvider, createLocalSqlEnv, createRemoteSqlEnv, useSqlEnv } from './sqlEnv';
+import { SqlEnvProvider, useSqlEnv } from './sqlEnv';
 import type { SqlEndpoint } from './connect';
 import ConnectionView from './views/ConnectionView';
 import ConnectionOverlays from './components/ConnectionOverlays';
-import NewConnectionModal from './components/NewConnectionModal';
+import ConnectionEditorBody from './components/ConnectionEditorBody';
 import QueryView from './views/QueryView';
 import TableDataView from './views/TableDataView';
 import TableDesignView from './views/TableDesignView';
@@ -128,6 +125,19 @@ const styles = {
 // =============================================================================
 
 /**
+ * A provider's display title from the shell's cached service list (no
+ * request: the summary the shell already fetched).
+ *
+ * @param provider - The provider id.
+ * @returns The title, when the cache has one.
+ */
+function serviceTitle(provider: string): string | undefined {
+	const { services } = ConnectionManager.getInstance().getCachedServices();
+	const entry = services[provider] as { title?: string } | undefined;
+	return entry?.title;
+}
+
+/**
  * SQL Explorer — client area. Initialises the app-owned Documents instance
  * (all documents are static), auto-opens the Connections landing document,
  * and renders the DocTabs + editor-group layout.
@@ -168,7 +178,7 @@ const SqlApp: React.FC<ShellAppProps> = (_props) => {
 
 	// The FULL APP's engine surface: the realm legitimately owns a connection,
 	// so the views get the LOCAL environment (dev-tool frames get the remote one).
-	const env = useMemo(() => (core ? createLocalSqlEnv(core, isConnected) : null), [core, isConnected]);
+	const env = useMemo(() => (core ? createLocalSqlEnv(core, isConnected, serviceTitle) : null), [core, isConnected]);
 
 	// Two-column app: the navigation/schema sidebar mounts once Documents is
 	// ready (it shares the singleton with the workbench documents).
@@ -184,198 +194,6 @@ const SqlApp: React.FC<ShellAppProps> = (_props) => {
 			</AppLayout>
 		</SqlEnvProvider>
 	);
-};
-
-// =============================================================================
-// DEV-TOOL FRAME — one host document per CONNECTION (no inner tab strip)
-// =============================================================================
-
-// Overlay-host claim: sidebar-requested dialogs (add/edit/delete connection)
-// must render in exactly ONE frame per realm. In VS Code each frame is its
-// own document (always one host). In-shell, several connection frames share
-// the realm — the first alive mount holds the claim and it transfers when
-// that mount closes.
-const overlayHosts: Array<() => void> = [];
-
-/** Whether THIS mount currently owns the overlay-host claim. */
-function useOverlayHostClaim(): boolean {
-	const [, force] = useState(0);
-	const tickRef = useRef<(() => void) | null>(null);
-	if (!tickRef.current) tickRef.current = () => force((n) => n + 1);
-	useEffect(() => {
-		const tick = tickRef.current!;
-		overlayHosts.push(tick);
-		overlayHosts.forEach((fn) => fn());
-		return () => {
-			const at = overlayHosts.indexOf(tick);
-			if (at >= 0) overlayHosts.splice(at, 1);
-			overlayHosts.forEach((fn) => fn());
-		};
-	}, []);
-	return overlayHosts[0] === tickRef.current;
-}
-
-/** The sidebar-requested dialogs, rendered by the claim-holding mount only. */
-const OverlayHost: React.FC = () => {
-	const owns = useOverlayHostClaim();
-	return owns ? <ConnectionOverlays /> : null;
-};
-
-/**
- * One connection's workbench as a host document: resolves the saved
- * connection named by the doc key (direct mode materialises its temp tool
- * pipeline), then renders the paged ConnectionView — Overview / Insights /
- * Diagram, plus Query / Data / Design as they are used. No inner documents.
- *
- * @param props.connId - The saved connection's id (the host document key).
- */
-const SqlConnectionDocument: React.FC<{ connId: string }> = ({ connId }) => {
-	const env = useSqlEnv();
-	const status = useSavedConnectionsStatus();
-	const connections = useSavedConnections();
-	const conn = connections.find((c) => c.id === connId);
-	const [endpoint, setEndpoint] = useState<SqlEndpoint | null>(null);
-	const [resolveError, setResolveError] = useState<string | null>(null);
-
-	// Resolve the endpoint whenever the record (or the connection) changes.
-	// In a dev-tool frame this is a controller op — the temp pipeline (and
-	// its revival) lives in the CONTROLLER realm, never here.
-	useEffect(() => {
-		if (!env.ready || !conn) return;
-		let alive = true;
-		setResolveError(null);
-		env.resolveEndpoint(conn)
-			.then((ep) => { if (alive) setEndpoint(ep); })
-			.catch((err: unknown) => { if (alive) setResolveError(err instanceof Error ? err.message : String(err)); });
-		return () => { alive = false; };
-	}, [env, conn]);
-
-	// Publish the active connection for the sidebar's schema tree, and stop a
-	// direct connection's temp pipeline when its document closes (the 15-min
-	// idle TTL backstops teardowns this cleanup never sees).
-	useEffect(() => {
-		if (!endpoint) return;
-		setActiveConnection(endpoint.key);
-		return () => {
-			if (isDirectEndpointKey(endpoint.key)) env.releaseEndpoint(connId);
-		};
-	}, [endpoint, env, connId]);
-
-	let body: React.ReactNode;
-	if (!env.ready) {
-		body = <div style={styles.welcome}><EmptyState icon={<DatabaseIcon />} title="Not connected" description="Connect to a RocketRide server to open this connection." /></div>;
-	} else if (resolveError) {
-		body = <div style={styles.welcome}><EmptyState icon={<DatabaseIcon />} title="Could not open connection" description={resolveError} /></div>;
-	} else if (!conn) {
-		body = status === 'ready'
-			? <div style={styles.welcome}><EmptyState icon={<DatabaseIcon />} title="Connection not found" description="This saved connection no longer exists." /></div>
-			: <div style={styles.welcome}><EmptyState icon={<DatabaseIcon />} title="Loading…" description="Reading your saved connections." /></div>;
-	} else if (!endpoint) {
-		body = <div style={styles.welcome}><EmptyState icon={<DatabaseIcon />} title={conn.name} description="Opening the connection…" /></div>;
-	} else {
-		body = <ConnectionView endpoint={endpoint} />;
-	}
-
-	return (
-		<div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0, height: '100%' }}>
-			<LiveRegion />
-			{body}
-			{/* Sidebar-requested dialogs — one host per realm (see the claim). */}
-			<OverlayHost />
-		</div>
-	);
-};
-
-/**
- * The connection editor as a document body, shared by both hosts: resolves
- * the editing target from the store and runs the page-chrome form. After a
- * NEW connection saves, `onOpenSaved` opens its workbench.
- */
-const ConnectionEditorBody: React.FC<{
-	/** The connection id being edited, or null for the add form. */
-	connId: string | null;
-	/** Close this editor document. */
-	onCloseSelf: () => void;
-	/** Open the workbench of a freshly added connection. */
-	onOpenSaved: (saved: SavedSqlConnection) => void;
-	/** Commit override for isolated documents (peer post to the owner realm). */
-	commit?: (conn: SavedSqlConnection) => void;
-}> = ({ connId, onCloseSelf, onOpenSaved, commit }) => {
-	const connections = useSavedConnections();
-	const status = useSavedConnectionsStatus();
-	const editing = connId ? connections.find((c) => c.id === connId) ?? null : null;
-
-	// An edit target that is not in the store yet (list still loading) or is
-	// gone (deleted elsewhere) must not silently become an ADD form.
-	if (connId && !editing) {
-		return status === 'ready'
-			? <div style={styles.welcome}><EmptyState icon={<DatabaseIcon />} title="Connection not found" description="This saved connection no longer exists." /></div>
-			: <div style={styles.welcome}><EmptyState icon={<DatabaseIcon />} title="Loading…" description="Reading your saved connections." /></div>;
-	}
-
-	return (
-		<NewConnectionModal
-			page
-			editing={editing}
-			onClose={onCloseSelf}
-			onSaved={(saved) => { if (!connId) onOpenSaved(saved); }}
-			{...(commit ? { commit } : {})}
-		/>
-	);
-};
-
-/**
- * Dev-tool FRAME. With a `docKey` (a saved connection id, opened through
- * DevToolProps.documents) it renders that connection's workbench; without
- * one — the tool's generic document — it shows the landing state. The
- * connections list and schema tree live in the HOST's sidebar panel
- * (SqlDevToolSidebar); sidebar actions arrive over the peer channel and the
- * frame pushes the list + active key back (ref-counted: any number of
- * connection frames share one wiring per realm).
- */
-export const SqlDevTool: React.FC<DevToolProps> = ({ peer, channel, docKey, documents }) => {
-	// Document side of the tool protocol: applies the controller's retained
-	// connection list as this realm's read-only replica (frames never read
-	// the server file themselves), acts on controller events, announces the
-	// active endpoint. Ref-counted — any number of frames, one wiring.
-	useEffect(() => attachSqlDocumentHost({ peer, ...(channel ? { channel } : {}), ...(documents ? { documents } : {}) }), [peer, channel, documents]);
-
-	// FRAMES HOLD NO ROCKETRIDE CLIENT. Every engine interaction below this
-	// point is a controller op: the calling function rides the peer, and the
-	// enablement flag is the host-published `host:connection` system topic.
-	const toolChannel = useMemo(() => channel ?? createToolChannel(peer), [channel, peer]);
-	const call = useMemo(() => createToolController<SqlOps>(peer), [peer]);
-	const engineReady = useConnectionReady(toolChannel);
-	const env = useMemo(() => createRemoteSqlEnv(call, engineReady), [call, engineReady]);
-
-	// The connection editor rides its own docKey family ('edit:…'); every
-	// other docKey is a saved connection id.
-	const editorKey = docKey ? parseConnectionEditorDocKey(docKey) : null;
-	let body: React.ReactNode;
-	if (docKey && editorKey) {
-		body = (
-			<ConnectionEditorBody
-				connId={editorKey.connId}
-				onCloseSelf={() => documents?.close(docKey)}
-				onOpenSaved={(saved) => documents?.open(saved.id, saved.name)}
-				// Isolated document: the save commits in the CONTROLLER realm
-				// (the owner) as a channel event.
-				commit={(conn) => sendConnectionSave({ peer, ...(channel ? { channel } : {}) }, conn)}
-			/>
-		);
-	} else if (docKey) {
-		body = <SqlConnectionDocument connId={docKey} />;
-	} else {
-		body = (
-			<div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-				<div style={styles.welcome}>
-					<EmptyState icon={<DatabaseIcon />} title="SQL Explorer" description="Open a connection from the sidebar, or add one with New Connection." />
-				</div>
-				<OverlayHost />
-			</div>
-		);
-	}
-	return <SqlEnvProvider value={env}>{body}</SqlEnvProvider>;
 };
 
 /**

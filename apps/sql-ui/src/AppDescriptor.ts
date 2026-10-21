@@ -31,7 +31,8 @@
 import 'react/jsx-dev-runtime';
 
 import type { AppDescriptor } from 'shell';
-import SqlApp, { SqlDevTool } from './SqlApp';
+import SqlApp from './SqlApp';
+import SqlDevTool from './SqlDevTool';
 import { SqlDevToolSidebar } from './SqlSidebar';
 import { SQL_APP_ID } from './appId';
 

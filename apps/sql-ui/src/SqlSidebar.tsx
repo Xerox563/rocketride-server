@@ -36,18 +36,17 @@
 // host-mounted devToolSidebar (see sqlBridge.ts).
 // =============================================================================
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { ConnectionManager, useShellConnection } from 'shell';
 import { SidebarMenu, BxPlus, BxCheck, BxEditAlt, BxTrash } from 'shell';
 import type { DevToolProps, ViewMenu } from 'shell';
 import { useSavedConnections, useSavedConnectionsStatus, endpointKeyForConnection } from './connect';
 import type { SavedSqlConnection } from './connect';
-import { createSidebarToolBridge } from './sqlBridge';
-import type { SqlSidebarBridge } from './sqlBridge';
-import { createSqlCore } from './sqlCore';
-import type { SqlCore } from './sqlCore';
-import { SQL_APP_ID } from './appId';
+import type { SqlSidebarBridge } from './sidebarBridge';
+import { SQL_TOOL_PROTOCOL } from './sqlBridge';
+import { attachSqlController } from './sqlController';
+import type { SqlControllerMount } from './sqlController';
 import { DatabaseIcon } from './icons';
 
 // =============================================================================
@@ -360,24 +359,34 @@ const SqlSidebar: React.FC<SqlSidebarProps> = ({ bridge, hostActiveDoc }) => {
  * activeDocKey to highlight the fronted connection.
  */
 export const SqlDevToolSidebar: React.FC<DevToolProps> = ({ peer, channel, documents, activeDocKey }) => {
-	// The controller's engine core: the shared endpoint store, sessions,
-	// identity and the saved-connection list (sqlCore.ts).
-	const [core, setCore] = useState<SqlCore | null>(null);
+	// The controller (sqlController.ts): its engine core, exactly one op
+	// server (created after the channel), the retained state it publishes, and
+	// the sidebar's bridge. Built in an EFFECT and disposed with it (R6): under
+	// StrictMode that is mount -> dispose -> mount, which leaves one live op
+	// server. It posts nothing and opens no document at mount (R7).
+	const [mount, setMount] = useState<SqlControllerMount | null>(null);
+	const activeDocKeyRef = useRef(activeDocKey);
+	activeDocKeyRef.current = activeDocKey;
 	useEffect(() => {
-		const created = createSqlCore({ cm: ConnectionManager.getInstance(), appId: SQL_APP_ID, mode: 'devtool', activeDocKey: activeDocKey ?? null });
-		setCore(created);
-		return () => created.dispose();
-		// The core is created once per mount; later activeDocKey values are fed below.
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, []);
-	useEffect(() => { core?.activation.noteActiveDocKey(activeDocKey); }, [core, activeDocKey]);
+		const attached = attachSqlController({
+			peer,
+			...(channel ? { channel } : {}),
+			...(documents ? { documents } : {}),
+			activeDocKey: activeDocKeyRef.current ?? null,
+			cm: ConnectionManager.getInstance(),
+			protocol: SQL_TOOL_PROTOCOL,
+		});
+		setMount(attached);
+		return () => {
+			attached.dispose();
+			setMount((current) => (current === attached ? null : current));
+		};
+	}, [peer, channel, documents]);
+	// A non-null activeDocKey is an activation (R7).
+	useEffect(() => { mount?.noteActiveDocKey(activeDocKey); }, [mount, activeDocKey]);
 
-	// Controller bridge: commits incoming saves, publishes the list as
-	// retained channel state, and carries the sidebar's actions.
-	const bridge = useMemo(() => (core ? createSidebarToolBridge({ peer, ...(channel ? { channel } : {}), ...(documents ? { documents } : {}) }, core) : null), [peer, channel, documents, core]);
-
-	if (!bridge) return null;
-	return <SqlSidebar bridge={bridge} {...(activeDocKey !== undefined ? { hostActiveDoc: activeDocKey } : {})} />;
+	if (!mount) return null;
+	return <SqlSidebar bridge={mount.bridge} {...(activeDocKey !== undefined ? { hostActiveDoc: activeDocKey } : {})} />;
 };
 
 export default SqlSidebar;

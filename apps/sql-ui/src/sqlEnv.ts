@@ -27,24 +27,25 @@
 // Every view and dialog reaches the engine through this ONE seam instead of
 // holding a RocketRide client. Two implementations:
 //
-//   LOCAL  (createLocalSqlEnv)  — over the realm's engine core (sqlCore.ts:
+//   LOCAL  (localEnv.ts)        — over the realm's engine core (sqlCore.ts:
 //          the shared endpoint store, sessions, identity). Used by the full
-//          app (SqlApp), where the realm legitimately owns a connection; the
-//          sidebar CONTROLLER serves the ops from its own core.
-//   REMOTE (createRemoteSqlEnv) — routes every call over `controller(...)`
-//          to the tool's sidebar controller (see ops.ts / sqlBridge.ts).
-//          Used by every dev-tool document frame: frames hold NO client.
+//          app (SqlApp), where the realm legitimately owns a connection.
+//   REMOTE (createRemoteSqlEnv) — every call is a `sql.*` op on the tool's
+//          sidebar CONTROLLER (ops.ts / sqlController.ts), through the frame
+//          caller (sqlFrame.ts). Used by every dev-tool document frame:
+//          frames hold NO client and import nothing that does.
 //
 // The provider decides which one a subtree gets; views only ever call
-// useSqlEnv(). `ready` replaces the old `client && isConnected` enablement —
-// remotely it reflects the CONTROLLER's connection (`host:connection`).
+// useSqlEnv(). `ready` is the run/apply enablement: the shell connection in
+// the full app, the host's `host:connection` snapshot in a frame.
 // =============================================================================
 
 import { createContext, useContext } from 'react';
-import type { ToolControllerFn } from 'shell';
+import type { IFrameCaller } from 'shared/explorer/devtool/frame';
+import type { JsonValue } from 'shared/explorer/devtool/reply';
 import type { SqlOps } from './ops';
 import type { SqlEndpoint, SqlExecuteResult, SqlSchemaResponse, SqlSession, SavedSqlConnection, SqlDialect } from './connect';
-import type { SqlCore } from './sqlCore';
+import { SQL_OP_TIMEOUT_MS } from './sqlTimeouts';
 
 // =============================================================================
 // THE SEAM
@@ -54,7 +55,7 @@ import type { SqlCore } from './sqlCore';
 export interface SqlEnv {
 	/** Whether the engine is reachable (drives run/apply enablement). */
 	ready: boolean;
-	/** The session for an endpoint (cached; all statement traffic). */
+	/** The session for an endpoint (all statement traffic). The endpoint must carry its `connId`. */
 	getSession(endpoint: SqlEndpoint): SqlSession;
 	/** Resolve a saved connection to a live endpoint (direct mode starts
 	 *  or reattaches its temp pipeline). */
@@ -63,7 +64,7 @@ export interface SqlEnv {
 	 *  effort — the idle TTL is the backstop). A no-op for a pipeline
 	 *  connection. Named by the saved connection's id. */
 	releaseEndpoint(connId: string): void;
-	/** Discover database endpoints in the server's running pipelines. */
+	/** The New Connection picker's list: endpoints a pipeline connection can be saved for. */
 	discoverEndpoints(): Promise<SqlEndpoint[]>;
 	/** One service definition (the direct path's config schema). */
 	getService(provider: string): Promise<unknown>;
@@ -72,6 +73,12 @@ export interface SqlEnv {
 	/** Environment-variable names for the config form's autocomplete.
 	 *  Never rejects — failures come back as an empty list. */
 	getEnvironmentKeys(): Promise<string[]>;
+	/** Insert or replace a saved connection (it is committed where the list is owned). */
+	saveConnection(conn: SavedSqlConnection): Promise<void>;
+	/** Delete a saved connection (a direct one's temp pipeline is stopped first, best effort). */
+	deleteConnection(conn: SavedSqlConnection): Promise<void>;
+	/** A provider's display title from the realm's cached service list, when it has one. */
+	serviceTitle(provider: string): string | undefined;
 }
 
 const SqlEnvContext = createContext<SqlEnv | null>(null);
@@ -92,58 +99,44 @@ export function useSqlEnv(): SqlEnv {
 }
 
 // =============================================================================
-// LOCAL — over the realm's engine core
+// REMOTE — over the controller's ops
 // =============================================================================
 
 /**
- * The core-backed environment (the full app).
+ * The connection id an endpoint was resolved from.
  *
- * @param core - The realm's engine core (sqlCore.ts).
- * @param isConnected - The shell's connection flag.
- * @returns The environment (rebuild on core/connection change).
+ * @param endpoint - The endpoint.
+ * @returns Its connection id.
+ * @throws TypeError for an endpoint that did not come from a saved connection.
  */
-export function createLocalSqlEnv(core: SqlCore, isConnected: boolean): SqlEnv {
-	return {
-		ready: isConnected,
-		getSession: (endpoint) => core.sessionFor(endpoint),
-		resolveEndpoint: (conn) => core.resolve(conn.id),
-		releaseEndpoint: (connId) => {
-			void core.release(connId).catch(() => undefined);
-		},
-		discoverEndpoints: () => core.pickable(),
-		getService: (provider) => core.getService(provider),
-		validate: (pipeline) => core.validate(pipeline),
-		getEnvironmentKeys: async () => {
-			try {
-				return await core.envKeys();
-			} catch {
-				return [];
-			}
-		},
-	};
+function connIdOf(endpoint: SqlEndpoint): string {
+	if (typeof endpoint.connId !== 'string' || endpoint.connId === '') throw new TypeError(`The endpoint '${endpoint.key}' carries no connection id.`);
+	return endpoint.connId;
 }
 
-// =============================================================================
-// REMOTE — over controller(...) ops
-// =============================================================================
-
 /**
- * An SqlSession whose four tools are controller ops. Stateless — the
- * token cache and retry policy live in the CONTROLLER's real session.
+ * An SqlSession whose four tools are controller ops. Stateless — the token
+ * vault, the retry rule and the waits live in the CONTROLLER's session.
  *
- * @param call - The frame's controller function.
- * @param endpoint - The endpoint to bind.
+ * @param caller - The frame's caller.
+ * @param endpoint - The endpoint to bind (carrying its connId).
  * @returns The proxy session.
  */
-function remoteSession(call: ToolControllerFn<SqlOps>, endpoint: SqlEndpoint): SqlSession {
+function remoteSession(caller: IFrameCaller<SqlOps>, endpoint: SqlEndpoint): SqlSession {
+	const connId = connIdOf(endpoint);
 	return {
 		endpoint,
 		execute: (sql: string, opts?: { params?: unknown[]; idempotent?: boolean }): Promise<SqlExecuteResult> =>
-			call('sql.execute', { endpoint, sql, ...(opts?.params ? { params: opts.params } : {}), ...(opts?.idempotent !== undefined ? { idempotent: opts.idempotent } : {}) }),
+			caller.callReply('sql.execute', {
+				connId,
+				sql,
+				...(opts?.params ? { params: opts.params as JsonValue[] } : {}),
+				...(opts?.idempotent !== undefined ? { idempotent: opts.idempotent } : {}),
+			}, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.execute'] }),
 		getSchema: (table?: string): Promise<SqlSchemaResponse> =>
-			call('sql.getSchema', { endpoint, ...(table ? { table } : {}) }),
-		refreshSchema: (): Promise<SqlSchemaResponse> => call('sql.refreshSchema', { endpoint }),
-		dialect: (): Promise<SqlDialect> => call('sql.dialect', { endpoint }),
+			caller.callReply('sql.getSchema', { connId, ...(table ? { table } : {}) }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.getSchema'] }),
+		refreshSchema: (): Promise<SqlSchemaResponse> => caller.callReply('sql.refreshSchema', { connId }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.refreshSchema'] }),
+		dialect: (): Promise<SqlDialect> => caller.callReply('sql.dialect', { connId }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.dialect'] }),
 	};
 }
 
@@ -152,22 +145,31 @@ function remoteSession(call: ToolControllerFn<SqlOps>, endpoint: SqlEndpoint): S
  * holds no client: every call crosses the tool channel and executes on the
  * controller's single engine connection.
  *
- * @param call - The frame's controller function (createToolController(peer)).
+ * @param caller - The frame's caller (sqlFrame.ts).
  * @param ready - The controller realm's server reachability (`host:connection`).
+ * @param owner - The identity fingerprint the frame belongs to (sent with mutations).
  * @returns The environment (rebuild when `ready` changes).
  */
-export function createRemoteSqlEnv(call: ToolControllerFn<SqlOps>, ready: boolean): SqlEnv {
+export function createRemoteSqlEnv(caller: IFrameCaller<SqlOps>, ready: boolean, owner: () => string | null): SqlEnv {
 	return {
 		ready,
-		getSession: (endpoint) => remoteSession(call, endpoint),
-		resolveEndpoint: (conn) => call('sql.resolveEndpoint', { connId: conn.id }),
+		getSession: (endpoint) => remoteSession(caller, endpoint),
+		resolveEndpoint: (conn) => caller.callReply('sql.resolveEndpoint', { connId: conn.id }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.resolveEndpoint'] }),
 		releaseEndpoint: (connId) => {
 			// Fire-and-forget: a late or lost reply is fine — the TTL reaps.
-			void call('sql.releaseEndpoint', { connId }).catch(() => undefined);
+			void caller.callReply('sql.releaseEndpoint', { connId }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.releaseEndpoint'] }).catch(() => undefined);
 		},
-		discoverEndpoints: () => call('sql.discoverEndpoints', {}),
-		getService: (provider) => call('sql.getService', { provider }),
-		validate: (pipeline) => call('sql.validate', { pipeline }),
-		getEnvironmentKeys: () => call('sql.envKeys', {}).catch(() => []),
+		discoverEndpoints: () => caller.callReply('sql.discoverEndpoints', {}, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.discoverEndpoints'] }),
+		getService: (provider) => caller.callReply('sql.getService', { provider }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.getService'] }),
+		validate: (pipeline) => caller.callReply('sql.validate', { pipeline: pipeline as { [key: string]: JsonValue } }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.validate'] }),
+		getEnvironmentKeys: () => caller.callReply('sql.envKeys', {}, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.envKeys'] }).catch(() => []),
+		saveConnection: async (conn) => {
+			await caller.callReply('sql.saveConnection', { connection: conn, owner: owner() }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.saveConnection'] });
+		},
+		deleteConnection: async (conn) => {
+			await caller.callReply('sql.deleteConnection', { connId: conn.id, owner: owner() }, { timeoutMs: SQL_OP_TIMEOUT_MS['sql.deleteConnection'] });
+		},
+		// A frame has no service cache of its own; the dialog falls back to its titles.
+		serviceTitle: () => undefined,
 	};
 }

@@ -48,6 +48,7 @@ export {
 	loadSavedConnections, resetSavedConnections, useSavedConnections, useSavedConnectionsStatus,
 	upsertSavedConnection, newConnectionId, deleteSavedConnection, getSavedConnection,
 	applySavedConnections, subscribeSavedConnections, getSavedConnections, getSavedConnectionsStatus,
+	ownSavedConnections, applyReplicaConnections,
 } from './savedConnections';
 export type { SavedSqlConnection, PipelineBoundConnection, DirectConnection, SavedConnectionsStatus, SavedConnectionsFs } from './savedConnections';
 export {
