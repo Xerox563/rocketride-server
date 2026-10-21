@@ -49,11 +49,10 @@
 // connection is named by its id, never by an endpoint or a key from outside:
 //
 //   pipeline   the discovered endpoint whose `legacyKey` equals
-//              `endpointKeyForConnection(record)`. The store sets a
-//              legacyKey only on the caller's OWN development run, so that is
-//              the run a saved `projectId:source:nodeId` opens; a team
-//              deployment or another owner's run never matches. Discovery is
-//              identity-filtered (another organization's runs are dropped).
+//              `endpointKeyForConnection(record)`. The store sets a legacyKey
+//              only on development runs (keys.ts legacyKeyFromKey), so a
+//              team deployment never matches. The caller's OWN run is
+//              preferred, then the best state. Discovery is identity-filtered.
 //   direct     `client.use` starts or reattaches the connection's temporary
 //              tool pipeline (explicit timeout), then discovery finds it by
 //              its legacyKey `sqlconn-<id>:tools_1:<provider>_1`. A direct

@@ -455,14 +455,14 @@ export function attachSqlController(opts: SqlControllerOptions): SqlControllerMo
 				const gate = gateStatement(sql, await ctx.dialect(), idempotent === true);
 				if (gate.refusal !== null) throw new ExplorerToolError({ kind: 'invalid', tool: 'execute', message: gate.refusal });
 				return session.execute(sql, { ...(params && params.length > 0 ? { params } : {}), idempotent: gate.idempotent });
-			});
+			}, 'execute');
 		},
 		'sql.getSchema': ({ connId, table }) => {
 			checkSchemaInput({ table });
-			return core.withSession(connId, (session) => session.getSchema(table));
+			return core.withSession(connId, (session) => session.getSchema(table), 'get_schema');
 		},
-		'sql.refreshSchema': ({ connId }) => core.withSession(connId, (session) => session.refreshSchema()),
-		'sql.dialect': ({ connId }) => core.withSession(connId, (session) => session.dialect()),
+		'sql.refreshSchema': ({ connId }) => core.withSession(connId, (session) => session.refreshSchema(), 'refresh_schema'),
+		'sql.dialect': ({ connId }) => core.withSession(connId, (session) => session.dialect(), 'dialect'),
 		'sql.getService': async ({ provider }) => (await core.getService(provider)) as JsonValue,
 		'sql.validate': async ({ pipeline }) => (await core.validate(pipeline)) as JsonValue,
 		'sql.envKeys': () => core.envKeys(),

@@ -262,6 +262,15 @@ describe('T3 — every op round-trips JSON-safe; failures come back as equal Exp
 		const r = await rig({ rows: [] });
 		try {
 			await assert.rejects(r.env.resolveEndpoint(PIPELINE), (error: unknown) => error instanceof ExplorerToolError && error.kind === 'unavailable' && /not running/.test(error.message));
+			// A resolution failure inside an op names that op's tool (reviewer F6).
+			const fails = (op: 'sql.execute' | 'sql.getSchema' | 'sql.refreshSchema' | 'sql.dialect', tool: string, params: Record<string, unknown> = {}) => assert.rejects(
+				r.frame.caller.callReply(op, { connId: 'c-pipe', ...params } as never, { timeoutMs: SQL_OP_TIMEOUT_MS[op] }),
+				(error: unknown) => error instanceof ExplorerToolError && error.kind === 'unavailable' && error.tool === tool,
+			);
+			await fails('sql.execute', 'execute', { sql: 'SELECT 1' });
+			await fails('sql.getSchema', 'get_schema');
+			await fails('sql.refreshSchema', 'refresh_schema');
+			await fails('sql.dialect', 'dialect');
 		} finally {
 			r.dispose();
 		}

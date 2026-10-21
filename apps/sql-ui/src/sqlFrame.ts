@@ -222,7 +222,7 @@ function wireSqlDocumentHost(channel: TypedToolChannel<SqlStateMap, SqlEventMap>
 	};
 	pushActive();
 	const offActive = subscribeActiveConnection(pushActive);
-	const doc =typeof document !== 'undefined' ? document : null;
+	const doc = typeof document !== 'undefined' ? document : null;
 	const onVisible = (): void => {
 		if (doc?.visibilityState !== 'visible') return;
 		lastActive = getActiveConnection();
