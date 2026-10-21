@@ -129,6 +129,27 @@ const KIND_CASES: IKindCase[] = [
 	{ sql: 'SET GLOBAL autocommit = 0', kind: 'tx' },
 	{ sql: 'SET TRANSACTION ISOLATION LEVEL SERIALIZABLE', kind: 'tx' },
 	{ sql: 'SET SESSION TRANSACTION READ ONLY', kind: 'tx' },
+	// PostgreSQL's other spellings, and MySQL's XA and @@autocommit.
+	{ sql: 'ABORT', kind: 'tx', dialect: 'postgres' },
+	{ sql: 'ABORT', kind: 'tx' },
+	{ sql: 'END', kind: 'tx', dialect: 'postgres' },
+	{ sql: 'END TRANSACTION', kind: 'tx', dialect: 'postgres' },
+	{ sql: "PREPARE TRANSACTION 'x'", kind: 'tx', dialect: 'postgres' },
+	{ sql: "COMMIT PREPARED 'x'", kind: 'tx', dialect: 'postgres' },
+	{ sql: "ROLLBACK PREPARED 'x'", kind: 'tx', dialect: 'postgres' },
+	{ sql: "XA START 'x'", kind: 'tx', dialect: 'mysql' },
+	{ sql: "XA END 'x'", kind: 'tx', dialect: 'mysql' },
+	{ sql: "XA COMMIT 'x'", kind: 'tx' },
+	{ sql: 'SET @@autocommit = 0', kind: 'tx', dialect: 'mysql' },
+	{ sql: 'SET @@session.autocommit = 0', kind: 'tx', dialect: 'mysql' },
+	{ sql: 'SET @@GLOBAL.autocommit = 0', kind: 'tx' },
+	// A lone END closes a compound statement in MySQL, and a PL/pgSQL body split
+	// without its dollar quotes: not transaction control there.
+	{ sql: 'END', kind: 'other', dialect: 'mysql' },
+	{ sql: 'END', kind: 'other' },
+	// PREPARE of a statement is not two-phase commit; @@ of another variable is a variable.
+	{ sql: 'PREPARE stmt FROM \'SELECT 1\'', kind: 'other', dialect: 'mysql' },
+	{ sql: 'SET @@sql_mode = \'\'', kind: 'other', dialect: 'mysql' },
 
 	// Everything else.
 	{ sql: 'SET @x = 1', kind: 'other' },

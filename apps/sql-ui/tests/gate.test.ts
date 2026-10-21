@@ -46,3 +46,11 @@ describe('T10 — a write the server runs is never repeatable, however it is hid
 		assert.equal(gateStatement('SELECT 1 -- x\r\nFROM t', 'postgres', true).idempotent, true, 'control');
 	});
 });
+
+describe('T10 — every spelling of transaction control is refused in its dialect', () => {
+	for (const [sql, dialect] of [['ABORT', 'postgres'], ['END', 'postgres'], ["PREPARE TRANSACTION 'x'", 'postgres'], ["XA START 'x'", 'mysql'], ['SET @@autocommit = 0', 'mysql'], ['SET @@session.autocommit = 0', 'mysql']] as const) {
+		it(`${dialect}: ${sql}`, () => {
+			assert.notEqual(gateStatement(sql, dialect, false).refusal, null);
+		});
+	}
+});

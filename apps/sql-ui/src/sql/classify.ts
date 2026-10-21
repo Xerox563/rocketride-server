@@ -101,6 +101,26 @@ const TX_LEADERS = /^(begin|start\s+transaction|commit|rollback|savepoint|releas
 const TX_SET = /^set\s+(?:session\s+|global\s+|local\s+)?(?:autocommit|transaction)\b/i;
 
 /**
+ * PostgreSQL's other transaction spellings that no other dialect uses:
+ * `ABORT` (ROLLBACK) and `PREPARE TRANSACTION` (two-phase commit;
+ * `COMMIT PREPARED` / `ROLLBACK PREPARED` already lead with COMMIT/ROLLBACK).
+ */
+const TX_POSTGRES = /^(?:abort|prepare\s+transaction)\b/i;
+
+/**
+ * PostgreSQL's `END [WORK | TRANSACTION]` (COMMIT). Only under 'postgres': in
+ * MySQL, and in a body split without its dollar quotes, a lone END closes a
+ * compound statement.
+ */
+const TX_POSTGRES_END = /^end(?:\s+(?:work|transaction))?$/i;
+
+/**
+ * MySQL's: XA (distributed) transactions, and autocommit set through a
+ * system-variable reference (`SET @@autocommit`, `SET @@session.autocommit`).
+ */
+const TX_MYSQL = /^(?:xa\s+(?:start|begin|end|prepare|commit|rollback|recover)\b|set\s+@@(?:(?:session|global|local)\.)?autocommit\b)/i;
+
+/**
  * The `EXPLAIN` prefix: the keyword, an optional parenthesised option list, and
  * any bare option words before the statement being explained.
  */
@@ -271,6 +291,9 @@ export function classifyStatement(sql: string, dialect: SqlDialect = 'unknown'):
 
 	if (TX_SET.test(head)) return 'tx';
 	if (TX_LEADERS.test(head)) return 'tx';
+	if ((dialect === 'postgres' || dialect === 'unknown') && TX_POSTGRES.test(head)) return 'tx';
+	if (dialect === 'postgres' && TX_POSTGRES_END.test(head)) return 'tx';
+	if ((dialect === 'mysql' || dialect === 'unknown') && TX_MYSQL.test(head)) return 'tx';
 	// A SELECT ... INTO fills a table, a file or variables: a write.
 	if (READ_LEADERS.test(head)) return /^select\b/i.test(head) && selectsInto(head, dialect) ? 'write' : 'read';
 	if (WRITE_LEADERS.test(head)) return 'write';
