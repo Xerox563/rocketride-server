@@ -44,7 +44,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ExplorerToolError } from 'shared/explorer/errors';
 import { assertJsonSafe, assertSidebarSubscribers, createDevToolHarness, findToolFactoryImports, manualNow, settle, shellProtocol, spyPeer } from 'shared/explorer/devtool/testing';
-import { BUS_TOOL_MARGIN_MS, FRAME_OP_MARGIN_MS, SDK_TIMEOUT_SLACK_MS, UNBOUNDED_TOOL_TIMEOUT_MS, toolCallBudgetMs } from 'shared/explorer/devtool/timeouts';
+import { BUS_TOOL_MARGIN_MS, FRAME_OP_MARGIN_MS, GET_TASKS_TIMEOUT_MS, MAX_TIMER_MS, SDK_TIMEOUT_SLACK_MS, UNBOUNDED_TOOL_TIMEOUT_MS } from 'shared/explorer/devtool/timeouts';
+import { DEFAULT_RETRY_WINDOW_MS } from 'shared/explorer/connect/session';
 import { MAX_RETAINED_STATE_BYTES, MAX_RETAINED_TOTAL_BYTES, jsonByteLength } from 'shared/explorer/devtool/state';
 import { CONTROLLER_STATE_TOPIC, RESERVED_STATE_PREFIX } from 'shared/explorer/devtool/realm';
 import { SQL_APP_ID } from '../src/appId';
@@ -323,11 +324,18 @@ describe('T4 — the frame\'s timeouts and the controller\'s bus timeouts match 
 			assert.equal(at('sql.dialect'), RESOLVE_BUDGET_MS + busOf(DIALECT_WAIT_MS) + FRAME_OP_MARGIN_MS);
 			assert.equal(at('sql.getSchema'), RESOLVE_BUDGET_MS + busOf(GET_SCHEMA_WAIT_MS) + FRAME_OP_MARGIN_MS);
 			assert.equal(at('sql.refreshSchema'), RESOLVE_BUDGET_MS + busOf(REFRESH_SCHEMA_WAIT_MS) + busOf(GET_SCHEMA_WAIT_MS) + FRAME_OP_MARGIN_MS);
-			assert.equal(at('sql.execute'), RESOLVE_BUDGET_MS + busOf(DIALECT_WAIT_MS) + UNBOUNDED_TOOL_TIMEOUT_MS + FRAME_OP_MARGIN_MS);
-			// The controller's longest path for a statement: resolve, the gate's
-			// one dialect call, the statement. The frame waits longer (R5).
-			const controllerLongest = RESOLVE_BUDGET_MS + toolCallBudgetMs(DIALECT_WAIT_MS) + toolCallBudgetMs(null);
+			// The controller's longest path for a statement, from its parts: resolve;
+			// the gate's one dialect call; the statement's first send (refused
+			// TASK_STOPPED at the latest when its bus wait ends); the session's
+			// rebind (its retry window plus one discovery request in flight); the
+			// second, unbounded send. The frame waits longer (R5), as a real timer.
+			const controllerLongest = RESOLVE_BUDGET_MS + busOf(DIALECT_WAIT_MS)
+				+ UNBOUNDED_TOOL_TIMEOUT_MS
+				+ DEFAULT_RETRY_WINDOW_MS + GET_TASKS_TIMEOUT_MS
+				+ UNBOUNDED_TOOL_TIMEOUT_MS;
 			assert.ok(at('sql.execute') > controllerLongest, `frame ${at('sql.execute')} > controller ${controllerLongest}`);
+			assert.equal(at('sql.execute'), controllerLongest + FRAME_OP_MARGIN_MS);
+			assert.ok(at('sql.execute') <= MAX_TIMER_MS);
 			for (const op of Object.keys(SQL_OP_TIMEOUT_MS) as Array<keyof typeof SQL_OP_TIMEOUT_MS>) assert.notEqual(at(op), 120_000, op);
 		} finally {
 			r.dispose();

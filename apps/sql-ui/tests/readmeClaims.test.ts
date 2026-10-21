@@ -88,10 +88,11 @@ describe('README claims', () => {
 		assert.match(prose, /`SELECT\s+nextval\('s'\)`\) still counts as a read/);
 		assert.equal(UNBOUNDED_TOOL_TIMEOUT_MS, 24 * 60 * 60 * 1000);
 		assert.match(prose, /waited for up to 24 hours/);
-		// 24 h plus reaching the connection (a few minutes at most).
-		const extra = SQL_OP_TIMEOUT_MS['sql.execute'] - UNBOUNDED_TOOL_TIMEOUT_MS;
-		assert.ok(extra > 0 && extra < 10 * 60_000, `${extra} ms beyond 24 h`);
-		assert.match(prose, /plus the few minutes it may take to reach the connection/);
+		// Twice 24 h (a read sent again after a restart) plus reaching the
+		// connection and rediscovering it (a few minutes at most).
+		const extra = SQL_OP_TIMEOUT_MS['sql.execute'] - 2 * UNBOUNDED_TOOL_TIMEOUT_MS;
+		assert.ok(extra > 0 && extra < 10 * 60_000, `${extra} ms beyond twice 24 h`);
+		assert.match(prose, /or twice that when a read is sent again after its pipeline restarted, plus the few minutes it may take to reach the connection/);
 		assert.equal(MAX_WATCHED_HISTORY_KEYS, 128);
 		assert.match(prose, /More than 128 history views open at once/);
 		assert.match(prose, /Another account signs in\*\* \(or the organization or team changes\): the previous account's last unsaved statements are dropped\. They are never written into another account's file\./);

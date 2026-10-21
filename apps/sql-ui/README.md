@@ -624,7 +624,8 @@ these differences:
   take (see [Limits](#limits)); a document waits a little longer than the
   sidebar, so the sidebar's own answer arrives first. A statement on a node
   that publishes no deadline is waited for up to 24 hours (the longest wait
-  the tool sets on any request), plus the few minutes it may take to reach
+  the tool sets on any request), or twice that when a read is sent again
+  after its pipeline restarted, plus the few minutes it may take to reach
   the connection, after which the document stops waiting; the statement
   itself is not stopped.
 

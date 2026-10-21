@@ -41,7 +41,8 @@
 // its margins (toolCallBudgetMs(null)).
 // =============================================================================
 
-import { frameOpTimeoutMs, toolCallBudgetMs } from 'shared/explorer/devtool/timeouts';
+import { DEFAULT_RETRY_WINDOW_MS } from 'shared/explorer/connect/session';
+import { GET_TASKS_TIMEOUT_MS, frameOpTimeoutMs, toolCallBudgetMs } from 'shared/explorer/devtool/timeouts';
 import { DIALECT_WAIT_MS, GET_SCHEMA_WAIT_MS, REFRESH_SCHEMA_WAIT_MS } from './connect/tools';
 
 // =============================================================================
@@ -67,6 +68,16 @@ export const DISCOVERY_WAIT_MS = 45_000;
 /** The longest a resolution can take: the list, a direct pipeline's start, and a discovery. */
 export const RESOLVE_BUDGET_MS = LIST_WAIT_MS + USE_TIMEOUT_MS + DISCOVERY_WAIT_MS;
 
+/**
+ * The longest the shared session's one retry of a statement can add: it
+ * re-discovers the restarted pipeline for up to its retry window, plus one
+ * discovery request already in flight when the window ends, and then sends
+ * the statement again, unbounded (a statement's deadline is open-ended, so
+ * the retry gets a second full wait). Only a statement marked idempotent (a
+ * read) is ever retried, and only after TASK_STOPPED.
+ */
+export const STATEMENT_RETRY_BUDGET_MS = DEFAULT_RETRY_WINDOW_MS + GET_TASKS_TIMEOUT_MS + toolCallBudgetMs(null);
+
 /** Bus timeout of `client.getTaskToken` and `client.terminate` (releasing a direct pipeline). */
 export const RELEASE_STEP_TIMEOUT_MS = 15_000;
 
@@ -89,8 +100,10 @@ export const SQL_OP_TIMEOUT_MS = {
 	'sql.releaseEndpoint': frameOpTimeoutMs(2 * RELEASE_STEP_TIMEOUT_MS),
 	'sql.discoverEndpoints': frameOpTimeoutMs(DISCOVERY_WAIT_MS),
 	// Resolve, then (when no probe has the dialect) one bounded `dialect` call
-	// for the controller's gate, then the statement (unbounded: the 24 h cap).
-	'sql.execute': frameOpTimeoutMs(RESOLVE_BUDGET_MS + toolCallBudgetMs(DIALECT_WAIT_MS) + toolCallBudgetMs(null)),
+	// for the controller's gate, then the statement (unbounded: the 24 h cap),
+	// and the session's one retry of a read (a rebind and a second 24 h wait).
+	// About 48 h in all, well inside MAX_TIMER_MS.
+	'sql.execute': frameOpTimeoutMs(RESOLVE_BUDGET_MS + toolCallBudgetMs(DIALECT_WAIT_MS) + toolCallBudgetMs(null) + STATEMENT_RETRY_BUDGET_MS),
 	'sql.getSchema': frameOpTimeoutMs(RESOLVE_BUDGET_MS + toolCallBudgetMs(GET_SCHEMA_WAIT_MS)),
 	// refresh_schema, then (on any failure) get_schema.
 	'sql.refreshSchema': frameOpTimeoutMs(RESOLVE_BUDGET_MS + toolCallBudgetMs(REFRESH_SCHEMA_WAIT_MS) + toolCallBudgetMs(GET_SCHEMA_WAIT_MS)),
