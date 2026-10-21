@@ -60,7 +60,8 @@ import { createFrameCaller } from 'shared/explorer/devtool/frame';
 import type { IFrameCaller } from 'shared/explorer/devtool/frame';
 import { createFrameIdentityGuard } from 'shared/explorer/devtool/frameIdentity';
 import type { FrameResetReason } from 'shared/explorer/devtool/frameIdentity';
-import { channelFor } from 'shared/explorer/devtool/realm';
+import { channelFor, CONTROLLER_STATE_TOPIC } from 'shared/explorer/devtool/realm';
+import { ExplorerToolError } from 'shared/explorer/errors';
 import type { DevToolPeer } from 'shared/explorer/devtool/realm';
 import { applyReplicaConnections } from './connect';
 import type { SavedConnectionsStatus } from './connect';
@@ -121,21 +122,25 @@ export function routeDocKey(docKey: string | null | undefined): SqlDocRoute {
 }
 
 /** What a connection document shows. */
-export type ConnectionDocState = 'not-connected' | 'failed' | 'not-found' | 'loading' | 'opening' | 'open';
+export type ConnectionDocState = 'not-connected' | 'no-sidebar' | 'failed' | 'not-found' | 'loading' | 'opening' | 'open';
 
 /**
  * Decide what a connection document shows. An id the list does not hold is
  * "not found" only once the list has been read; before that it is loading.
  *
  * @param input - What the document knows.
- * @param input.ready - The engine is reachable (`host:connection`).
+ * @param input.ready - The frame may call: the engine is reachable (`host:connection`), the controller is ready and vouches for an account.
+ * @param input.sidebarClosed - The engine is reachable but no controller is ready (the sidebar was never opened, or was closed): a document not yet open says to open the sidebar; an open one stays.
  * @param input.listStatus - The saved-connection list's status.
  * @param input.found - The list holds the document's connection id.
  * @param input.failed - Opening it failed.
  * @param input.opened - It resolved to an endpoint.
  * @returns The state.
  */
-export function connectionDocState(input: { ready: boolean; listStatus: SavedConnectionsStatus; found: boolean; failed: boolean; opened: boolean }): ConnectionDocState {
+export function connectionDocState(input: { ready: boolean; sidebarClosed?: boolean; listStatus: SavedConnectionsStatus; found: boolean; failed: boolean; opened: boolean }): ConnectionDocState {
+	// An open document stays open (run and apply are disabled); one that has
+	// not opened says to open the sidebar instead of waiting.
+	if (input.sidebarClosed === true) return input.opened && !input.failed ? 'open' : 'no-sidebar';
 	if (!input.ready) return 'not-connected';
 	if (input.failed) return 'failed';
 	if (!input.found) return input.listStatus === 'ready' ? 'not-found' : 'loading';
@@ -223,6 +228,66 @@ function wireSqlDocumentHost(channel: TypedToolChannel<SqlStateMap, SqlEventMap>
 // =============================================================================
 
 /**
+ * Follow whether the tool's controller is ready to serve (its readiness state,
+ * published by the library under the reserved `devtool:controller` topic).
+ * It is not when the sidebar was never opened (a document restored at
+ * startup) or was closed: the frame then says to open the sidebar, instead of
+ * waiting for calls that would time out unsent.
+ *
+ * @param channel - The frame's channel.
+ * @param onChange - Told on every snapshot (the retained one at once).
+ * @returns Stop following.
+ */
+export function followControllerReady(channel: ToolChannel, onChange: (ready: boolean) => void): () => void {
+	return channel.onState(CONTROLLER_STATE_TOPIC, (snapshot: unknown) => {
+		const value = snapshot !== null && typeof snapshot === 'object' ? (snapshot as { ready?: unknown }).ready : undefined;
+		onChange(typeof value === 'string' && value !== '');
+	});
+}
+
+/** What a frame says when its controller never became ready. */
+export const SIDEBAR_CLOSED_TEXT = 'The SQL Explorer sidebar is not open, so nothing was sent. Open the sidebar to connect.';
+
+/** An op's wire name, as the library quotes it in its own messages. */
+const QUOTED_OP = /'sql\.[A-Za-z]+'/g;
+
+/**
+ * The library's own failure texts name the op's wire name (`'sql.execute'
+ * was not sent…`). People see and hear these (the failure banner speaks its
+ * headline), so the wire name becomes "the request", and a call that waited
+ * for a controller that never became ready says to open the sidebar. Kind,
+ * code and tool are kept.
+ *
+ * @param error - What a frame call rejected with.
+ * @returns The error to show.
+ */
+export function plainFrameError(error: unknown): unknown {
+	if (!(error instanceof ExplorerToolError) || error.message.search(QUOTED_OP) < 0) return error;
+	const message = /was not sent: the tool's controller did not become ready/.test(error.message)
+		? SIDEBAR_CLOSED_TEXT
+		: error.message.replace(/^'sql\.[A-Za-z]+'/, 'The request').replace(QUOTED_OP, 'the request');
+	return new ExplorerToolError({ kind: error.kind, tool: error.tool, message, ...(error.code !== undefined ? { code: error.code } : {}) });
+}
+
+/**
+ * A frame caller whose failures read as {@link plainFrameError} says.
+ *
+ * @param caller - The library's caller.
+ * @returns The same caller, failures reworded.
+ */
+function plainSpoken<O extends ToolOpMap>(caller: IFrameCaller<O>): IFrameCaller<O> {
+	const reword = (error: unknown): never => { throw plainFrameError(error); };
+	return {
+		call: (op, params, opts) => caller.call(op, params, opts).catch(reword),
+		callReply: (op, params, opts) => caller.callReply(op, params, opts).catch(reword),
+		pending: () => caller.pending(),
+		connected: () => caller.connected(),
+		controllerReady: () => caller.controllerReady(),
+		dispose: () => caller.dispose(),
+	};
+}
+
+/**
  * Follow whether the controller vouches for a signed-in account: its retained
  * `identity` state carries a fingerprint. A frame calls nothing on its own
  * (a first schema read, opening its connection) until it does: before that,
@@ -283,13 +348,13 @@ export interface SqlFrameMount {
 export function attachSqlFrame(opts: SqlFrameOptions): SqlFrameMount {
 	const { peer, protocol } = opts;
 	const channel = opts.channel ?? channelFor(peer, protocol.createToolChannel);
-	const caller = createFrameCaller<SqlOps>({
+	const caller = plainSpoken(createFrameCaller<SqlOps>({
 		peer,
 		channel,
 		createToolController: protocol.createToolController,
 		createToolChannel: protocol.createToolChannel,
 		...(opts.now ? { now: opts.now } : {}),
-	});
+	}));
 	const detachHost = attachSqlDocumentHost(channel);
 	const guard = createFrameIdentityGuard({
 		channel,

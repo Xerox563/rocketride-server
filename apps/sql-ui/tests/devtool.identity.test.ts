@@ -47,7 +47,7 @@ import type { HistoryEntry } from '../src/history/types';
 import { refreshSchema, schemaSnapshot } from '../src/schema/schemaStore';
 import { attachSqlController } from '../src/sqlController';
 import type { SqlControllerMount } from '../src/sqlController';
-import { attachSqlFrame, followVouched, sqlChannel } from '../src/sqlFrame';
+import { SIDEBAR_CLOSED_TEXT, attachSqlFrame, connectionDocState, followControllerReady, followVouched, plainFrameError, sqlChannel } from '../src/sqlFrame';
 import { createRemoteSqlEnv } from '../src/sqlEnv';
 import { createRemoteHistory } from '../src/history/remoteHistory';
 import { SQL_OP_TIMEOUT_MS } from '../src/sqlTimeouts';
@@ -365,10 +365,11 @@ describe('T7 — a frame calls nothing on its own until the controller vouches f
 		}
 	});
 
-	it('a frame is ready (opening its connection, the first schema read, run and apply) only with the host connection AND a vouched account', () => {
+	it('a frame is ready (opening its connection, the first schema read, run and apply) only with the host connection, a ready controller AND a vouched account', () => {
 		const devTool = fs.readFileSync(path.join(SRC, 'SqlDevTool.tsx'), 'utf8');
 		assert.match(devTool, /const vouched = useVouched\(toolChannel\);/);
-		assert.match(devTool, /const ready = engineReady && vouched;/);
+		assert.match(devTool, /const controllerReady = useControllerReady\(toolChannel\);/);
+		assert.match(devTool, /const ready = engineReady && controllerReady && vouched;/);
 		assert.match(devTool, /createRemoteSqlEnv\(mount\.frame\.caller, ready,/);
 		// The automatic calls are the ones gated on env.ready.
 		const doc = devTool.slice(devTool.indexOf('const SqlConnectionDocument'));
@@ -377,6 +378,74 @@ describe('T7 — a frame calls nothing on its own until the controller vouches f
 		assert.match(view, /if \(env\.ready && snapshot\.status === 'idle'\)/);
 		const diagram = fs.readFileSync(path.join(SRC, 'views', 'DiagramView.tsx'), 'utf8');
 		assert.match(diagram, /if \(!env\.ready \|\| engineeredRef\.current\) return;/);
+	});
+});
+
+describe('a frame restored before its sidebar was opened says to open it, and never speaks an op\'s wire name', () => {
+	it('follows the controller\'s readiness: ready while mounted, not after it unmounts, ready again on a remount', async () => {
+		const r = await vscodeRig();
+		const seen: boolean[] = [];
+		const off = followControllerReady(r.frame.channel, (ready) => { seen.push(ready); });
+		try {
+			await settle();
+			assert.equal(seen.at(-1), true);
+			r.controller.dispose();
+			await settle();
+			assert.equal(seen.at(-1), false);
+			r.remount();
+			await settle();
+			assert.equal(seen.at(-1), true);
+		} finally {
+			off();
+			r.dispose();
+		}
+	});
+
+	it('a call made while no controller is ready times out unsent with the open-the-sidebar text, not the op\'s name', async () => {
+		const r = await vscodeRig();
+		try {
+			r.engine.realm.root.connect(USER_A);
+			r.h.setHostConnection(true);
+			await until(() => r.frame.owner() !== null, 'account A');
+			r.controller.dispose();
+			await settle();
+			assert.equal(r.frame.caller.controllerReady(), false);
+			await assert.rejects(r.frame.caller.callReply('sql.dialect', { connId: 'c-pipe' }, { timeoutMs: 40 }), (error: unknown) => error instanceof ExplorerToolError && error.kind === 'timeout' && error.message === SIDEBAR_CLOSED_TEXT && error.headline === SIDEBAR_CLOSED_TEXT);
+			assert.equal(r.engine.requests.some((q) => q.op === 'client.tool'), false, 'nothing was sent');
+		} finally {
+			r.dispose();
+		}
+	});
+
+	it('the library\'s own texts read "the request" instead of the wire name; kind, tool and code are kept; other errors pass through', () => {
+		const lost = new ExplorerToolError({ kind: 'timeout', tool: 'sql.execute', message: 'Lost the connection while \'sql.execute\' was running. It may still have run; there is no way to cancel it from here.' });
+		const plain = plainFrameError(lost) as ExplorerToolError;
+		assert.equal(plain.message, 'Lost the connection while the request was running. It may still have run; there is no way to cancel it from here.');
+		assert.equal(plain.kind, 'timeout');
+		assert.equal(plain.tool, 'sql.execute');
+		const dropped = plainFrameError(new ExplorerToolError({ kind: 'stale', tool: 'sql.history', message: '\'sql.history\' was dropped: its frame closed.' })) as ExplorerToolError;
+		assert.equal(dropped.message, 'The request was dropped: its frame closed.');
+		const coded = plainFrameError(new ExplorerToolError({ kind: 'unavailable', tool: 'sql.dialect', code: 'X', message: 'Not connected to a server, so \'sql.dialect\' was not sent.' })) as ExplorerToolError;
+		assert.equal(coded.message, 'Not connected to a server, so the request was not sent.');
+		assert.equal(coded.code, 'X');
+		const own = new ExplorerToolError({ kind: 'raised', tool: 'execute', message: 'relation "orders" does not exist' });
+		assert.equal(plainFrameError(own), own);
+		const other = new Error('boom');
+		assert.equal(plainFrameError(other), other);
+	});
+
+	it('a document that has not opened says to open the sidebar; one already open stays open', () => {
+		const base = { ready: false, listStatus: 'ready' as const, found: true, failed: false, opened: false };
+		assert.equal(connectionDocState({ ...base, sidebarClosed: true }), 'no-sidebar');
+		assert.equal(connectionDocState({ ...base, sidebarClosed: true, opened: true }), 'open');
+		assert.equal(connectionDocState({ ...base, sidebarClosed: true, opened: true, failed: true }), 'no-sidebar');
+		assert.equal(connectionDocState({ ...base, sidebarClosed: false }), 'not-connected');
+		const devTool = fs.readFileSync(path.join(SRC, 'SqlDevTool.tsx'), 'utf8');
+		assert.match(devTool, /const sidebarClosed = engineReady && !controllerReady;/);
+		assert.match(devTool, /case 'no-sidebar':\s*body = <SidebarClosed \/>;/);
+		assert.match(devTool, /title="Open the SQL Explorer sidebar to connect"/);
+		const editor = fs.readFileSync(path.join(SRC, 'components', 'ConnectionEditorBody.tsx'), 'utf8');
+		assert.match(editor, /if \(sidebarClosed\) return /);
 	});
 });
 
@@ -408,7 +477,7 @@ describe('T8 — with host:connection false, frames disable run/apply and reject
 	it('run and apply follow the host connection in frames, and the sidebar follows the shell\'s isConnected', () => {
 		const devTool = fs.readFileSync(path.join(SRC, 'SqlDevTool.tsx'), 'utf8');
 		assert.match(devTool, /const engineReady = useConnectionReady\(toolChannel\);/);
-		assert.match(devTool, /const ready = engineReady && vouched;/);
+		assert.match(devTool, /const ready = engineReady && controllerReady && vouched;/);
 		assert.match(devTool, /createRemoteSqlEnv\(mount\.frame\.caller, ready,/);
 		const query = fs.readFileSync(path.join(SRC, 'views', 'QueryView.tsx'), 'utf8');
 		assert.match(query, /const canRun = env\.ready && /);

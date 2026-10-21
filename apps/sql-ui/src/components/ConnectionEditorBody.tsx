@@ -56,16 +56,19 @@ const styles = {
 export const ConnectionEditorBody: React.FC<{
 	/** The connection id being edited, or null for the add form. */
 	connId: string | null;
+	/** A dev-tool frame whose tool sidebar (its controller) is not open: an edit target cannot be read until it is. */
+	sidebarClosed?: boolean;
 	/** Close this editor document. */
 	onCloseSelf: () => void;
 	/** Open the workbench of a freshly added connection. */
 	onOpenSaved: (saved: SavedSqlConnection) => void;
-}> = ({ connId, onCloseSelf, onOpenSaved }) => {
+}> = ({ connId, sidebarClosed = false, onCloseSelf, onOpenSaved }) => {
 	const { record: editing, status } = useConnectionRecord(connId);
 
 	// An edit target that is not in the store yet (list still loading) or is
 	// gone (deleted elsewhere) must not silently become an ADD form.
 	if (connId && !editing) {
+		if (sidebarClosed) return <div style={styles.welcome}><EmptyState icon={<DatabaseIcon />} title="Open the SQL Explorer sidebar to connect" description="The sidebar holds your saved connections. This connection can be edited once the sidebar is open." /></div>;
 		return status === 'ready'
 			? <div style={styles.welcome}><EmptyState icon={<DatabaseIcon />} title="Connection not found" description="This saved connection no longer exists." /></div>
 			: <div style={styles.welcome}><EmptyState icon={<DatabaseIcon />} title="Loading…" description="Reading your saved connections." /></div>;
