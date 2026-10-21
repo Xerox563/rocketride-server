@@ -142,11 +142,16 @@ export interface IGraphEndpointsState extends IEndpointState {
 	omitted: number;
 }
 
-/** What a frame needs of one connection's schema: the label names (graph colours) and how far it got. */
+/**
+ * What a frame needs of one connection's schema: the label names (graph colours) and how far it got. A load that
+ * failed or timed out at the controller arrives as `status: 'error'` with the reason, never as an endless 'loading'.
+ */
 export interface IFrameSchema {
 	status: ISchemaEntry['status'];
 	labels: string[];
 	loadedAt: number;
+	/** Why the latest load failed (its headline), or null. */
+	failure: string | null;
 }
 
 /** The retained state, by topic. */
@@ -295,16 +300,22 @@ export function toWire<T>(value: T): T {
 export function endpointsSnapshot(state: IEndpointState, maxBytes: number = ENDPOINTS_STATE_BYTES): IGraphEndpointsState {
 	const full: IGraphEndpointsState = toWire({ status: state.status, endpoints: state.endpoints, probes: state.probes, error: state.error, refreshedAt: state.refreshedAt, omitted: 0 });
 	if (jsonByteLength(full) <= maxBytes) return full;
-	let kept = full.endpoints.length;
-	while (kept > 0) {
-		kept -= 1;
+	const cut = (kept: number): IGraphEndpointsState => {
 		const endpoints = full.endpoints.slice(0, kept);
 		const probes: Record<string, IProbeResult> = {};
 		for (const endpoint of endpoints) if (full.probes[endpoint.key]) probes[endpoint.key] = full.probes[endpoint.key];
-		const cut: IGraphEndpointsState = { ...full, endpoints, probes, omitted: full.endpoints.length - kept };
-		if (jsonByteLength(cut) <= maxBytes) return cut;
+		return { ...full, endpoints, probes, omitted: full.endpoints.length - kept };
+	};
+	// The longest prefix that fits, by binary search: this runs on every store change (each probe), so it must not
+	// serialise the list once per endpoint dropped. Only a prefix that was measured to fit is ever returned.
+	let fits = 0;
+	let tooBig = full.endpoints.length;
+	while (tooBig - fits > 1) {
+		const mid = Math.floor((fits + tooBig) / 2);
+		if (jsonByteLength(cut(mid)) <= maxBytes) fits = mid;
+		else tooBig = mid;
 	}
-	return { ...full, endpoints: [], probes: {}, omitted: full.endpoints.length };
+	return cut(fits);
 }
 
 /**
@@ -320,7 +331,7 @@ export function schemasSnapshot(entries: ReadonlyArray<readonly [string, ISchema
 	const out: Record<string, IFrameSchema> = {};
 	let bytes = 2;
 	for (const [key, entry] of ordered) {
-		const item: IFrameSchema = { status: entry.status, labels: entry.view.labels.map((label) => label.name), loadedAt: entry.loadedAt };
+		const item: IFrameSchema = { status: entry.status, labels: entry.view.labels.map((label) => label.name), loadedAt: entry.loadedAt, failure: entry.failure ? entry.failure.headline : null };
 		const size = jsonByteLength({ [key]: item });
 		if (bytes + size > maxBytes) continue;
 		out[key] = item;

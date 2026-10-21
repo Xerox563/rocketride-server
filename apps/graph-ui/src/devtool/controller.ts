@@ -47,8 +47,9 @@
 //               preview and re-binds history to the new owner's bag; frames
 //               close themselves on the published fingerprint (R9).
 //   SIZES (T11) Rows and history lists are op results. Retained snapshots are
-//               capped (protocol.ts) and refused over 64 KiB; a result over
-//               maxResultBytes is refused rather than sent.
+//               cut by the protocol (protocol.ts) and kept by the base guard
+//               under 64 KiB each and 128 KiB together, degraded through the
+//               same cuts; a result over maxResultBytes is refused, not sent.
 // =============================================================================
 
 import type { DevToolProps, IToolOpServer, ToolChannel } from 'shell';
@@ -59,7 +60,7 @@ import type { IActivationBus, IActivationGate } from 'shared/explorer/devtool/ac
 import { getBusExplorerClient } from 'shared/explorer/devtool/busClient';
 import type { IExplorerBus } from 'shared/explorer/devtool/busClient';
 import { attachController } from 'shared/explorer/devtool/controller';
-import type { ControllerHandlers } from 'shared/explorer/devtool/controller';
+import type { RequiredControllerHandlers } from 'shared/explorer/devtool/controller';
 import { publishIdentityState } from 'shared/explorer/devtool/frameIdentity';
 import { createIdentityTracker } from 'shared/explorer/devtool/identity';
 import type { IIdentityBus, IIdentityTracker } from 'shared/explorer/devtool/identity';
@@ -68,6 +69,7 @@ import type { IFsPrefs } from 'shared/explorer/devtool/prefs';
 import type { DevToolPeer } from 'shared/explorer/devtool/realm';
 import { replyOk } from 'shared/explorer/devtool/reply';
 import { guardRetainedState, jsonByteLength } from 'shared/explorer/devtool/state';
+import type { IOversizeInfo } from 'shared/explorer/devtool/state';
 import { createDevToolDiscovery } from 'shared/explorer/devtool/watch';
 import type { IDevToolDiscovery, IDiscoveryBus, IFocusTarget } from 'shared/explorer/devtool/watch';
 import { loadConnectionSchema } from '../adapters/actions';
@@ -243,7 +245,8 @@ export function createGraphController(opts: IGraphControllerOptions): IGraphCont
 		return edit as HistoryEdit;
 	};
 
-	const handlers: ControllerHandlers<GraphOps> = {
+	// Every op has a handler (RequiredControllerHandlers): a frame never meets "No handler serves".
+	const handlers: RequiredControllerHandlers<GraphOps> = {
 		[OP.refreshEndpoints]: (params) => {
 			if (!discovery.allowed()) throw new ExplorerToolError({ kind: 'unavailable', tool: OP.refreshEndpoints, message: 'Not signed in to a server yet, so nothing was discovered.' });
 			void stores.endpoints.refresh(client, { reprobe: field(params, 'reprobe') === true });
@@ -309,10 +312,25 @@ export function createGraphController(opts: IGraphControllerOptions): IGraphCont
 		onFirstOp: () => activation.open('op'),
 		onRefused: (error) => report(error, 'refused'),
 	});
-	let refused = false;
+	// The guard DEGRADES an oversize snapshot through `shrink` (here: the protocol's own cuts at the budget the guard
+	// leaves, so `omitted` and the newest-first schema order stay true; never the generic `truncated` marker), and
+	// keeps the whole map under its total budget. Only a WITHHELD snapshot was not published.
+	const entriesOf = () => stores.schemas.keys().map((key) => [key, stores.schemas.get(key)] as const);
+	const shrink = (topic: string, snapshot: unknown, info: IOversizeInfo): unknown => {
+		if (topic === STATE.endpoints) return endpointsSnapshot(stores.endpoints.getState(), info.budgetBytes);
+		if (topic === STATE.schemas) return schemasSnapshot(entriesOf(), info.budgetBytes);
+		if (topic === STATE.dataVersions) {
+			// Keep the versions of connections still listed; the others' documents are gone or going.
+			const listed = new Set(stores.endpoints.getState().endpoints.map((e) => e.key));
+			return Object.fromEntries(Object.entries(stores.dataVersions.snapshot()).filter(([key]) => listed.has(key)));
+		}
+		return snapshot;
+	};
+	let withheld = false;
 	const channel = guardRetainedState(attached.channel, {
+		shrink,
 		onOversize: (error) => {
-			refused = true;
+			if (error.outcome === 'withheld') withheld = true;
 			report(error, 'state');
 		},
 	});
@@ -323,12 +341,12 @@ export function createGraphController(opts: IGraphControllerOptions): IGraphCont
 		if (disposed) return;
 		const text = JSON.stringify(snapshot);
 		if (published.get(topic) === text) return;
-		refused = false;
+		withheld = false;
 		channel.publishState(topic, snapshot);
-		if (!refused) published.set(topic, text);
+		if (!withheld) published.set(topic, text);
 	};
 	const publishEndpoints = (): void => publish(STATE.endpoints, endpointsSnapshot(stores.endpoints.getState()));
-	const publishSchemas = (): void => publish(STATE.schemas, schemasSnapshot(stores.schemas.keys().map((key) => [key, stores.schemas.get(key)] as const)));
+	const publishSchemas = (): void => publish(STATE.schemas, schemasSnapshot(entriesOf()));
 	const publishVersions = (): void => publish(STATE.dataVersions, stores.dataVersions.snapshot());
 	let historyRev = 0;
 	const publishHistory = (): void => publish(STATE.history, { rev: historyRev });

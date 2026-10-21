@@ -35,7 +35,7 @@
 import React, { useMemo, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { Button, ConfirmDialog, DetailPanel, EmptyState, InputField, StatusBadge } from 'shell';
-import { clock } from 'shared/explorer';
+import { clock, readErrorMessage } from 'shared/explorer';
 import type { IHistoryEntry } from 'shared/explorer';
 import { APP_HISTORY_PRIVACY_NOTE, useGraphEnv, useHistoryView } from '../env';
 import { GraphIcon } from '../icons';
@@ -104,6 +104,9 @@ export const HistoryPanel: React.FC<IHistoryPanelProps> = ({ endpointKey, nodeNa
 	const env = useGraphEnv();
 	const history = env.history;
 	const { entries, recording } = useHistoryView(endpointKey);
+	// A change is announced once it is APPLIED (a dev-tool frame waits for the controller's Reply), and a refused or
+	// lost one says so instead.
+	const failed = (what: string) => (error: unknown): void => announce(`${what} ${readErrorMessage(error)}`);
 	const [search, setSearch] = useState('');
 	const [pinnedOnly, setPinnedOnly] = useState(false);
 	const [confirmClear, setConfirmClear] = useState(false);
@@ -120,7 +123,7 @@ export const HistoryPanel: React.FC<IHistoryPanelProps> = ({ endpointKey, nodeNa
 			<DetailPanel open={open} onClose={onClose} avatar={<GraphIcon />} title="History" subtitle={nodeName}>
 				<div style={{ fontSize: 12, color: 'var(--rr-text-secondary)', marginBottom: 10 }}>{env.historyPrivacyNote}</div>
 				<div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
-					<Button variant="ghost" small pressed={recording} onClick={() => { history.setRecording(endpointKey, !recording); announce(recording ? 'Recording off for this connection.' : 'Recording on for this connection.'); }}>
+					<Button variant="ghost" small pressed={recording} onClick={() => { void history.setRecording(endpointKey, !recording).then(() => announce(recording ? 'Recording off for this connection.' : 'Recording on for this connection.'), failed('Recording was not changed.')); }}>
 						{recording ? 'Recording: on' : 'Recording: off'}
 					</Button>
 					<Button variant="ghost" small pressed={pinnedOnly} onClick={() => setPinnedOnly((v) => !v)}>Pinned only</Button>
@@ -147,15 +150,15 @@ export const HistoryPanel: React.FC<IHistoryPanelProps> = ({ endpointKey, nodeNa
 									{expanded && (
 										<div style={{ marginTop: 6 }}>
 											<InputField value={note} onChange={(event) => setNote(event.target.value)} placeholder="Note" aria-label="Note for this statement" />
-											<Button variant="ghost" small onClick={() => { history.setNote(endpointKey, entry.id, note.trim()); announce('Note saved.'); }}>Save note</Button>
+											<Button variant="ghost" small onClick={() => { void history.setNote(endpointKey, entry.id, note.trim()).then(() => announce('Note saved.'), failed('The note was not saved.')); }}>Save note</Button>
 										</div>
 									)}
 									<div style={styles.actions}>
 										<Button variant="ghost" small onClick={() => onLoad(entry.cypher)}>Load into editor</Button>
 										<Button variant="ghost" small onClick={() => onRerun(entry.cypher)}>Run again</Button>
-										<Button variant="ghost" small onClick={() => history.togglePin(endpointKey, entry.id)}>{entry.pinned ? 'Unpin' : 'Pin'}</Button>
+										<Button variant="ghost" small onClick={() => { void history.togglePin(endpointKey, entry.id).catch(failed(entry.pinned ? 'The entry was not unpinned.' : 'The entry was not pinned.')); }}>{entry.pinned ? 'Unpin' : 'Pin'}</Button>
 										<Button variant="ghost" small ariaExpanded={expanded} onClick={() => { setOpen1(expanded ? null : entry.id); setNote(entry.note ?? ''); }}>{expanded ? 'Less' : 'More'}</Button>
-										<Button variant="ghost" small onClick={() => history.removeEntry(endpointKey, entry.id)}>Delete</Button>
+										<Button variant="ghost" small onClick={() => { void history.removeEntry(endpointKey, entry.id).catch(failed('The entry was not deleted.')); }}>Delete</Button>
 									</div>
 								</li>
 							);
@@ -169,7 +172,7 @@ export const HistoryPanel: React.FC<IHistoryPanelProps> = ({ endpointKey, nodeNa
 					message={`Clear ${entries.length} entries for ${nodeName}? Pinned entries are removed too.`}
 					confirmLabel="Clear"
 					destructive
-					onConfirm={() => { history.clearForKey(endpointKey); setConfirmClear(false); announce('History cleared.'); }}
+					onConfirm={() => { setConfirmClear(false); void history.clearForKey(endpointKey).then(() => announce('History cleared.'), failed('History was not cleared.')); }}
 					onCancel={() => setConfirmClear(false)}
 				/>
 			)}

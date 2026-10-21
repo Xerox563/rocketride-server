@@ -92,6 +92,8 @@ export interface IGraphFrame {
 	readonly guard: IFrameIdentityGuard;
 	/** The host's `host:connection` (false until the host published it). */
 	readonly connected: IReadable<boolean>;
+	/** The controller's schema summaries (status, labels, failure), as last published. */
+	readonly schemas: IReadable<Record<string, IFrameSchema>>;
 	/** The REMOTE env (rebuild when `connected` changes). */
 	env(ready: boolean): IGraphEnv;
 	/** Why the frame last cleared its caches, or null. */
@@ -305,12 +307,14 @@ export function createGraphFrame(opts: IGraphFrameOptions): IGraphFrame {
 		}
 		return slot;
 	};
-	const edit = (key: string, change: HistoryEdit): void => {
-		caller.callReply(OP.historyEdit, toWire({ key, edit: change }), { timeoutMs: frameTimeoutFor(OP.historyEdit) }).catch(report);
-	};
+	// A history change resolves on the controller's Reply (it was applied) and rejects with its reason otherwise.
+	const edit = (key: string, change: HistoryEdit): Promise<void> =>
+		caller.callReply(OP.historyEdit, toWire({ key, edit: change }), { timeoutMs: frameTimeoutFor(OP.historyEdit) }).then(() => undefined);
 	const history: IGraphHistory = {
 		view: (key) => historySlot(key).readable,
-		record: (key, entry) => edit(key, { action: 'record', entry }),
+		record: (key, entry) => {
+			edit(key, { action: 'record', entry }).catch(report);
+		},
 		removeEntry: (key, id) => edit(key, { action: 'remove', id }),
 		togglePin: (key, id) => edit(key, { action: 'pin', id }),
 		setNote: (key, id, note) => edit(key, { action: 'note', id, note }),
@@ -398,6 +402,7 @@ export function createGraphFrame(opts: IGraphFrameOptions): IGraphFrame {
 		caller,
 		guard,
 		connected,
+		schemas,
 		lastReset: () => resetWhy,
 		env(ready) {
 			const cached = envs.get(ready);

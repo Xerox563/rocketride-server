@@ -34,6 +34,26 @@ live here.
   writes); `src/devtool/wiring.ts` is the only module that imports the shell's
   protocol factories. Both build on `shared/explorer/devtool` (see
   `docs/development/apps/explorer-library.md`).
+- Schema loads are STARTED across the channel, not awaited. `graph.loadSchema`
+  answers once the controller has started the load (a frame waits at most
+  15 s for that), and the outcome arrives as `schemas` state. At the
+  controller the load is bounded by the session's own waits (`get_schema`
+  60 s, `refresh_schema` 135 s; a refresh asked for during a first load runs
+  after it, so about 3.5 minutes at worst) and always ends as `ready` or as
+  `error` with its reason, never as an endless `loading`. Holding a frame call
+  open for that long (the "~150 s frame timeout" a single `refresh_schema`
+  would need) would give nothing: a frame uses the schema only for label
+  colours, and the schema tree is drawn in the sidebar, which runs the load
+  itself. `graph.refreshEndpoints` works the same way: discovery and probes
+  report through `endpoints`.
+- History changes are ops. The History panel announces a change ("Note
+  saved.") only when the controller's Reply confirms it, and says why when it
+  fails.
+- Retained state: the base guard keeps each snapshot under 64 KiB and the
+  whole republished map under 128 KiB. The controller's `shrink` hook degrades
+  `endpoints`, `schemas` and `dataVersions` through the protocol's own cuts
+  (so `omitted` and the newest-first schema order stay true), never through the
+  generic `truncated` marker the frames would not read.
 
 ## Tests
 

@@ -15,15 +15,17 @@ import { ExplorerToolError } from 'shared/explorer';
 import type { IExplorerEndpoint } from 'shared/explorer';
 import { codedError } from 'shared/explorer/connect/testing';
 import type { IToolCall } from 'shared/explorer/connect/testing';
-import { MAX_RETAINED_STATE_BYTES, jsonByteLength } from 'shared/explorer/devtool/state';
+import { MAX_RETAINED_STATE_BYTES, MAX_RETAINED_TOTAL_BYTES, jsonByteLength } from 'shared/explorer/devtool/state';
+import type { IDevToolHarness } from 'shared/explorer/devtool/testing';
 import { BUS_TOOL_MARGIN_MS, FRAME_OP_MARGIN_MS, SDK_TIMEOUT_SLACK_MS } from 'shared/explorer/devtool/timeouts';
 import { assertJsonSafe, manualNow } from 'shared/explorer/devtool/testing';
 import type { DevToolPeer } from 'shared/explorer/devtool/realm';
 import { WRITE_REFUSED_TEXT } from '../src/devtool/controller';
 import type { IGraphFrame } from '../src/devtool/frame';
 import { CONTROLLER_LOCAL_OP_MS, ENDPOINTS_STATE_BYTES, EVENT, OP, SCHEMAS_STATE_BYTES, STATE, endpointsSnapshot, schemasSnapshot } from '../src/devtool/protocol';
+import { createDataVersions } from '../src/graph/dataVersion';
 import { createSchemaStore } from '../src/graph/schemaStore';
-import { NEO4J_DIALECT, NEO4J_GRAPH, NEO4J_WRITABLE, mountController, mountFrame, readOnlyNode, settle, shellProtocol, signInVsCode, until, vscodeRealm } from './support/devtool';
+import { NEO4J_DIALECT, NEO4J_GRAPH, NEO4J_WRITABLE, graphRow, mountController, mountFrame, readOnlyNode, settle, shellProtocol, signInVsCode, until, vscodeRealm } from './support/devtool';
 
 /** A signed-in VS Code realm, its controller and one frame, with the first discovery done. */
 async function connected(docKey: string | undefined, behave: (call: IToolCall) => unknown = readOnlyNode, over: Parameters<typeof mountController>[1] = {}) {
@@ -205,6 +207,23 @@ describe('T10 - the write gate is the controller\'s, even when a frame calls gra
 });
 
 /**
+ * The whole retained state map as the sidebar peer last republished it (busPeer republishes ALL topics on every
+ * publish, which is why the total is capped).
+ *
+ * @param h - The harness.
+ * @returns The map: topic -> state message.
+ */
+function latestStateMap(h: IDevToolHarness): Record<string, { __rrtool?: string; topic?: string; snapshot?: unknown }> {
+	for (let i = h.wire.length - 1; i >= 0; i -= 1) {
+		const entry = h.wire[i];
+		if (entry.transient || entry.value === null || typeof entry.value !== 'object') continue;
+		const values = Object.values(entry.value as Record<string, { __rrtool?: string }>);
+		if (values.length > 0 && values.every((m) => m?.__rrtool === 'state')) return entry.value as Record<string, { snapshot?: unknown }>;
+	}
+	throw new Error('no retained state map was published');
+}
+
+/**
  * A ~1 MB, 1,000-row graph result built from the live fixture's rows.
  *
  * @returns The result.
@@ -244,6 +263,9 @@ describe('T11 - no bulk result is retained state, and sizes are guarded', () => 
 			}
 		}
 		assert.ok(snapshots > 0, 'the premise: state was published');
+		const map = latestStateMap(run.h);
+		assert.ok(jsonByteLength(map) <= MAX_RETAINED_TOTAL_BYTES, `the whole republished map is ${jsonByteLength(map)} bytes, under the 128 KiB total`);
+		assert.deepEqual(run.errors.filter((e) => e.where === 'state'), [], 'the guard never had to degrade or withhold anything');
 		assert.deepEqual(run.h.violations, []);
 		run.frame.dispose();
 		run.controller.dispose();
@@ -281,6 +303,39 @@ describe('T11 - no bulk result is retained state, and sizes are guarded', () => 
 		});
 	});
 
+	it('400 connections, 40 loaded schemas and 2,000 data versions: the protocol\'s cuts and the base guard agree, and the whole map stays under 128 KiB', async () => {
+		const names = Array.from({ length: 200 }, (_, i) => `Label${i}WithAReasonablyLongName`);
+		const schemaAnswer = { database: 'neo4j', labels: names, nodes: Object.fromEntries(names.map((n) => [n, [{ property: 'p', type: 'string' }]])), relationships: {} };
+		const rows = Array.from({ length: 400 }, (_, i) => graphRow({ token: `tk_${i}`, pipeline: { project_id: `p${i}`, name: `People ${i}`, components: [{ id: 'graph_1', provider: 'graph_neo4j', name: `People graph ${i}` }] } }));
+		const engine = vscodeRealm(rows, (call) => (call.tool === 'get_schema' ? schemaAnswer : readOnlyNode(call)));
+		signInVsCode(engine.realm);
+		// 2,000 connections that once had a write: far over one snapshot, so the guard must DEGRADE it through shrink.
+		const versions = createDataVersions();
+		for (let i = 0; i < 2_000; i += 1) versions.bump(`k1|dev|user|u1|team-1|gone-${i}|tools=tools_1|graph_1`);
+		const mounted = mountController(engine.cm, { stores: { dataVersions: versions } });
+		await until(() => Object.keys(mounted.controller.stores.endpoints.getState().probes).length === 400, '400 probes', 400);
+		const env = mounted.controller.env(true);
+		const keys = mounted.controller.stores.endpoints.getState().endpoints.slice(0, 40).map((e) => e.key);
+		for (const key of keys) await env.loadSchema(key);
+		mounted.controller.stores.dataVersions.bump(keys[0]);
+		await settle();
+
+		const map = latestStateMap(mounted.h);
+		assert.ok(jsonByteLength(map) <= MAX_RETAINED_TOTAL_BYTES, `the whole map is ${jsonByteLength(map)} bytes`);
+		for (const message of Object.values(map)) assert.ok(jsonByteLength(message.snapshot) <= MAX_RETAINED_STATE_BYTES, `${message.topic} is under 64 KiB`);
+		const endpoints = map[STATE.endpoints]?.snapshot as { endpoints: unknown[]; omitted: number; truncated?: unknown };
+		assert.ok(endpoints.omitted > 0 && endpoints.omitted + endpoints.endpoints.length === 400, 'the endpoints are cut by the protocol, and counted');
+		assert.equal(endpoints.truncated, undefined, 'never the generic truncated marker: the frames read omitted');
+		const schemas = map[STATE.schemas]?.snapshot as Record<string, unknown>;
+		assert.ok(Object.keys(schemas).length > 0 && Object.keys(schemas).length < 40, 'schemas cut newest first');
+		const published = map[STATE.dataVersions]?.snapshot as Record<string, number>;
+		assert.deepEqual(Object.keys(published), [keys[0]], 'data versions degraded to the listed connections');
+		const degraded = mounted.errors.filter((e) => e.where === 'state').map((e) => `${(e.error as { topic?: string }).topic}:${(e.error as { outcome?: string }).outcome}`);
+		assert.ok(degraded.length > 0 && degraded.every((d) => d === 'dataVersions:degraded'), `only the data versions were degraded, never withheld: ${degraded.join(', ')}`);
+		assert.deepEqual(mounted.h.violations, []);
+		mounted.controller.dispose();
+	});
+
 	it('a history list is an op result: the history state is a revision number only', async () => {
 		const run = await connected(undefined);
 		const env = run.frame.env(true);
@@ -308,12 +363,15 @@ describe('T13 - a write held while no controller was subscribed, delivered after
 		await until(() => Object.keys(frame.env(true).endpoints.get().probes).length === 1, 'the probe');
 		const key = frame.env(true).endpoints.get().endpoints[0].key;
 
-		// The controller goes away (a VS Code disconnect unmounts it); the peer lives on and HOLDS calls.
-		first.controller.dispose();
-		await settle();
+		// The frame calls while the controller is READY (a frame waits for readiness: a call made with no controller up
+		// is never sent), and the controller unmounts (a VS Code disconnect) while the call is still on the bus: the
+		// real busPeer HOLDS it, and the frame gives up.
 		const late = frame.caller.callReply(OP.execute, { key, query: 'CREATE (n:Late)' }, { timeoutMs: 40 });
+		first.controller.dispose();
 		await assert.rejects(late, (error: unknown) => error instanceof ExplorerToolError && error.kind === 'timeout');
+		assert.equal(frame.caller.pending(), 0, 'the frame gave up');
 
+		// Minutes pass, then the controller remounts (the host's channel and peer live on) and receives the held call.
 		clock.advance(5 * 60_000);
 		const errors: string[] = [];
 		const again = mountController(engine.cm, { now: clock.now, onError: (error, where) => errors.push(`${where}:${(error as { reason?: string }).reason ?? ''}`) }, first.h, first);
@@ -321,10 +379,10 @@ describe('T13 - a write held while no controller was subscribed, delivered after
 		assert.ok(!engine.world.calls.some((c) => c.tool === 'execute'), 'the expired write never reached the node');
 		assert.ok(errors.includes('refused:expired'), 'it DID reach the controller, which refused it');
 
-		// Control: a held call still inside its deadline is served by the next controller.
-		again.controller.dispose();
+		// Control: the same race, with the remount inside the deadline: the held call runs.
 		await settle();
 		const onTime = frame.caller.callReply(OP.historyList, { key }, { timeoutMs: 60_000 });
+		again.controller.dispose();
 		await settle();
 		const third = mountController(engine.cm, { now: clock.now }, first.h, first);
 		assert.deepEqual(await onTime, { entries: [], recording: true }, 'the on-time held call ran on the remounted controller');

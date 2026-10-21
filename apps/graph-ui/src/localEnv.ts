@@ -116,11 +116,12 @@ export function localHistory(store: IHistoryStore<'cypher'>): IGraphHistory {
 			return readable;
 		},
 		record: (key: string, entry: IHistoryEntry<'cypher'>) => store.runs.emitRun(key, entry),
-		removeEntry: (key, id) => store.removeEntry(key, id),
-		togglePin: (key, id) => store.togglePin(key, id),
-		setNote: (key, id, note) => store.setNote(key, id, note),
-		clearForKey: (key) => store.clearForKey(key),
-		setRecording: (key, on) => store.setRecording(key, on),
+		// Applied at once in this realm; a promise like the dev-tool frame's, so callers confirm the same way.
+		removeEntry: async (key, id) => store.removeEntry(key, id),
+		togglePin: async (key, id) => store.togglePin(key, id),
+		setNote: async (key, id, note) => store.setNote(key, id, note),
+		clearForKey: async (key) => store.clearForKey(key),
+		setRecording: async (key, on) => store.setRecording(key, on),
 	};
 }
 

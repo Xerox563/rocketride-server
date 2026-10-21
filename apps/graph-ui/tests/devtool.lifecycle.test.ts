@@ -9,9 +9,13 @@
 // =============================================================================
 
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, it } from 'node:test';
-import { ExplorerToolError } from 'shared/explorer';
+import { DEFAULT_TOOL_TIMEOUTS, ExplorerToolError } from 'shared/explorer';
+import { codedError, manualClock } from 'shared/explorer/connect/testing';
 import { assertSidebarSubscribers } from 'shared/explorer/devtool/testing';
+import { makeGraphEndpointStore } from '../src/adapters/explorer';
 import { OP } from '../src/devtool/protocol';
 import { PREVIEW_MAX_AGE_MS, previewFor } from '../src/graph/previews';
 import { account, graphRow, mountController, mountFrame, readOnlyNode, rocketRealm, settle, signInVsCode, until, vscodeRealm } from './support/devtool';
@@ -241,5 +245,81 @@ describe('R8 - the schema click that summons a cold frame is not lost, and runs 
 		assert.equal(previewFor(request, 'k', new Set(), 1_000 + PREVIEW_MAX_AGE_MS + 1), null);
 		assert.equal(previewFor(request, 'other', new Set(), 1_000), null, 'another connection\'s request');
 		assert.equal(previewFor(request, 'k', new Set(['n1']), 1_000), null, 'a request this realm already took');
+	});
+});
+
+describe('history changes are confirmed by the controller before anything says they are done', () => {
+	it('a frame\'s setNote resolves once the controller applied it, and rejects with the reason when it could not be sent', async () => {
+		const engine = vscodeRealm();
+		signInVsCode(engine.realm);
+		const mounted = mountController(engine.cm);
+		mounted.h.setHostConnection(true);
+		const { frame } = mountFrame(mounted.h, undefined);
+		await until(() => Object.keys(frame.env(true).endpoints.get().probes).length === 1, 'the probe');
+		const key = frame.env(true).endpoints.get().endpoints[0].key;
+		const env = frame.env(true);
+		env.history.record(key, { id: 'e1', at: 1, kind: 'read', cypher: 'MATCH (n) RETURN n', ms: 1, outcome: 'rows', rows: 1 } as never);
+		await until(() => mounted.controller.stores.history.getHistory(key).length === 1, 'the recorded run at the controller');
+
+		await env.history.setNote(key, 'e1', 'kept');
+		assert.equal(mounted.controller.stores.history.getHistory(key)[0].note, 'kept', 'applied before the promise resolved');
+
+		mounted.h.setHostConnection(false);
+		await settle();
+		await assert.rejects(env.history.setNote(key, 'e1', 'lost'), (error: unknown) => error instanceof ExplorerToolError && error.kind === 'unavailable');
+		assert.equal(mounted.controller.stores.history.getHistory(key)[0].note, 'kept', 'nothing changed');
+		frame.dispose();
+		mounted.controller.dispose();
+	});
+
+	it('the History panel announces a change only when it resolves, and the failure when it rejects', () => {
+		const panel = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'components', 'HistoryPanel.tsx'), 'utf8');
+		assert.match(panel, /history\.setNote\(endpointKey, entry\.id, note\.trim\(\)\)\.then\(\(\) => announce\('Note saved\.'\), failed\('The note was not saved\.'\)\)/);
+		assert.match(panel, /history\.clearForKey\(endpointKey\)\.then\(\(\) => announce\('History cleared\.'\), failed\(/);
+		assert.match(panel, /history\.setRecording\(endpointKey, !recording\)\.then\(\(\) => announce\(/);
+		assert.match(panel, /history\.togglePin\(endpointKey, entry\.id\)\.catch\(failed\(/);
+		assert.match(panel, /history\.removeEntry\(endpointKey, entry\.id\)\.catch\(failed\(/);
+		assert.doesNotMatch(panel, /\); announce\('(Note saved|History cleared)/, 'never announced right after the call');
+	});
+});
+
+describe('a schema load that fails or times out reaches the frames as state, so nothing waits forever', () => {
+	it('a failing get_schema: the frame\'s start acknowledgement is prompt, then the summary says error, with the reason', async () => {
+		const engine = vscodeRealm(undefined, (call) => (call.tool === 'get_schema' ? Promise.reject(codedError('Neo.ClientError.Security.Forbidden: no access to the schema', 'Forbidden')) : readOnlyNode(call)));
+		signInVsCode(engine.realm);
+		const mounted = mountController(engine.cm);
+		mounted.h.setHostConnection(true);
+		const { frame } = mountFrame(mounted.h, undefined);
+		await until(() => Object.keys(frame.env(true).endpoints.get().probes).length === 1, 'the probe');
+		const key = frame.env(true).endpoints.get().endpoints[0].key;
+		await frame.env(true).loadSchema(key);
+		await until(() => frame.schemas.get()[key]?.status === 'error', 'the failed load in the frame\'s state');
+		const summary = frame.schemas.get()[key];
+		assert.equal(typeof summary.failure, 'string');
+		assert.ok((summary.failure ?? '').length > 0, 'with its reason');
+		assert.deepEqual(summary.labels, []);
+		frame.dispose();
+		mounted.controller.dispose();
+	});
+
+	it('a get_schema that never answers: the controller\'s session gives up at its own wait and the summary says error', async () => {
+		const clock = manualClock();
+		const engine = vscodeRealm(undefined, (call) => (call.tool === 'get_schema' ? new Promise(() => undefined) : readOnlyNode(call)));
+		signInVsCode(engine.realm);
+		const mounted = mountController(engine.cm, { stores: { endpoints: makeGraphEndpointStore({ debounceMs: 0, clock }) } });
+		mounted.h.setHostConnection(true);
+		const { frame } = mountFrame(mounted.h, undefined);
+		for (let i = 0; i < 40 && Object.keys(frame.env(true).endpoints.get().probes).length === 0; i += 1) {
+			await clock.advance(10);
+			await settle();
+		}
+		const key = frame.env(true).endpoints.get().endpoints[0].key;
+		await frame.env(true).loadSchema(key);
+		await until(() => frame.schemas.get()[key]?.status === 'loading', 'the load in progress');
+		await clock.advance(DEFAULT_TOOL_TIMEOUTS.get_schema + 1);
+		await until(() => frame.schemas.get()[key]?.status === 'error', 'the timed-out load in the frame\'s state');
+		assert.match(frame.schemas.get()[key].failure ?? '', /./, 'with its reason');
+		frame.dispose();
+		mounted.controller.dispose();
 	});
 });

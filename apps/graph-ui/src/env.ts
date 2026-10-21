@@ -56,17 +56,21 @@ export interface IKeyed<T> {
 	subscribe(listener: () => void): () => void;
 }
 
-/** History, as every mount offers it (the full app's prefs-backed store, or the controller's, over ops). */
+/**
+ * History, as every mount offers it (the full app's prefs-backed store, or the controller's, over ops). A change
+ * resolves once it is APPLIED (in a dev-tool frame: when the controller's Reply says so) and rejects with the reason
+ * otherwise, so nothing is announced as done before it is.
+ */
 export interface IGraphHistory {
 	/** One connection's entries and recording switch (one stable readable per key). */
 	view(key: string): IReadable<IGraphHistoryView>;
-	/** Record a finished run (dropped when recording is off for the connection). */
+	/** Record a finished run (dropped when recording is off for the connection); a failure is reported by the mount. */
 	record(key: string, entry: IHistoryEntry<'cypher'>): void;
-	removeEntry(key: string, id: string): void;
-	togglePin(key: string, id: string): void;
-	setNote(key: string, id: string, note: string): void;
-	clearForKey(key: string): void;
-	setRecording(key: string, on: boolean): void;
+	removeEntry(key: string, id: string): Promise<void>;
+	togglePin(key: string, id: string): Promise<void>;
+	setNote(key: string, id: string, note: string): Promise<void>;
+	clearForKey(key: string): Promise<void>;
+	setRecording(key: string, on: boolean): Promise<void>;
 }
 
 /** A document a view asks to open. */
