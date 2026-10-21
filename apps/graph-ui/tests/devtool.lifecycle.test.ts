@@ -16,7 +16,10 @@ import { DEFAULT_TOOL_TIMEOUTS, ExplorerToolError } from 'shared/explorer';
 import { codedError, manualClock } from 'shared/explorer/connect/testing';
 import { assertSidebarSubscribers } from 'shared/explorer/devtool/testing';
 import { makeGraphEndpointStore, makeGraphHistory } from '../src/adapters/explorer';
+import { adoptParkedHistory, hasParkedHistory, parkHistory } from '../src/devtool/owedHistory';
+import type { IOwedHistory } from '../src/devtool/owedHistory';
 import { OP } from '../src/devtool/protocol';
+import { historyPrefsPath } from 'shared/explorer/devtool/prefs';
 import { PREVIEW_MAX_AGE_MS, previewFor } from '../src/graph/previews';
 import { account, graphRow, mountController, mountFrame, readOnlyNode, rocketRealm, settle, signInVsCode, until, vscodeRealm } from './support/devtool';
 
@@ -304,6 +307,124 @@ describe('T7 - history belongs to one identity at a time (the controller side)',
 	});
 });
 
+describe('T7 - the last history batch in the REAL disconnect, logout and account-switch orders', () => {
+	/**
+	 * Whether a run's id is in the history file.
+	 *
+	 * @param engine - The engine realm (its files).
+	 * @param id - The run's id.
+	 * @returns True when written.
+	 */
+	const fileHas = (engine: { files: Map<string, unknown> }, id: string): boolean => JSON.stringify([...engine.files.values()]).includes(`"${id}"`);
+	/** The production stores: the history store's 300 ms batch is what is at stake. */
+	const productionStores = () => ({ endpoints: makeGraphEndpointStore({ debounceMs: 0 }), history: makeGraphHistory(300) });
+
+	/**
+	 * A signed-in VS Code realm whose controller recorded one run that is still in the store's 300 ms batch.
+	 *
+	 * @param id - The run's id.
+	 * @returns The pieces.
+	 */
+	async function recordLast(id: string) {
+		const engine = vscodeRealm();
+		signInVsCode(engine.realm);
+		const mounted = mountController(engine.cm, { stores: productionStores() });
+		mounted.h.setHostConnection(true);
+		const { frame } = mountFrame(mounted.h, undefined);
+		await until(() => Object.keys(frame.env(true).endpoints.get().probes).length === 1, 'the probe');
+		await until(() => engine.requests.some((r) => r.op === 'client.fsStat'), 'the history file read');
+		await settle();
+		const key = frame.env(true).endpoints.get().endpoints[0].key;
+		frame.env(true).history.record(key, { id, at: 1, kind: 'read', cypher: 'RETURN 1', ms: 1, outcome: 'rows', rows: 1 } as never);
+		await until(() => mounted.controller.stores.history.getHistory(key).length === 1, 'the controller recorded it');
+		return { engine, mounted, frame, key };
+	}
+
+	it('VS Code: disconnect (the identity goes unknown first), host flip, controller unmount, then the same account back and the controller remounts: the run reaches the file', async () => {
+		const { engine, mounted, frame, key } = await recordLast('kept-remount');
+		engine.realm.root.disconnect();
+		mounted.h.setHostConnection(false);
+		await settle();
+		mounted.controller.dispose();
+		assert.equal(fileHas(engine, 'kept-remount'), false, 'the premise: nothing could be written while disconnected');
+		engine.realm.root.connect(account('u1'));
+		mounted.h.setHostConnection(true);
+		const again = mountController(engine.cm, { stores: productionStores() }, mounted.h, mounted);
+		await until(() => fileHas(engine, 'kept-remount'), 'the run in A\'s file', 200);
+		await until(() => again.controller.stores.history.getHistory(key).some((e) => e.id === 'kept-remount'), 'and in the remounted controller\'s history');
+		again.controller.dispose();
+		frame.dispose();
+	});
+
+	it('VS Code: the same, but no controller mounts again: the realm still writes the run once the same account is back', async () => {
+		const { engine, mounted, frame } = await recordLast('kept-parked');
+		engine.realm.root.disconnect();
+		mounted.h.setHostConnection(false);
+		await settle();
+		mounted.controller.dispose();
+		engine.realm.root.connect(account('u1'));
+		await until(() => fileHas(engine, 'kept-parked'), 'the run in A\'s file', 200);
+		frame.dispose();
+	});
+
+	it('rocket-ui (the controller stays mounted): a logout, then the same account again: the run is written', async () => {
+		const engine = rocketRealm();
+		engine.realm.login(account('u1'));
+		const mounted = mountController(engine.cm, { stores: productionStores() });
+		engine.realm.activate(APP);
+		mounted.h.setHostConnection(true);
+		const { frame } = mountFrame(mounted.h, undefined);
+		await until(() => Object.keys(frame.env(true).endpoints.get().probes).length === 1, 'the probe');
+		await until(() => engine.requests.some((r) => r.op === 'client.fsStat'), 'the history file read');
+		await settle();
+		const key = frame.env(true).endpoints.get().endpoints[0].key;
+		frame.env(true).history.record(key, { id: 'kept-logout', at: 1, kind: 'read', cypher: 'RETURN 1', ms: 1, outcome: 'rows', rows: 1 } as never);
+		await until(() => mounted.controller.stores.history.getHistory(key).length === 1, 'recorded');
+		engine.realm.logout();
+		await settle();
+		assert.equal(fileHas(engine, 'kept-logout'), false, 'the premise: nothing written while signed out');
+		engine.realm.login(account('u1'));
+		await until(() => fileHas(engine, 'kept-logout'), 'the run in A\'s file', 200);
+		frame.dispose();
+		mounted.controller.dispose();
+	});
+
+	it('VS Code: a disconnect, then a DIFFERENT account in the remounted controller: the parked change is dropped, never written into B\'s session', async () => {
+		const { engine, mounted, frame } = await recordLast('a-parked');
+		engine.realm.root.disconnect();
+		mounted.h.setHostConnection(false);
+		await settle();
+		mounted.controller.dispose();
+		assert.equal(hasParkedHistory(historyPrefsPath('graph')), true, 'the premise: the change was parked');
+		const writes = (): number => engine.requests.filter((r) => r.op === 'client.fsWriteJson').length;
+		const before = writes();
+		engine.realm.root.connect(account('u2'));
+		mounted.h.setHostConnection(true);
+		const again = mountController(engine.cm, { stores: productionStores() }, mounted.h, mounted);
+		await until(() => !hasParkedHistory(historyPrefsPath('graph')), 'the parked accessor settled');
+		await new Promise((resolve) => { setTimeout(resolve, 1_600); });
+		await settle();
+		assert.equal(fileHas(engine, 'a-parked'), false, 'A\'s change is not written while B is signed in');
+		assert.equal(writes(), before, 'nothing was written');
+		again.controller.dispose();
+		frame.dispose();
+	});
+
+	it('a direct switch from A to B: A\'s last run is never written (not into B\'s file), and B\'s file is untouched', async () => {
+		const { engine, mounted, frame } = await recordLast('a-last');
+		const writes = (): number => engine.requests.filter((r) => r.op === 'client.fsWriteJson').length;
+		const before = writes();
+		engine.realm.root.accountChanged(account('u2'));
+		await until(() => mounted.controller.identity.get().fingerprint === 'u2|org-1|team-1', 'account B');
+		await new Promise((resolve) => { setTimeout(resolve, 1_600); });
+		await settle();
+		assert.equal(fileHas(engine, 'a-last'), false, 'A\'s run never reaches the file B\'s session writes');
+		assert.equal(writes(), before, 'nothing was written after the switch');
+		frame.dispose();
+		mounted.controller.dispose();
+	});
+});
+
 describe('R8/R9 on the controller side: identity clears its caches, and the host\'s activeDocKey wins', () => {
 	it('a switch from account A to B clears the controller\'s schemas and A\'s pending preview, which no frame of B can take', async () => {
 		const engine = vscodeRealm();
@@ -511,5 +632,61 @@ describe('a schema load that fails or times out reaches the frames as state, so 
 		assert.match(frame.schemas.get()[key].failure ?? '', /./, 'with its reason');
 		frame.dispose();
 		mounted.controller.dispose();
+	});
+});
+
+describe('owedHistory: parking, adoption and the time limit', () => {
+	/** A stand-in accessor and tracker that record what happens to them. */
+	function stubs(owner: string) {
+		const log: string[] = [];
+		let known: { known: boolean; fingerprint: string | null } = { known: false, fingerprint: null };
+		const listeners = new Set<() => void>();
+		const tracker = {
+			get: () => ({ ...known, identity: null }),
+			subscribe: (cb: () => void) => { listeners.add(cb); return () => { listeners.delete(cb); }; },
+			dispose: () => log.push('tracker.dispose'),
+		};
+		const owed: IOwedHistory = {
+			owner,
+			vouch: { tracker },
+			prefs: { flush: async () => { log.push(`flush as ${String(owed.vouch.tracker.get().fingerprint)}`); }, dispose: () => log.push('prefs.dispose') } as never,
+		};
+		const set = (fingerprint: string | null): void => { known = { known: fingerprint !== null, fingerprint }; listeners.forEach((cb) => cb()); };
+		return { log, tracker: tracker as never, owed, set };
+	}
+
+	it('a parked accessor nobody claims is released at the time limit, its change dropped', async () => {
+		const s = stubs('A');
+		parkHistory('p/ttl', s.owed, s.tracker, { ttlMs: 10 });
+		assert.equal(hasParkedHistory('p/ttl'), true);
+		await new Promise((resolve) => { setTimeout(resolve, 30); });
+		assert.equal(hasParkedHistory('p/ttl'), false);
+		assert.deepEqual(s.log, ['prefs.dispose', 'tracker.dispose'], 'released without a write');
+	});
+
+	it('the same owner adopts it (the parked tracker goes, the accessor stays); another owner settles it (written as that owner: the base drops it)', async () => {
+		const same = stubs('A');
+		parkHistory('p/adopt', same.owed, same.tracker);
+		const mine = { get: () => ({ known: true, identity: null, fingerprint: 'A' }) };
+		assert.equal(adoptParkedHistory('p/adopt', 'A', mine), same.owed);
+		assert.equal(same.owed.vouch.tracker, mine, 'it reads the adopting controller\'s identity from now on');
+		assert.deepEqual(same.log, ['tracker.dispose']);
+		assert.equal(hasParkedHistory('p/adopt'), false);
+
+		const other = stubs('A');
+		parkHistory('p/other', other.owed, other.tracker);
+		const theirs = { get: () => ({ known: true, identity: null, fingerprint: 'B' }) };
+		assert.equal(adoptParkedHistory('p/other', 'B', theirs), null);
+		await settle();
+		assert.deepEqual(other.log, ['flush as B', 'prefs.dispose', 'tracker.dispose'], 'flushed while B is known (the base drops it), then released');
+	});
+
+	it('with no controller, a parked accessor settles itself when someone is known again', async () => {
+		const s = stubs('A');
+		parkHistory('p/self', s.owed, s.tracker);
+		s.set('A');
+		await settle();
+		assert.deepEqual(s.log, ['flush as A', 'prefs.dispose', 'tracker.dispose']);
+		assert.equal(hasParkedHistory('p/self'), false);
 	});
 });

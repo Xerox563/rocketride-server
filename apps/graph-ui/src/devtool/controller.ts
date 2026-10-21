@@ -65,7 +65,6 @@ import { publishIdentityState } from 'shared/explorer/devtool/frameIdentity';
 import { createIdentityTracker } from 'shared/explorer/devtool/identity';
 import type { IIdentityBus, IIdentityTracker } from 'shared/explorer/devtool/identity';
 import { attachWhenLoaded, createFsPrefs, historyPrefsPath } from 'shared/explorer/devtool/prefs';
-import type { IFsPrefs } from 'shared/explorer/devtool/prefs';
 import type { DevToolPeer } from 'shared/explorer/devtool/realm';
 import { replyOk } from 'shared/explorer/devtool/reply';
 import { guardRetainedState, jsonByteLength } from 'shared/explorer/devtool/state';
@@ -84,6 +83,8 @@ import { createSchemaStore } from '../graph/schemaStore';
 import type { ReadQueryResult } from '../graph/types';
 import { createLocalGraphEnv } from '../localEnv';
 import type { IGraphStores } from '../localEnv';
+import { adoptParkedHistory, ownerNowOf, parkHistory, settleOwed } from './owedHistory';
+import type { IOwedHistory, IVouch } from './owedHistory';
 import { EVENT, GRAPH_APP_ID, OP, STATE, docKeyFor, endpointsSnapshot, field, schemasSnapshot, toWire, versionsSnapshot } from './protocol';
 import type { GraphOps, HistoryEdit, IGraphHistoryView } from './protocol';
 
@@ -397,31 +398,60 @@ export function createGraphController(opts: IGraphControllerOptions): IGraphCont
 	}));
 
 	// ── History: an fs-backed bag per identity, loaded before it is attached (§3.5) ─────────────
-	let prefs: IFsPrefs | null = null;
+	// One accessor per identity. Its `ownerNow` reads this controller's identity tracker: the owner known (write), nobody
+	// known (the base HOLDS the write), someone else (the base DROPS it). See owedHistory.ts for HELD and PARKED.
+	const historyPath = historyPrefsPath('graph');
+	let current: IOwedHistory | null = null;
+	let held: IOwedHistory | null = null;
 	let detachHistory: (() => void) | null = null;
 	let historyOwner: string | null = null;
+	const newAccessor = (owner: string): IOwedHistory => {
+		const vouch: IVouch = { tracker: identity };
+		const prefs = createFsPrefs({ cm, path: historyPath, owner, ownerNow: ownerNowOf(vouch), onError: (error, phase) => report(error, `history ${phase}`) });
+		return { owner, prefs, vouch };
+	};
 	function syncHistory(): void {
 		const owner = activation.isOpen() && identity.get().known ? identity.get().fingerprint : null;
 		if (owner === historyOwner) return;
+		// 1. The batch still in the store's debounce is the PREVIOUS owner's: hand it to that owner's accessor before the
+		//    detach drops it. A disconnect, a sign-out or an account switch reaches the identity tracker before anything
+		//    unmounts, so this is where the last batch is saved (dispose() comes too late for it).
+		stores.history.flush();
 		detachHistory?.();
 		detachHistory = null;
-		// Forget the previous owner's history NOW: an attach under the new owner (or under none) makes the store drop
-		// what it held for anyone else, and the immediate detach leaves nothing attached; the file-backed attach below
-		// hydrates the new owner's bag. Without it A's entries stayed in memory, and were served to B's frames, until
-		// B's history file had loaded.
+		// 2. Forget the previous owner's history in memory NOW: an attach under the new owner (or under none) makes the
+		//    store drop what it held for anyone else, and the immediate detach leaves nothing attached. Nothing of A is
+		//    served to B while B's file loads; the file-backed attach below hydrates the new owner's bag.
 		stores.history.attachPrefs(memoryPrefs(), owner)();
-		prefs?.dispose();
-		prefs = null;
+		const previous = current;
+		current = null;
 		historyOwner = owner;
+		if (previous) {
+			if (owner === null) {
+				// Nobody known (a disconnect, a sign-out): HOLD the accessor. The base holds its write until the tracker
+				// knows who is back; it is re-used for the same owner and settled (dropped) for another.
+				if (held) void settleOwed(held);
+				held = previous;
+			} else {
+				// Another identity is known: the base drops the previous owner's change ('other'), never into B's file.
+				void settleOwed(previous);
+			}
+		}
 		if (owner === null || disposed) return;
-		prefs = createFsPrefs({
-			cm,
-			path: historyPrefsPath('graph'),
-			owner,
-			ownerNow: () => (identity.get().known ? identity.get().fingerprint : null),
-			onError: (error, phase) => report(error, `history ${phase}`),
-		});
-		detachHistory = attachWhenLoaded(prefs, (api, who) => stores.history.attachPrefs(api, who));
+		// 3. What is owed to this owner: the accessor this controller held, or one an unmounted controller parked in
+		//    this realm. Re-using it (not a fresh read of the file) keeps the change; its write goes out now.
+		let owed: IOwedHistory | null = null;
+		if (held) {
+			if (held.owner === owner) owed = held;
+			else void settleOwed(held);
+			held = null;
+		}
+		const parked = adoptParkedHistory(historyPath, owner, identity);
+		if (parked && owed) void settleOwed(parked);
+		else if (parked) owed = parked;
+		current = owed ?? newAccessor(owner);
+		detachHistory = attachWhenLoaded(current.prefs, (api, who) => stores.history.attachPrefs(api, who));
+		if (owed) void owed.prefs.flush();
 	}
 	offs.push(activation.subscribe(() => syncHistory()));
 
@@ -486,18 +516,28 @@ export function createGraphController(opts: IGraphControllerOptions): IGraphCont
 			if (disposed) return;
 			disposed = true;
 			for (const off of offs.splice(0)) off();
-			// Same owner, going away (a disconnect unmounts the controller): hand the batch still waiting in the history
-			// store's debounce to the file accessor BEFORE the last detach drops it; close() then writes the file.
+			// The last batch still in the history store's debounce goes to the current accessor before the detach drops
+			// it. (A disconnect or a sign-out reached the identity first: syncHistory already handed it to the HELD one.)
 			stores.history.flush();
 			detachHistory?.();
 			detachHistory = null;
-			const closing = prefs;
-			prefs = null;
-			if (closing) void closing.close();
+			const owed = current ?? held;
+			current = null;
+			held = null;
 			discovery.dispose();
 			activation.dispose();
-			identity.dispose();
 			attached.dispose();
+			const snapshot = identity.get();
+			if (owed && !(snapshot.known && snapshot.fingerprint === owed.owner)) {
+				// Unmounted while nobody (or someone else) is known, as VS Code does on a disconnect: PARK the accessor with
+				// this realm's tracker. The next controller adopts it; otherwise it writes when its owner is back, drops its
+				// change for another account, and is released after PARKED_HISTORY_TTL_MS.
+				parkHistory(historyPath, owed, identity);
+				return;
+			}
+			// Unmounted under its own owner (still connected): write now, then stop. The tracker goes once that is done.
+			if (owed) void owed.prefs.close().then(() => identity.dispose(), () => identity.dispose());
+			else identity.dispose();
 		},
 	};
 }
