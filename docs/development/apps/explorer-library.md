@@ -332,6 +332,134 @@ document-URI key rule), and the drawer's selection and probe rules
    keep suites beside the code. `connect/testing.ts` has a fake client and a
    manual clock (not exported from the barrel).
 
+## Running the library in a dev-tool controller
+
+A dev tool (`AppDescriptor.devToolSidebar` plus `devToolFrame`) mounts the app
+twice and gives neither mount a client. The deep entry
+[`devtool/`](../../../apps/shared/src/explorer/devtool/), imported as
+`shared/explorer/devtool/<module>`, is what an Explorer needs to run there. It
+is **not** exported from the `shared/explorer` barrel and imports no value from
+`shell`: the caller passes in the realm's `ConnectionManager` (as a structural
+type) and the shell's `createToolChannel`, `createToolController` and
+`createToolOpServer`. So every module runs under `node:test`.
+
+**Split ownership.** The sidebar mount is the **controller**. It owns the
+endpoint store (token vault, discovery, probes, task watch), the bus client,
+identity, schema caches, history and every op handler. **Frames** own the
+editor, the statement runner and its generation tickets, render models,
+selection and "Stop waiting". They hold no client and reach the engine only
+through ops. Nothing may assume the two share memory: in VS Code they are
+separate webviews.
+
+**Engine access** ([`busClient.ts`](../../../apps/shared/src/explorer/devtool/busClient.ts)).
+`getBusExplorerClient(cm)` is the library's `IExplorerClient` over
+`cm.request('client.<op>', …)`, with one instance per realm. Every request names
+its own bus timeout, and none relies on the bus's 120 s default
+([`timeouts.ts`](../../../apps/shared/src/explorer/devtool/timeouts.ts)):
+
+| Request | Bus `timeoutMs` |
+|---|---|
+| `client.tool` with an SDK `timeout` | `timeout + BUS_TOOL_MARGIN_MS` (5 s) |
+| `client.tool` the session left unbounded (`timeoutMs: null`) | `UNBOUNDED_TOOL_TIMEOUT_MS` (24 h; a delay above 2^31-1 ms fires at once) |
+| `client.getTasks`, `client.getTaskPipeline` | 30 s each |
+| `client.addMonitor`, `client.removeMonitor` | 15 s |
+| anything else (`fs*`, `use`, `getEnvironmentKeys`) | `busRequest(cm, op, params, timeoutMs)`; the timeout is required |
+
+A frame waits longer than its controller: `frameOpTimeoutMs(controllerMs)` adds
+`FRAME_OP_MARGIN_MS` (5 s), and `toolCallBudgetMs(wait)` is one tool call's
+controller budget.
+
+**Ops** ([`reply.ts`](../../../apps/shared/src/explorer/devtool/reply.ts),
+[`deadline.ts`](../../../apps/shared/src/explorer/devtool/deadline.ts),
+[`frame.ts`](../../../apps/shared/src/explorer/devtool/frame.ts)).
+
+- **Failures are data.** The op lane carries a handler's failure as its message
+  only. So every engine-facing op returns `Reply<T>`: `{ ok: true, value }` or
+  `{ ok: false, error: { kind, code?, message, tool?, detail?, retryAfterS? } }`.
+  - On the controller, `toReply(fn)` builds it. The lanes' own timeout texts
+    ("did not answer within", "timed out after") become kind `timeout`, and
+    "Not connected to server" becomes `unavailable`. Programming errors are
+    rethrown.
+  - On the frame, `fromReply` (or `callReply`) rebuilds an `ExplorerToolError`
+    equal to the original, so `failures.ts` and the `code` switches work
+    unchanged.
+- **Deadlines.** Every call carries `deadlineAt` (the frame's now plus its
+  `timeoutMs`). The controller refuses a call that has no deadline, or that
+  arrives after it, without running it.
+- **The frame caller.** `createFrameCaller` needs an explicit `timeoutMs` on
+  every call and builds one controller function and one channel per frame
+  peer. It rejects every pending call as soon as `host:connection` turns false,
+  with kind `timeout`: the call may still have run.
+
+**Controller wiring** ([`controller.ts`](../../../apps/shared/src/explorer/devtool/controller.ts)).
+`attachController({ peer, channel, createToolChannel, createToolOpServer, handlers })`
+uses the host's channel, or builds one per peer, **before** it creates exactly
+one op server, and serves every handler through the deadline guard. Call it in a
+`useEffect` and return its `dispose` as the cleanup; never build the op server
+in `useMemo`, because StrictMode mounts twice.
+
+**Identity** ([`identity.ts`](../../../apps/shared/src/explorer/devtool/identity.ts)).
+`createIdentityTracker({ cm })` reports `{ known, identity, fingerprint }` and
+fails closed:
+
+- A disconnect, a logout or an organization change makes the identity unknown.
+  Logout and organization change stay unknown until a real account arrives.
+- In a realm that owns the client (rocket-ui), the source is the SDK client's
+  account, which every handshake refreshes. It is not
+  `ConnectionManager.getAccountInfo()`, which keeps the account from sign-in.
+- In a socketless realm (VS Code), the source is the root's retained
+  `shell:account` topic, read at mount and on every reconnect. The realm's
+  manager ignores the `null` that topic carries after a sign-out.
+- A reconnect never brings back the account from before the drop. Account A,
+  then a disconnect, then a reconnect as B reads A, unknown, B.
+
+**Activation** ([`activation.ts`](../../../apps/shared/src/explorer/devtool/activation.ts)).
+rocket-ui mounts every pinned controller at boot, so the first discovery waits
+for the first of these:
+
+- `shell:toolSidebarActivated` for this app;
+- the first op from a frame;
+- a string `activeDocKey` (`''` is the generic frame);
+- `open('user')`.
+
+VS Code mounts a tool sidebar lazily on its first tab select. That select's
+activation event fires before the sidebar can hear it, so a **socketless**
+realm (connected, `getClient()` null) counts the mount itself.
+
+**Discovery** ([`watch.ts`](../../../apps/shared/src/explorer/devtool/watch.ts)).
+`createDevToolDiscovery({ cm, client, identity, activation })` gives the store's
+watch. It allows discovery only while the identity is known **and** the tool is
+activated. It forwards identity changes (unknown resets the store), registers
+the task monitor only once discovery is allowed, and refreshes once whenever
+discovery becomes allowed.
+
+**Rules a controller must follow** (they come from the shell's `busPeer.ts`
+and `toolOps.ts`):
+
+- The sidebar peer has **one** live subscriber, whichever subscribed last.
+  Nothing may subscribe after the op server, and the controller never calls
+  `peer.subscribe` itself.
+- The live subscriber hears every frame event twice, and a remount replays the
+  last one. Events are idempotent hints only. Every mutation is an op, and
+  event names never match op names: the op server runs an event that matches
+  an op (the deadline guard refuses it).
+- Calls made while no controller is subscribed are held and handed to the next
+  subscriber. `attachController` passes them to the handlers, so the deadline
+  decides whether each one runs.
+- A sidebar mount posts nothing, opens no document and registers no monitor.
+
+**What the platform loses.** In VS Code, the controller's own `client.tool`
+failures arrive without `code`: the bus bridge carries messages only. So the
+`TASK_STOPPED` retry and the stopped-versus-unreachable probe split cannot work
+there, and no code is ever rebuilt from message text. There are no brokered
+`chat` or pipe ops, so features that need them must degrade in dev-tool mounts.
+
+**Testing** ([`testing.ts`](../../../apps/shared/src/explorer/devtool/testing.ts)).
+The harness runs the shell's **real** `busPeer`, `toolOps`, `toolChannel` and
+retained registry, imported from source by relative path. It adds
+`assertJsonSafe`, `settle()` and fake VS Code and rocket-ui realms whose rules
+cite `connection.ts`.
+
 ## Known limits
 
 - The React hook and the components that import from `shell` are type-checked
