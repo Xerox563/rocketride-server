@@ -223,9 +223,11 @@ export function checkSchemaInput(input: { table?: unknown }): void {
 
 /**
  * How many connections' history the controller follows at once (the
- * `history` topic's keys): the ones read most recently. A frame whose key is
- * dropped reads it again, which follows it again; only more open history
- * views than this, at once, would take turns.
+ * `history` topic's keys): the ones read most recently. A history view whose
+ * key is dropped reads it again once, which follows it again. With more
+ * views open at once than this, a view dropped a second time keeps showing
+ * what it last read, without updates, until it is opened again: the views do
+ * not take turns, so nothing re-reads forever.
  */
 export const MAX_WATCHED_HISTORY_KEYS = 128;
 

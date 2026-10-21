@@ -142,8 +142,9 @@ export interface ConnectionsState {
  * plus the recording switch. The entries themselves are an op result
  * (`sql.history`): a history bag (up to 256 KB) does not fit the retained
  * state cap. The keys are bounded: the controller follows the connections
- * read most recently (MAX_WATCHED_HISTORY_KEYS); a frame whose key is no
- * longer listed reads it again, which lists it again.
+ * read most recently (MAX_WATCHED_HISTORY_KEYS); a view whose key is no
+ * longer listed reads it again once, which lists it again (a view dropped a
+ * second time keeps what it last read until it is opened again).
  */
 export interface HistoryState {
 	/** Where the controller keeps history (the privacy line says so). */

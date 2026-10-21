@@ -95,7 +95,7 @@ function jsonEntry(entry: HistoryEntry): HistoryEntry {
 export function createRemoteHistory(opts: RemoteHistoryOptions): RemoteHistory {
 	const { caller, channel, owner } = opts;
 	/** What this frame has read, per endpoint key. */
-	const read = new Map<string, { endpoint: SqlEndpoint; entries: HistoryEntry[]; rev: number | null; loaded: boolean; loading: boolean; again: boolean; recording: boolean | null }>();
+	const read = new Map<string, { endpoint: SqlEndpoint; entries: HistoryEntry[]; rev: number | null; loaded: boolean; loading: boolean; again: boolean; recording: boolean | null; reread: boolean }>();
 	let state: HistoryState | undefined;
 	let epoch = 0;
 	const listeners = new Set<() => void>();
@@ -147,11 +147,16 @@ export function createRemoteHistory(opts: RemoteHistoryOptions): RemoteHistory {
 			const rev = followed?.rev;
 			// The controller stopped following this key (it follows the keys read
 			// most recently): reading it again follows it again. Only on the
-			// change itself: the same snapshot delivered again reads nothing.
+			// change itself (the same snapshot delivered again reads nothing),
+			// and ONCE per view: with more views open than the controller follows,
+			// a view dropped a second time keeps what it last read until it is
+			// opened again, so the views cannot evict each other forever.
 			const unfollowed = rev === undefined && before?.keys?.[key] !== undefined && snapshot?.storage !== 'none' && snapshot?.storage === before?.storage;
+			const followAgain = unfollowed && !slot.reread;
+			if (followAgain) slot.reread = true;
 			// A revision moved on, or a read that failed (the controller could not
 			// vouch for anyone yet) can now succeed.
-			if ((rev !== undefined && rev !== slot.rev) || (!slot.loaded && snapshot?.storage !== 'none') || unfollowed) fetch(key);
+			if ((rev !== undefined && rev !== slot.rev) || (!slot.loaded && snapshot?.storage !== 'none') || followAgain) fetch(key);
 		}
 		notify();
 	});
@@ -172,8 +177,15 @@ export function createRemoteHistory(opts: RemoteHistoryOptions): RemoteHistory {
 	 * @param endpoint - The connection's endpoint.
 	 */
 	const watch = (endpoint: SqlEndpoint): void => {
-		if (read.has(endpoint.key)) return;
-		read.set(endpoint.key, { endpoint, entries: NO_ENTRIES, rev: null, loaded: false, loading: false, again: false, recording: state?.keys?.[endpoint.key]?.recording ?? null });
+		const slot = read.get(endpoint.key);
+		if (slot) {
+			// The view was opened again: it may follow again, and a key the
+			// controller no longer follows is read (and followed) now.
+			slot.reread = false;
+			if (slot.loaded && state?.keys?.[endpoint.key] === undefined && state?.storage !== 'none') fetch(endpoint.key);
+			return;
+		}
+		read.set(endpoint.key, { endpoint, entries: NO_ENTRIES, rev: null, loaded: false, loading: false, again: false, recording: state?.keys?.[endpoint.key]?.recording ?? null, reread: false });
 		fetch(endpoint.key);
 	};
 

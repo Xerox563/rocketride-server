@@ -724,6 +724,39 @@ describe('T11 — no bulk result is retained state; each topic stays within 64 K
 		}
 	});
 
+	it('more history views than the controller follows settle: each re-reads at most once, and reads again only when opened again (DA CE-5)', async () => {
+		const saved = many(MAX_WATCHED_HISTORY_KEYS + 2);
+		const r = await rig({ saved });
+		try {
+			await until(() => getSavedConnections().length === saved.length, 'the list');
+			for (const conn of saved) r.history.watch(endpointForConnection(conn));
+			const count = (): number => r.frameCalls.filter((call) => call.op === 'sql.history').length;
+			await new Promise((resolve) => setTimeout(resolve, 300));
+			const a = count();
+			await new Promise((resolve) => setTimeout(resolve, 300));
+			assert.equal(count(), a, 'the reads settled');
+			// Per view at most: the first read, one re-read, and one more when the
+			// re-followed key's revision appears (the re-read began before it did).
+			assert.ok(a <= 3 * saved.length, `${a} reads for ${saved.length} views`);
+			// A dropped view opened again reads (and is followed) again.
+			const snapshots: HistoryState[] = [];
+			const off = r.frame.channel.onState('history', (snapshot) => { snapshots.push(snapshot as HistoryState); });
+			try {
+				await settle();
+				const dropped = saved.map((conn) => endpointForConnection(conn)).find((endpoint) => snapshots.at(-1)?.keys[endpoint.key] === undefined);
+				assert.ok(dropped, 'some view is not followed');
+				const before = count();
+				r.history.watch(dropped);
+				await until(() => snapshots.at(-1)?.keys[dropped.key] !== undefined, 'the reopened view to be followed');
+				assert.ok(count() > before);
+			} finally {
+				off();
+			}
+		} finally {
+			r.dispose();
+		}
+	});
+
 	it('the shrink is the lane\'s (a partial list, the newest keys), and every op has a handler', () => {
 		const controller = source('sqlController.ts');
 		assert.match(controller, /shrink: shrinkSqlState,/);
