@@ -190,6 +190,10 @@ export const SqlDevTool: React.FC<DevToolProps> = ({ peer, channel, docKey, docu
 	// frame caller, the realm's read-only connection replica, the active-key
 	// pushes, and the identity guard — mounted in an effect, disposed with it.
 	const toolChannel = useMemo(() => frameChannel(peer, channel), [peer, channel]);
+	// The host's documents API, read at call time: a new object on a re-render
+	// must not remount the frame wiring (which drops pending calls).
+	const documentsRef = useRef(documents);
+	documentsRef.current = documents;
 	const [mount, setMount] = useState<{ frame: SqlFrameMount; history: RemoteHistory } | null>(null);
 	useEffect(() => {
 		let history: RemoteHistory | null = null;
@@ -197,7 +201,10 @@ export const SqlDevTool: React.FC<DevToolProps> = ({ peer, channel, docKey, docu
 			peer,
 			channel: toolChannel,
 			docKey: docKey ?? null,
-			...(documents ? { documents } : {}),
+			documents: {
+				open: (key, title) => documentsRef.current?.open(key, title),
+				close: (key) => documentsRef.current?.close(key),
+			},
 			protocol: SQL_TOOL_PROTOCOL,
 			// Identity changed, unknown, or the host connection dropped: the
 			// frame wiring clears the realm's schemas; the history view is ours.
@@ -209,7 +216,7 @@ export const SqlDevTool: React.FC<DevToolProps> = ({ peer, channel, docKey, docu
 			history?.dispose();
 			frame.dispose();
 		};
-	}, [peer, toolChannel, docKey, documents]);
+	}, [peer, toolChannel, docKey]);
 
 	// FRAMES HOLD NO ROCKETRIDE CLIENT: run/apply enablement is the host's
 	// `host:connection` snapshot, and every call is a controller op.

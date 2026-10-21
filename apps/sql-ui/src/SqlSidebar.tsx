@@ -367,11 +367,18 @@ export const SqlDevToolSidebar: React.FC<DevToolProps> = ({ peer, channel, docum
 	const [mount, setMount] = useState<SqlControllerMount | null>(null);
 	const activeDocKeyRef = useRef(activeDocKey);
 	activeDocKeyRef.current = activeDocKey;
+	// The host's documents API, read at call time: a host that hands a new
+	// object on a re-render must not remount the controller (its op server).
+	const documentsRef = useRef(documents);
+	documentsRef.current = documents;
 	useEffect(() => {
 		const attached = attachSqlController({
 			peer,
 			...(channel ? { channel } : {}),
-			...(documents ? { documents } : {}),
+			documents: {
+				open: (key, title) => documentsRef.current?.open(key, title),
+				close: (key) => documentsRef.current?.close(key),
+			},
 			activeDocKey: activeDocKeyRef.current ?? null,
 			cm: ConnectionManager.getInstance(),
 			protocol: SQL_TOOL_PROTOCOL,
@@ -381,7 +388,7 @@ export const SqlDevToolSidebar: React.FC<DevToolProps> = ({ peer, channel, docum
 			attached.dispose();
 			setMount((current) => (current === attached ? null : current));
 		};
-	}, [peer, channel, documents]);
+	}, [peer, channel]);
 	// A non-null activeDocKey is an activation (R7).
 	useEffect(() => { mount?.noteActiveDocKey(activeDocKey); }, [mount, activeDocKey]);
 
