@@ -32,7 +32,7 @@
 
 import React, { useCallback } from 'react';
 import { ConfirmDialog } from 'shell';
-import { deleteSavedConnection, endpointKeyForConnection } from '../connect';
+import { deleteSavedConnection } from '../connect';
 import { useSqlEnv } from '../sqlEnv';
 import { requestConnectionOverlay, useConnectionOverlay } from '../navigation';
 import NewConnectionModal from './NewConnectionModal';
@@ -53,7 +53,7 @@ const ConnectionOverlays: React.FC = () => {
 		if (request?.kind !== 'delete') return;
 		const conn = request.conn;
 		if (conn.mode === 'direct') {
-			env.releaseEndpoint(endpointKeyForConnection(conn));
+			env.releaseEndpoint(conn.id);
 		}
 		deleteSavedConnection(conn.id);
 		close();

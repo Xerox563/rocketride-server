@@ -52,9 +52,19 @@
 // =============================================================================
 
 import { useSyncExternalStore } from 'react';
-// The client type comes from the rocketride module itself (an MF shared
-// singleton beside 'shell') — the full SDK surface, no barrel indirection.
-import type { SqlWireClient } from './busClient';
+
+/**
+ * The three user-store calls the list needs. The engine core (sqlCore.ts)
+ * supplies them over the shell bus, each with an explicit timeout.
+ */
+export interface SavedConnectionsFs {
+	/** Create a folder (an existing one is not an error worth reporting). */
+	fsMkdir(path: string): Promise<unknown>;
+	/** Read a JSON file. */
+	fsReadJson(path: string): Promise<unknown>;
+	/** Write a JSON file. */
+	fsWriteJson(path: string, value: unknown): Promise<unknown>;
+}
 
 // =============================================================================
 // TYPES
@@ -148,9 +158,9 @@ function commit(next: SavedSqlConnection[]): void {
  * controller as retained channel state (applySavedConnections). Reconnects
  * re-load against the new server; a missing file is first run.
  *
- * @param client - The shell's RocketRide client.
+ * @param client - The user-store calls (the engine core's, over the bus).
  */
-export async function loadSavedConnections(client: SqlWireClient): Promise<void> {
+export async function loadSavedConnections(client: SavedConnectionsFs): Promise<void> {
 	const seq = ++loadSeq;
 	status = 'loading';
 	notify();
@@ -190,9 +200,14 @@ export async function loadSavedConnections(client: SqlWireClient): Promise<void>
  * children have already unsubscribed by the time its cleanup runs, so in an
  * isolated document (VS Code webview) the listener set is empty here and
  * the reset proceeds exactly as before.
+ *
+ * `force` resets whoever still renders it: a change of signed-in identity
+ * (the list is the previous user's) or the owner's unmount.
+ *
+ * @param opts - `force`: reset even while the list is on screen.
  */
-export function resetSavedConnections(): void {
-	if (listeners.size > 0) return;
+export function resetSavedConnections(opts: { force?: boolean } = {}): void {
+	if (listeners.size > 0 && opts.force !== true) return;
 	loadSeq++;
 	status = 'idle';
 	connections = [];

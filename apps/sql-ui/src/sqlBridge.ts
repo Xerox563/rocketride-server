@@ -56,13 +56,10 @@
 // =============================================================================
 
 import { createToolChannel, createToolOpServer, typedToolChannel } from 'shell';
-import { ConnectionManager } from 'shell';
-import { getBusSqlClient } from './connect/busClient';
-import type { SqlWireClient } from './connect/busClient';
 import type { DevToolProps, ToolChannel, TypedToolChannel } from 'shell';
-import { applySavedConnections, discoverSqlEndpoints, getSavedConnection, getSavedConnections, getSavedConnectionsStatus, releaseDirectEndpoint, resolveEndpoint, subscribeSavedConnections, upsertSavedConnection } from './connect';
+import { applySavedConnections, deleteSavedConnection, getSavedConnections, getSavedConnectionsStatus, subscribeSavedConnections, upsertSavedConnection } from './connect';
 import type { SavedSqlConnection } from './connect';
-import { getLocalSession } from './sqlEnv';
+import type { SqlCore } from './sqlCore';
 import type { SqlOps, SqlStateMap, SqlEventMap } from './ops';
 import { getActiveConnection, subscribeActiveConnection } from './navigation';
 import { connectionEditorDocKey, connectionEditorUri, connectionUri, getDocs } from './docs';
@@ -85,6 +82,8 @@ export interface SqlSidebarBridge {
 	openConnection(conn: SavedSqlConnection): void;
 	/** Open the add/edit connection editor as a top-level document (null = add). */
 	openConnectionEditor(editing: SavedSqlConnection | null): void;
+	/** Delete a saved connection (a direct one's temp pipeline is stopped first, best effort). */
+	deleteConnection(conn: SavedSqlConnection): void;
 	/** Subscribe to the active connection key (replays current). Returns unsubscribe. */
 	subscribeActive(cb: (key: string | null) => void): () => void;
 	/** Subscribe to open failures (direct resolves can fail). Returns unsubscribe. */
@@ -109,54 +108,50 @@ function channelOf(ctx: SqlToolMountContext): TypedToolChannel<SqlStateMap, SqlE
 }
 
 // =============================================================================
-// SHARED OPEN HELPER — resolve + open, used by the local + legacy paths
-// =============================================================================
-
-/**
- * Resolves a saved connection (direct mode materialises its temp pipeline)
- * and opens its workbench document. Runs in a realm that owns a Documents
- * instance (the full app, or a legacy single-frame host).
- *
- * @param conn - The saved connection.
- * @throws When resolution fails (no client, pipeline start failure).
- */
-async function openSavedConnection(conn: SavedSqlConnection): Promise<void> {
-	const client = getBusSqlClient();
-	if (!ConnectionManager.getInstance().isConnected()) throw new Error('Not connected to a server.');
-	const endpoint = await resolveEndpoint(client, conn);
-	getDocs()?.openStaticDocument(connectionUri(endpoint.key), conn.name, endpoint);
-}
-
-// =============================================================================
 // LOCAL BRIDGE — sidebar and frame in the same document (the full app)
 // =============================================================================
 
-// Open-failure emitter for the in-document path.
-const localErrorSubs = new Set<(message: string) => void>();
+/**
+ * The in-document bridge — straight calls into the full app's engine core
+ * and the shared singletons.
+ *
+ * @param core - The full app's engine core.
+ * @returns The bridge.
+ */
+export function createLocalSidebarBridge(core: SqlCore): SqlSidebarBridge {
+	const errorSubs = new Set<(message: string) => void>();
+	return {
+		openConnection(conn) {
+			// Resolves the saved connection (direct mode materialises its temp
+			// pipeline) and opens its workbench document.
+			core.resolve(conn.id)
+				.then((endpoint) => { getDocs()?.openStaticDocument(connectionUri(endpoint.key), conn.name, endpoint); })
+				.catch((err: unknown) => {
+					const message = err instanceof Error ? err.message : String(err);
+					errorSubs.forEach((fn) => fn(message));
+				});
+		},
 
-/** The in-document bridge — straight calls into the shared singletons. */
-export const localSidebarBridge: SqlSidebarBridge = {
-	openConnection(conn) {
-		openSavedConnection(conn).catch((err: unknown) => {
-			const message = err instanceof Error ? err.message : String(err);
-			localErrorSubs.forEach((fn) => fn(message));
-		});
-	},
+		openConnectionEditor(editing) {
+			getDocs()?.openStaticDocument(connectionEditorUri(editing?.id ?? null), editing ? `Edit ${editing.name}` : 'New Connection');
+		},
 
-	openConnectionEditor(editing) {
-		getDocs()?.openStaticDocument(connectionEditorUri(editing?.id ?? null), editing ? `Edit ${editing.name}` : 'New Connection');
-	},
+		deleteConnection(conn) {
+			void core.release(conn.id);
+			deleteSavedConnection(conn.id);
+		},
 
-	subscribeActive(cb) {
-		cb(getActiveConnection());
-		return subscribeActiveConnection(() => cb(getActiveConnection()));
-	},
+		subscribeActive(cb) {
+			cb(getActiveConnection());
+			return subscribeActiveConnection(() => cb(getActiveConnection()));
+		},
 
-	subscribeError(cb) {
-		localErrorSubs.add(cb);
-		return () => { localErrorSubs.delete(cb); };
-	},
-};
+		subscribeError(cb) {
+			errorSubs.add(cb);
+			return () => { errorSubs.delete(cb); };
+		},
+	};
+}
 
 // =============================================================================
 // CONTROLLER SIDE — the devToolSidebar mount
@@ -170,7 +165,7 @@ export const localSidebarBridge: SqlSidebarBridge = {
  * @param ctx - The mount's peer/channel/documents.
  * @returns The bridge the sidebar renders against.
  */
-export function createSidebarToolBridge(ctx: SqlToolMountContext): SqlSidebarBridge {
+export function createSidebarToolBridge(ctx: SqlToolMountContext, core: SqlCore): SqlSidebarBridge {
 	const channel = channelOf(ctx);
 	const activeSubs = new Set<(key: string | null) => void>();
 	const errorSubs = new Set<(message: string) => void>();
@@ -184,36 +179,22 @@ export function createSidebarToolBridge(ctx: SqlToolMountContext): SqlSidebarBri
 		upsertSavedConnection(payload);
 	});
 
-	// Operations served on the controller's engine connection — plain
-	// handlers; correlation and replies are the op server's business. The
-	// session ops share the realm's local session cache (token caching).
-	const needClient = (): SqlWireClient => {
-		const client = getBusSqlClient();
-		if (!ConnectionManager.getInstance().isConnected()) throw new Error('Not connected to a server.');
-		return client;
-	};
+	// Operations served on the controller's engine core — plain handlers;
+	// correlation and replies are the op server's business.
 	const ops = createToolOpServer<SqlOps>(ctx.peer);
-	ops.serve('sql.resolveEndpoint', async ({ connId }) => {
-		const conn = getSavedConnection(connId);
-		if (!conn) throw new Error(`No saved connection '${connId}'.`);
-		return resolveEndpoint(needClient(), conn);
-	});
-	ops.serve('sql.releaseEndpoint', async ({ key }) => {
-		await releaseDirectEndpoint(needClient(), key);
-	});
-	ops.serve('sql.discoverEndpoints', async () => discoverSqlEndpoints(needClient()));
+	ops.serve('sql.resolveEndpoint', async ({ connId }) => core.resolve(connId));
+	ops.serve('sql.releaseEndpoint', async ({ connId }) => { await core.release(connId); });
+	ops.serve('sql.discoverEndpoints', async () => core.pickable());
 	ops.serve('sql.execute', async ({ endpoint, sql, params, idempotent }) =>
-		getLocalSession(needClient(), endpoint).execute(sql, { ...(params ? { params } : {}), ...(idempotent !== undefined ? { idempotent } : {}) }));
-	ops.serve('sql.getSchema', async ({ endpoint, table }) => getLocalSession(needClient(), endpoint).getSchema(table));
-	ops.serve('sql.refreshSchema', async ({ endpoint }) => getLocalSession(needClient(), endpoint).refreshSchema());
-	ops.serve('sql.dialect', async ({ endpoint }) => getLocalSession(needClient(), endpoint).dialect());
-	ops.serve('sql.getService', async ({ provider }) => needClient().getService(provider));
-	ops.serve('sql.validate', async ({ pipeline }) => needClient().validate({ pipeline }));
+		core.sessionFor(endpoint).execute(sql, { ...(params ? { params } : {}), ...(idempotent !== undefined ? { idempotent } : {}) }));
+	ops.serve('sql.getSchema', async ({ endpoint, table }) => core.sessionFor(endpoint).getSchema(table));
+	ops.serve('sql.refreshSchema', async ({ endpoint }) => core.sessionFor(endpoint).refreshSchema());
+	ops.serve('sql.dialect', async ({ endpoint }) => core.sessionFor(endpoint).dialect());
+	ops.serve('sql.getService', async ({ provider }) => core.getService(provider));
+	ops.serve('sql.validate', async ({ pipeline }) => core.validate(pipeline));
 	ops.serve('sql.envKeys', async () => {
 		try {
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-			const keys = await (needClient() as any).account?.getEnvironmentKeys?.();
-			return (keys as string[] | undefined) ?? [];
+			return await core.envKeys();
 		} catch {
 			return [];
 		}
@@ -247,6 +228,10 @@ export function createSidebarToolBridge(ctx: SqlToolMountContext): SqlSidebarBri
 		},
 		openConnectionEditor: (editing) => {
 			ctx.documents?.open(connectionEditorDocKey(editing?.id ?? null), editing ? `Edit ${editing.name}` : 'New Connection');
+		},
+		deleteConnection: (conn) => {
+			void core.release(conn.id);
+			deleteSavedConnection(conn.id);
 		},
 		subscribeActive(cb) {
 			cb(activeKey);

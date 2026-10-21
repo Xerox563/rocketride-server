@@ -36,19 +36,22 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import type { DevToolProps, ShellAppProps } from 'shell';
-import { DocTabs, DocSplitLayout, AppLayout, useShellConnection } from 'shell';
+import { ConnectionManager, DocTabs, DocSplitLayout, AppLayout, useShellConnection } from 'shell';
 import type { Documents } from 'shell';
 import { EmptyState } from 'shell';
 import { commonStyles } from 'shell';
 import { closeDocumentByUri, connectionEditorIdFromUri, createDocs, destroyDocs, endpointKeyFromAnyUri, endpointKeyFromUri, getDocs, isConnectionEditorUri, isDesignUri, isDiagramUri, isQueryUri, isTableDataUri, parseConnectionEditorDocKey } from './docs';
 import type { QueryDocPayload } from './docs';
 import { setActiveConnection } from './navigation';
-import { getBusSqlClient } from './connect/busClient';
-import { loadSavedConnections, resetSavedConnections, isDirectEndpointKey, useSavedConnections, useSavedConnectionsStatus } from './connect';
+import { connIdFromDirectKey, resetSavedConnections, isDirectEndpointKey, useSavedConnections, useSavedConnectionsStatus } from './connect';
 import type { SavedSqlConnection } from './connect';
 import { createToolChannel, createToolController, useConnectionReady } from 'shell';
 import type { SqlOps } from './ops';
-import { attachSqlDocumentHost, localSidebarBridge, sendConnectionSave } from './sqlBridge';
+import { attachSqlDocumentHost, createLocalSidebarBridge, sendConnectionSave } from './sqlBridge';
+import type { SqlSidebarBridge } from './sqlBridge';
+import { createSqlCore } from './sqlCore';
+import type { SqlCore } from './sqlCore';
+import { SQL_APP_ID } from './appId';
 import { SqlEnvProvider, createLocalSqlEnv, createRemoteSqlEnv, useSqlEnv } from './sqlEnv';
 import type { SqlEndpoint } from './connect';
 import ConnectionView from './views/ConnectionView';
@@ -132,8 +135,18 @@ const styles = {
  * @param _props - Shell-injected props (unused; connection comes from hooks).
  */
 const SqlApp: React.FC<ShellAppProps> = (_props) => {
-	const { client, isConnected } = useShellConnection();
+	const { isConnected } = useShellConnection();
 	const [ready, setReady] = useState(false);
+
+	// The full app's engine core (sqlCore.ts): the shared endpoint store, its
+	// sessions, the identity it discovers for, and the saved-connection list,
+	// which it reads from the user's store for each signed-in identity.
+	const [core, setCore] = useState<SqlCore | null>(null);
+	useEffect(() => {
+		const created = createSqlCore({ cm: ConnectionManager.getInstance(), appId: SQL_APP_ID, mode: 'app' });
+		setCore(created);
+		return () => created.dispose();
+	}, []);
 
 	// Create the Documents instance once.
 	useEffect(() => {
@@ -146,28 +159,24 @@ const SqlApp: React.FC<ShellAppProps> = (_props) => {
 		};
 	}, []);
 
-	// Load the saved-connection list from the connected server's user store —
-	// per-user-per-server, so every host (app, preview, VS Code tool) sees
-	// the same list. Reconnects re-load against the new server.
-	useEffect(() => {
-		if (isConnected) void loadSavedConnections(getBusSqlClient());
-	}, [isConnected]);
+	// The in-document sidebar bridge over the core (one per core).
+	const localBridge = useMemo(() => (core ? createLocalSidebarBridge(core) : null), [core]);
 
-	// Sidebar node memoized once: SqlSidebar takes no props and reads all its
-	// state from the shared singletons, so the slot registration is stable.
-	const sidebar = useMemo(() => <SqlSidebar />, []);
+	// Sidebar node memoized per bridge: SqlSidebar reads the rest of its state
+	// from the shared singletons, so the slot registration is stable.
+	const sidebar = useMemo(() => (localBridge ? <SqlSidebar bridge={localBridge} /> : null), [localBridge]);
 
-	// The FULL APP's engine surface: the realm legitimately owns a client, so
-	// the views get the LOCAL environment (dev-tool frames get the remote one).
-	const env = useMemo(() => createLocalSqlEnv(isConnected), [isConnected]);
+	// The FULL APP's engine surface: the realm legitimately owns a connection,
+	// so the views get the LOCAL environment (dev-tool frames get the remote one).
+	const env = useMemo(() => (core ? createLocalSqlEnv(core, isConnected) : null), [core, isConnected]);
 
 	// Two-column app: the navigation/schema sidebar mounts once Documents is
 	// ready (it shares the singleton with the workbench documents).
-	if (!ready) return <AppLayout showStatus>{null}</AppLayout>;
+	if (!ready || !env || !localBridge) return <AppLayout showStatus>{null}</AppLayout>;
 	return (
 		<SqlEnvProvider value={env}>
 			<AppLayout sidebar={sidebar} showStatus>
-				<SqlAppReady docs={getDocs()!} />
+				<SqlAppReady docs={getDocs()!} bridge={localBridge} />
 				{/* Sidebar-requested dialogs render HERE, outside the sidebar
 				    subtree — the compact drawer is a transformed ancestor that
 				    would trap a fixed-position overlay. */}
@@ -248,9 +257,9 @@ const SqlConnectionDocument: React.FC<{ connId: string }> = ({ connId }) => {
 		if (!endpoint) return;
 		setActiveConnection(endpoint.key);
 		return () => {
-			if (isDirectEndpointKey(endpoint.key)) env.releaseEndpoint(endpoint.key);
+			if (isDirectEndpointKey(endpoint.key)) env.releaseEndpoint(connId);
 		};
-	}, [endpoint, env]);
+	}, [endpoint, env, connId]);
 
 	let body: React.ReactNode;
 	if (!env.ready) {
@@ -373,7 +382,7 @@ export const SqlDevTool: React.FC<DevToolProps> = ({ peer, channel, docKey, docu
  * Inner component that renders once Documents is ready.
  * Separated so useStore() is called unconditionally.
  */
-const SqlAppReady: React.FC<{ docs: Documents }> = ({ docs }) => {
+const SqlAppReady: React.FC<{ docs: Documents; bridge: SqlSidebarBridge }> = ({ docs, bridge }) => {
 	const state = docs.useStore();
 	const env = useSqlEnv();
 
@@ -399,7 +408,8 @@ const SqlAppReady: React.FC<{ docs: Documents }> = ({ docs }) => {
 			if (key && isDirectEndpointKey(key)) open.add(key);
 		}
 		for (const key of openDirectKeysRef.current) {
-			if (!open.has(key)) env.releaseEndpoint(key);
+			const connId = connIdFromDirectKey(key);
+			if (!open.has(key) && connId !== null) env.releaseEndpoint(connId);
 		}
 		openDirectKeysRef.current = open;
 	}, [state, env]);
@@ -453,7 +463,7 @@ const SqlAppReady: React.FC<{ docs: Documents }> = ({ docs }) => {
 										const isActive = idx === group.activeEditorIndex;
 										return (
 											<div key={editorId} style={styles.editorPane(isActive)}>
-												<DocumentPane uri={editor.documentUri} docs={docs} />
+												<DocumentPane uri={editor.documentUri} docs={docs} bridge={bridge} />
 											</div>
 										);
 									})
@@ -476,8 +486,9 @@ const SqlAppReady: React.FC<{ docs: Documents }> = ({ docs }) => {
  *
  * @param props.uri - The document URI to render.
  * @param props.docs - The app's Documents instance (content lookup).
+ * @param props.bridge - The full app's sidebar bridge (opens a newly saved connection).
  */
-const DocumentPane: React.FC<{ uri: string; docs: Documents }> = ({ uri, docs }) => {
+const DocumentPane: React.FC<{ uri: string; docs: Documents; bridge: SqlSidebarBridge }> = ({ uri, docs, bridge }) => {
 	// Connection editor document (add/edit form as a top-level tab).
 	if (isConnectionEditorUri(uri)) {
 		return (
@@ -485,7 +496,7 @@ const DocumentPane: React.FC<{ uri: string; docs: Documents }> = ({ uri, docs })
 				key={uri}
 				connId={connectionEditorIdFromUri(uri)}
 				onCloseSelf={() => closeDocumentByUri(uri)}
-				onOpenSaved={(saved) => localSidebarBridge.openConnection(saved)}
+				onOpenSaved={(saved) => bridge.openConnection(saved)}
 			/>
 		);
 	}

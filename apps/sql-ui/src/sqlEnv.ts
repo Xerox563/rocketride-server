@@ -27,9 +27,10 @@
 // Every view and dialog reaches the engine through this ONE seam instead of
 // holding a RocketRide client. Two implementations:
 //
-//   LOCAL  (createLocalSqlEnv)  — wraps the shell client directly. Used by
-//          the full app (SqlApp), where the realm legitimately owns a
-//          connection, and by the sidebar CONTROLLER to serve the ops.
+//   LOCAL  (createLocalSqlEnv)  — over the realm's engine core (sqlCore.ts:
+//          the shared endpoint store, sessions, identity). Used by the full
+//          app (SqlApp), where the realm legitimately owns a connection; the
+//          sidebar CONTROLLER serves the ops from its own core.
 //   REMOTE (createRemoteSqlEnv) — routes every call over `controller(...)`
 //          to the tool's sidebar controller (see ops.ts / sqlBridge.ts).
 //          Used by every dev-tool document frame: frames hold NO client.
@@ -41,11 +42,9 @@
 
 import { createContext, useContext } from 'react';
 import type { ToolControllerFn } from 'shell';
-import { getBusSqlClient } from './connect/busClient';
-import type { SqlWireClient } from './connect/busClient';
 import type { SqlOps } from './ops';
-import { createSqlSession, discoverSqlEndpoints, releaseDirectEndpoint, resolveEndpoint } from './connect';
 import type { SqlEndpoint, SqlExecuteResult, SqlSchemaResponse, SqlSession, SavedSqlConnection, SqlDialect } from './connect';
+import type { SqlCore } from './sqlCore';
 
 // =============================================================================
 // THE SEAM
@@ -61,8 +60,9 @@ export interface SqlEnv {
 	 *  or reattaches its temp pipeline). */
 	resolveEndpoint(conn: SavedSqlConnection): Promise<SqlEndpoint>;
 	/** Stop a direct connection's temp pipeline, fire-and-forget (best
-	 *  effort — the idle TTL is the backstop). */
-	releaseEndpoint(key: string): void;
+	 *  effort — the idle TTL is the backstop). A no-op for a pipeline
+	 *  connection. Named by the saved connection's id. */
+	releaseEndpoint(connId: string): void;
 	/** Discover database endpoints in the server's running pipelines. */
 	discoverEndpoints(): Promise<SqlEndpoint[]>;
 	/** One service definition (the direct path's config schema). */
@@ -92,57 +92,30 @@ export function useSqlEnv(): SqlEnv {
 }
 
 // =============================================================================
-// LOCAL — over the realm's own client
+// LOCAL — over the realm's engine core
 // =============================================================================
 
-/** Session cache per endpoint key, tied to the client that created it so a
- *  reconnect (new client instance) transparently rebuilds sessions. Module
- *  level: shared across env instances in the realm (token caching). */
-const localSessions = new Map<string, { client: SqlWireClient; session: SqlSession }>();
-
 /**
- * The cached local session for an endpoint. Exported for the sidebar
- * controller, which serves the session ops from the same cache.
+ * The core-backed environment (the full app).
  *
- * @param client - The realm's RocketRide client.
- * @param endpoint - The endpoint to bind.
- * @returns The cached or freshly created session.
- */
-export function getLocalSession(client: SqlWireClient, endpoint: SqlEndpoint): SqlSession {
-	const cached = localSessions.get(endpoint.key);
-	if (cached && cached.client === client) return cached.session;
-	const session = createSqlSession(client, endpoint);
-	localSessions.set(endpoint.key, { client, session });
-	return session;
-}
-
-/**
- * The client-backed environment (full app + controller realm).
- *
- * @param client - The realm's client, or null while disconnected.
+ * @param core - The realm's engine core (sqlCore.ts).
  * @param isConnected - The shell's connection flag.
- * @returns The environment (rebuild on client/connection change).
+ * @returns The environment (rebuild on core/connection change).
  */
-export function createLocalSqlEnv(isConnected: boolean): SqlEnv {
-	// The bus-backed adapter — one stable identity per realm (busClient.ts).
-	const client = getBusSqlClient();
-	const need = (): SqlWireClient => {
-		if (!isConnected) throw new Error('Not connected to a server.');
-		return client;
-	};
+export function createLocalSqlEnv(core: SqlCore, isConnected: boolean): SqlEnv {
 	return {
 		ready: isConnected,
-		getSession: (endpoint) => getLocalSession(need(), endpoint),
-		resolveEndpoint: (conn) => resolveEndpoint(need(), conn),
-		releaseEndpoint: (key) => {
-			void releaseDirectEndpoint(client, key);
+		getSession: (endpoint) => core.sessionFor(endpoint),
+		resolveEndpoint: (conn) => core.resolve(conn.id),
+		releaseEndpoint: (connId) => {
+			void core.release(connId).catch(() => undefined);
 		},
-		discoverEndpoints: () => discoverSqlEndpoints(need()),
-		getService: (provider) => need().getService(provider),
-		validate: (pipeline) => need().validate({ pipeline }),
+		discoverEndpoints: () => core.pickable(),
+		getService: (provider) => core.getService(provider),
+		validate: (pipeline) => core.validate(pipeline),
 		getEnvironmentKeys: async () => {
 			try {
-				return await need().getEnvironmentKeys();
+				return await core.envKeys();
 			} catch {
 				return [];
 			}
@@ -188,9 +161,9 @@ export function createRemoteSqlEnv(call: ToolControllerFn<SqlOps>, ready: boolea
 		ready,
 		getSession: (endpoint) => remoteSession(call, endpoint),
 		resolveEndpoint: (conn) => call('sql.resolveEndpoint', { connId: conn.id }),
-		releaseEndpoint: (key) => {
+		releaseEndpoint: (connId) => {
 			// Fire-and-forget: a late or lost reply is fine — the TTL reaps.
-			void call('sql.releaseEndpoint', { key }).catch(() => undefined);
+			void call('sql.releaseEndpoint', { connId }).catch(() => undefined);
 		},
 		discoverEndpoints: () => call('sql.discoverEndpoints', {}),
 		getService: (provider) => call('sql.getService', { provider }),
