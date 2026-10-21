@@ -53,9 +53,12 @@ from ai.constants import (
     CONST_STATUS_HISTORY_LIMIT,
     CONST_ANALYTICS_SLOWEST_DOCS,
     CONST_TASK_DATA_PATH,
+    CONST_BILLING_UNAVAILABLE,
 )
+from ai.account.base import OutOfCreditsError
 from ai import CONST_AI_NODE_SCRIPT
 from ai.common.dap import DAPBase, DAPClient, TransportWebSocket
+from ai.common.rocketride_db import DB_PROVIDERS, db_target, dsn_key, exposes_public_endpoint
 from ai.modules.task.pipeflow import apply_pipeflow_event
 from ai.modules.task.run_log import RunLogWriter
 from rocketride import (
@@ -477,9 +480,40 @@ class Task(DAPBase):
         async def on_disconnected(self, reason=None, has_error=False):
             """
             Handle unusual disconnection on the data channel.
+
+            Forgets the channel so the next data request reconnects, and fails
+            the requests still waiting on it so their callers get an error
+            instead of waiting forever.
+
+            Args:
+                reason: Why the channel closed, if the transport knows.
+                has_error: True when the channel closed because of an error.
             """
             # Clear it so the next time we come through, we try again
             self._parent_task._data_client = None
+            # A hosted task's credit checks go over this channel: reopen it while the task runs
+            task = self._parent_task
+            if _is_saas_engine() and task._status.serviceUp and not task._is_terminating:
+                task._keep_data_client()
+            # Nothing can answer the requests still waiting on this channel
+            await super().on_disconnected(reason or 'Task data connection closed', has_error)
+
+        async def on_receive(self, message):
+            """Answer the task's credit check before it opens a pipe; the rest as usual."""
+            if message.get('type') == 'request' and message.get('command') == 'rrext_check_spend':
+                from ai.account import account
+
+                org_id = self._parent_task.org_id
+                try:
+                    refusal = await account.check_spend(org_id)
+                except Exception as e:
+                    # The ledger's error stays in the server log; the client gets a fixed one
+                    warning(f'Credit check failed for org {org_id}: {e}')
+                    await self._send(self.build_exception(message, RuntimeError(CONST_BILLING_UNAVAILABLE)))
+                    return
+                await self._send(self.build_response(message, body={'refusal': refusal}))
+                return
+            await super().on_receive(message)
 
     def __init__(
         self,
@@ -602,6 +636,7 @@ class Task(DAPBase):
         self._data_lock: asyncio.Lock = asyncio.Lock()
         self._data_port: Optional[int] = None
         self._data_client: DAPClient = None
+        self._data_keeper: Optional[asyncio.Task] = None
 
         # Status broadcasting
         self._status_update_task: Optional[asyncio.Task] = None
@@ -689,10 +724,6 @@ class Task(DAPBase):
         """
         return resolve_pipeline_env(pipeline, self._env)
 
-    # Providers that connect to the per-tenant RocketRide cloud database and
-    # therefore need ROCKETRIDE_DB_DSN injected into the task subprocess.
-    _ROCKETRIDE_DB_PROVIDERS = frozenset({'rocketride_sql', 'rocketride_vector', 'rocketride_graph'})
-
     # Reason handed to the node subprocess when this engine has no database
     # broker (a local engine, or a self-hosted one without the broker env).
     # The node prefixes it with 'RocketRide cloud database is not available
@@ -710,16 +741,135 @@ class Task(DAPBase):
         'Contact the server operator to restore the database broker configuration and retry the pipeline'
     )
 
-    def _pipeline_uses_rocketride_db(self) -> bool:
-        """True when any pipeline component is a RocketRide cloud DB node."""
-        components = self._pipeline.get('components') or []
-        return any(
-            isinstance(component, dict) and component.get('provider') in self._ROCKETRIDE_DB_PROVIDERS
-            for component in components
-        )
+    def _db_access(self, pipeline: Dict[str, Any]) -> Tuple[List[Tuple[str, str]], bool]:
+        """Every distinct ``(scope, target)`` the pipeline's DB nodes ask for
+        (empty without DB nodes), and whether it exposes a public endpoint.
 
-    async def _build_subprocess_env(self) -> Dict[str, str]:
+        Pass the resolved pipeline, the one the task runs: ``${...}``
+        expansion rewrites every string, a node's provider included, so the
+        raw pipeline can name other nodes than the ones that start.
+
+        Targets are read through ``Config.getNodeConfig``, the resolver the
+        node itself uses, so the engine authorizes exactly the key the node
+        will look up. A malformed scope or target fails the task start.
+        """
+        from ai.common.config import Config
+
+        components = pipeline.get('components') or []
+        targets: List[Tuple[str, str]] = []
+        for component in components:
+            if not isinstance(component, dict) or component.get('provider') not in DB_PROVIDERS:
+                continue
+            try:
+                pair = db_target(Config.getNodeConfig(component['provider'], component.get('config') or {}))
+            except ValueError as e:
+                raise ValueError(f'{component.get("id") or component["provider"]}: {e}') from e
+            if pair not in targets:
+                targets.append(pair)
+        return targets, exposes_public_endpoint(components)
+
+    def _db_owner(self, scope: str, target: str) -> str:
+        """The team or user id a ``(scope, target)`` names: the target, or
+        the run's own (team scope: the run's team; user scope: the run's
+        user, which a team deploy doesn't have). '' for the org scope.
+        """
+        if scope == 'org':
+            return ''
+        if target:
+            return target
+        return (self.team_id if scope == 'team' else self.client_id) or ''
+
+    def _db_identity(self, public_endpoint: bool) -> Dict[str, Any]:
+        """The run's identity for ``authorize_db_target`` (SDD 4.4)."""
+        return {
+            'org_id': self.org_id or '',
+            'user_id': self.client_id or '',
+            'team_id': self.team_id or '',
+            'run_kind': self._run_kind,
+            'owner_kind': self._owner_kind,
+            'public_endpoint': public_endpoint,
+            'path': 'pipeline',
+            'task_id': self.id,
+        }
+
+    async def _authorize_db_targets(
+        self, targets: List[Tuple[str, str]], public_endpoint: bool
+    ) -> List[Tuple[str, str, str]]:
+        """Authorize every database the pipeline's DB nodes use (SDD 4.4).
+
+        Runs before anything is provisioned. The account layer reads
+        membership live on every call; nothing is cached here.
+
+        Args:
+            targets, public_endpoint: from ``_db_access`` on the resolved
+                pipeline.
+
+        Returns:
+            ``(scope, target, owner)`` per distinct node ``(scope, target)``,
+            where ``owner`` is the team or user id the decision approved
+            (``decision.owner_id``), never re-derived here.
+
+        Raises:
+            PermissionError: a database was denied; carries the reason.
+        """
+        from ai.account import account
+
+        requested = [(scope, target, self._db_owner(scope, target)) for scope, target in targets]
+        identity = self._db_identity(public_endpoint)
+        approved: Dict[Tuple[str, str], str] = {}
+        for scope, owner in dict.fromkeys((scope, owner) for scope, _, owner in requested):
+            request: Dict[str, Any] = {'scope': scope}
+            if scope == 'team':
+                request['team_id'] = owner
+            elif scope == 'user':
+                request['user_id'] = owner
+            decision = await account.authorize_db_target(identity, request)
+            if not decision.allowed:
+                named = f' {owner!r}' if owner else ''
+                raise PermissionError(
+                    f'this run may not use the RocketRide cloud {scope} database{named}: {decision.reason}'
+                )
+            approved[(scope, owner)] = decision.owner_id
+        return [(scope, target, approved[(scope, owner)]) for scope, target, owner in requested]
+
+    async def _resolve_db_dsns(self, wanted: List[Tuple[str, str, str]]) -> Dict[str, str]:
+        """Resolve each authorized database once and key it for the nodes.
+
+        Returns:
+            The ``ROCKETRIDE_DB_DSNS`` map: ``dsn_key(scope, target)`` -> DSN.
+
+        Raises:
+            NotImplementedError: no database broker on this engine.
+            RuntimeError: a database failed to resolve; names that database.
+        """
+        from ai.account import account
+
+        dsns: Dict[Tuple[str, str], str] = {}
+        for scope, _, owner in wanted:
+            if (scope, owner) in dsns:
+                continue
+            try:
+                if scope == 'org':
+                    # Unchanged single-tenant call: the tenant is the ORG (a team
+                    # deploy has client_id='', and an org switch must not re-point
+                    # a user's nodes). client_id is the fallback with no orgs.
+                    dsns[(scope, owner)] = await account.resolve_db_dsn(self.org_id or self.client_id)
+                else:
+                    dsns[(scope, owner)] = await account.resolve_db_dsn(self.org_id, scope=scope, owner_id=owner)
+            except NotImplementedError:
+                raise
+            except Exception as e:
+                # Every node in the run gets this one reason, so it names the
+                # database that failed, not the node that reports it.
+                named = f' {owner!r}' if owner else ''
+                raise RuntimeError(f'the {scope} database{named} failed to resolve: {str(e).strip() or repr(e)}') from e
+        return {dsn_key(scope, target): dsns[(scope, owner)] for scope, target, owner in wanted}
+
+    async def _build_subprocess_env(self, db_access: Tuple[List[Tuple[str, str]], bool]) -> Dict[str, str]:
         """Build the environment for the task subprocess.
+
+        ``db_access`` is ``_db_access`` of the resolved pipeline: the
+        databases to authorize and resolve, and the public-endpoint flag.
 
         The child never gets a copy of the engine's environment: it runs user
         pipeline code, so it only inherits the allowlist in
@@ -740,7 +890,7 @@ class Task(DAPBase):
           pipelines that didn't resolve one (and must not survive a broker
           failure as a stale value pointing at who-knows-which tenant).
 
-        Children only ever get the single DSN resolved here, for pipelines
+        Children only ever get the DSNs resolved here, for pipelines
         that actually contain one of the DB nodes. Identity is NOT delivered
         through the environment (it rides the task file's 'identity' block —
         the ROCKETRIDE_* env namespace is caller-influenced by design).
@@ -749,28 +899,23 @@ class Task(DAPBase):
 
         subprocess_env.pop('ROCKETRIDE_DB_BROKER_URL', None)
         subprocess_env.pop('ROCKETRIDE_DB_BROKER_TOKEN', None)
+        subprocess_env.pop('ROCKETRIDE_DB_DSNS', None)
         subprocess_env.pop('ROCKETRIDE_DB_DSN', None)
         subprocess_env.pop('ROCKETRIDE_DB_RESOLVE_ERROR', None)
 
-        # Resolve the per-tenant DSN server-side (the SaaS account context
-        # exists only in this process) and hand it to the node subprocess via
-        # env. Scoped to pipelines that actually contain one of the DB nodes
-        # so unrelated tasks never trigger provisioning. Resolution failure is
-        # non-fatal here: the node surfaces its own clear error, with the
-        # failure reason passed down so it isn't misreported as a missing
-        # identity.
-        if self._pipeline_uses_rocketride_db():
+        # Authorize and resolve every database the DB nodes use, server-side
+        # (the SaaS account context exists only in this process), and hand
+        # the DSNs to the node subprocess as a map. Scoped to pipelines that
+        # actually contain one of the DB nodes so unrelated tasks never
+        # trigger provisioning. A denial fails the task start (a malformed
+        # scope already did, in _db_access). A resolution failure is
+        # non-fatal here: no DSN is delivered and every DB node reports the
+        # reason passed down.
+        targets, public_endpoint = db_access
+        if targets:
+            wanted = await self._authorize_db_targets(targets, public_endpoint)
             try:
-                from ai.account import account
-
-                # Tenant = the ORG (fixes the two holes of user keying: a
-                # team deploy run has client_id='' and would die at the
-                # resolver's empty-tenant guard, and an org switch would
-                # silently re-point a user's DB nodes at a different
-                # database). client_id remains the OSS/single-user fallback
-                # where no org exists.
-                dsn = await account.resolve_db_dsn(self.org_id or self.client_id)
-                subprocess_env['ROCKETRIDE_DB_DSN'] = dsn
+                dsns = await self._resolve_db_dsns(wanted)
             except NotImplementedError:
                 # Missing broker config is normal on a local engine, but on
                 # Cloud it is an operator problem, not a reason to swap nodes.
@@ -784,6 +929,8 @@ class Task(DAPBase):
                 self.debug_message(f'RocketRide DB DSN resolution failed: {e}')
                 reason = (str(e).strip().splitlines() or [repr(e)])[0]
                 subprocess_env['ROCKETRIDE_DB_RESOLVE_ERROR'] = reason
+            else:
+                subprocess_env['ROCKETRIDE_DB_DSNS'] = json.dumps(dsns)
 
         return subprocess_env
 
@@ -1009,45 +1156,20 @@ class Task(DAPBase):
             Response from pipeline's data processing system
 
         Raises:
-            RuntimeError: If task is terminating or connection fails
+            TaskError: TASK_STOPPED if the task is terminating (also during a
+                restart); the request was not sent.
+            RuntimeError: If the connection fails
         """
         # Reset idle timer - task is actively processing data
         self.reset_idle_timer()
 
-        # Prevent operations during termination
+        # Prevent operations during termination. The request never reaches the
+        # pipeline, and a restart passes through this state before the task is
+        # running again, so callers get the same code a stopped task gives.
         if self._is_terminating:
-            raise RuntimeError('Task is terminating, cannot process data requests')
+            raise TaskError(TaskError.STOPPED, 'Task is terminating, cannot process data requests')
 
-        # Thread-safe data channel access
-        async with self._data_lock:
-            # Establish the data WebSocket connection on first use.
-            # There is a race condition: the C++ engine emits the ">SVC*1" readiness
-            # signal slightly before the child process's uvicorn server has finished
-            # binding to its port. This means the first connection attempt may hit a
-            # "Connection refused" error. We retry up to 10 times (150ms apart) to
-            # give uvicorn time to start accepting connections.
-            if not self._data_client:
-                uri = f'ws://127.0.0.1:{self._data_port}/task/data'
-
-                @retry(
-                    stop=stop_after_attempt(10),
-                    wait=wait_fixed(0.15),
-                    reraise=True,
-                    before_sleep=lambda retry_state: self.debug_message(
-                        f'Data connection attempt {retry_state.attempt_number} failed, retrying in 0.15s: {retry_state.outcome.exception()}'
-                    ),
-                )
-                async def _connect_data_client():
-                    # Don't retry if subprocess has died
-                    if self._engine_process and self._engine_process.returncode is not None:
-                        raise RuntimeError(f'Subprocess exited with code {self._engine_process.returncode}')
-                    transport = TransportWebSocket(uri)
-                    name = f'DATA-{self.id}'
-                    client = Task.TaskData(parent_task=self, module=name, transport=transport)
-                    await client.connect()
-                    return client
-
-                self._data_client = await _connect_data_client()
+        await self._ensure_data_client()
 
         # Get the arguments
         args = data.get('arguments', {})
@@ -1079,9 +1201,57 @@ class Task(DAPBase):
         # Propagate subprocess failures so callers don't silently
         # receive success for a failed operation.
         if self._data_client.did_fail(response):
+            if response.get('code') == OutOfCreditsError.code:
+                raise OutOfCreditsError(response.get('message'))
             raise RuntimeError(response.get('message', 'Data request failed'))
 
         return response
+
+    def _keep_data_client(self) -> None:
+        """Open the data channel in the background; a failure is logged, the next check waits for it."""
+        if self._data_keeper and not self._data_keeper.done():
+            return
+
+        async def _open() -> None:
+            try:
+                await self._ensure_data_client()
+            except Exception as e:
+                warning(f'Task {self.id}: data channel did not open: {e}')
+
+        self._data_keeper = asyncio.create_task(_open())
+
+    async def _ensure_data_client(self) -> None:
+        """Open the data channel to the task process if it is not open yet."""
+        # Thread-safe data channel access
+        async with self._data_lock:
+            # Establish the data WebSocket connection on first use.
+            # There is a race condition: the C++ engine emits the ">SVC*1" readiness
+            # signal slightly before the child process's uvicorn server has finished
+            # binding to its port. This means the first connection attempt may hit a
+            # "Connection refused" error. We retry up to 10 times (150ms apart) to
+            # give uvicorn time to start accepting connections.
+            if not self._data_client:
+                uri = f'ws://127.0.0.1:{self._data_port}/task/data'
+
+                @retry(
+                    stop=stop_after_attempt(10),
+                    wait=wait_fixed(0.15),
+                    reraise=True,
+                    before_sleep=lambda retry_state: self.debug_message(
+                        f'Data connection attempt {retry_state.attempt_number} failed, retrying in 0.15s: {retry_state.outcome.exception()}'
+                    ),
+                )
+                async def _connect_data_client():
+                    # Don't retry if subprocess has died
+                    if self._engine_process and self._engine_process.returncode is not None:
+                        raise RuntimeError(f'Subprocess exited with code {self._engine_process.returncode}')
+                    transport = TransportWebSocket(uri)
+                    name = f'DATA-{self.id}'
+                    client = Task.TaskData(parent_task=self, module=name, transport=transport)
+                    await client.connect()
+                    return client
+
+                self._data_client = await _connect_data_client()
 
     async def _process_exit_code(self) -> Optional[int]:
         """The subprocess exit code, or None if it could not be reaped (see below).
@@ -1777,6 +1947,11 @@ class Task(DAPBase):
             # Send a status now
             await self._send_status_update()
 
+            # A hosted task asks its credit checks over the data channel, also
+            # for pipes its own sources open with no data from EaaS
+            if service_up and _is_saas_engine():
+                self._keep_data_client()
+
         # Handle status updates
         elif event_type.startswith('apaevt_status_'):
             self._update_status(message)
@@ -2309,6 +2484,11 @@ class Task(DAPBase):
             if not self._is_restarting:
                 self._status.startTime = time.time()
 
+            # The cloud databases to authorize and the public-endpoint flag
+            # come from what runs, not self._pipeline: ${...} expansion can
+            # rewrite any string, a node's provider included.
+            db_access = self._db_access(resolved)
+
             # Write it out, then let `resolved` go out of scope
             self._tmpfile = await self._write_task_file(resolved)
             del resolved
@@ -2400,7 +2580,7 @@ class Task(DAPBase):
             # ROCKETRIDE_* env namespace is caller-influenced by design.
             # _build_subprocess_env additionally scrubs the RocketRide DB
             # broker credentials and injects the resolved per-tenant DSN.
-            subprocess_env = await self._build_subprocess_env()
+            subprocess_env = await self._build_subprocess_env(db_access)
 
             # avoidMocks: strip ROCKETRIDE_MOCK so node.py loads real libraries
             if self._pipeline.get('avoidMocks'):
