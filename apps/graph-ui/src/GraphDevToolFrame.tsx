@@ -37,15 +37,16 @@
 
 import React, { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import type { CSSProperties } from 'react';
-import { Button, EmptyState } from 'shell';
+import { Banner, Button, EmptyState } from 'shell';
 import type { DevToolProps } from 'shell';
-import { ExplorerToolError, readErrorMessage } from 'shared/explorer';
-import { LiveRegion, announcer } from './adapters/explorer';
+import { announcer } from './adapters/explorer';
+import RealmLiveRegion from './components/RealmLiveRegion';
 import { createGraphFrame } from './devtool/frame';
 import type { IGraphFrame } from './devtool/frame';
+import { CONTROLLER_NOT_READY_TEXT, frameFailureText, missingConnectionText } from './devtool/frameText';
 import type { DocRoute } from './devtool/protocol';
 import { FRAME_PROTOCOL } from './devtool/wiring';
-import { GraphEnvProvider, useGraphEndpoints, useGraphEnv } from './env';
+import { GraphEnvProvider, useGraphEndpoints, useGraphEnv, useReadable } from './env';
 import { GraphIcon } from './icons';
 import ConnectionsView from './views/ConnectionsView';
 import WorkbenchView from './views/WorkbenchView';
@@ -60,16 +61,6 @@ const styles = {
 export const UNKNOWN_DOCUMENT_TITLE = 'This Graph Explorer document was not found';
 
 /**
- * Say a failure nobody awaits (a history edit, a refused refresh); a dropped (stale) call says nothing.
- *
- * @param error - The failure.
- */
-function announceFailure(error: unknown): void {
-	if (error instanceof ExplorerToolError && error.kind === 'stale') return;
-	announcer.announce(readErrorMessage(error));
-}
-
-/**
  * The dev-tool frame: one document of the tool.
  *
  * @param props - The host's DevToolProps.
@@ -78,7 +69,13 @@ function announceFailure(error: unknown): void {
 export const GraphDevTool: React.FC<DevToolProps> = ({ peer, channel, documents, docKey }) => {
 	const [frame, setFrame] = useState<IGraphFrame | null>(null);
 	useEffect(() => {
-		const created = createGraphFrame({ peer, ...(channel ? { channel } : {}), ...(documents ? { documents } : {}), docKey: docKey ?? null, ...FRAME_PROTOCOL, onError: announceFailure });
+		// A failure nobody awaits (a history record, a refresh a person asked for): said in words a person can act on
+		// ("open the sidebar" when no controller is up), never an internal op name; a dropped call says nothing.
+		const onError = (error: unknown): void => {
+			const text = frameFailureText(error, created.controllerReady.get());
+			if (text !== null) announcer.announce(text);
+		};
+		const created: IGraphFrame = createGraphFrame({ peer, ...(channel ? { channel } : {}), ...(documents ? { documents } : {}), docKey: docKey ?? null, ...FRAME_PROTOCOL, onError });
 		setFrame(created);
 		return () => {
 			created.dispose();
@@ -92,12 +89,18 @@ export const GraphDevTool: React.FC<DevToolProps> = ({ peer, channel, documents,
 /** The frame's env provider (rebuilt when `host:connection` flips) and its routed body. */
 const FrameRoot: React.FC<{ frame: IGraphFrame }> = ({ frame }) => {
 	const ready = useSyncExternalStore(frame.connected.subscribe, frame.connected.get, frame.connected.get);
+	const controllerReady = useReadable(frame.controllerReady);
 	const env = useMemo(() => frame.env(ready), [frame, ready]);
 	return (
 		<GraphEnvProvider value={env}>
 			<div style={styles.root}>
-				<LiveRegion />
-				<FrameBody route={frame.route} />
+				<RealmLiveRegion />
+				{ready && !controllerReady && (
+					<div style={{ padding: '8px 24px 0' }}>
+						<Banner variant="info">{CONTROLLER_NOT_READY_TEXT}</Banner>
+					</div>
+				)}
+				<FrameBody route={frame.route} controllerReady={controllerReady} />
 			</div>
 		</GraphEnvProvider>
 	);
@@ -107,9 +110,10 @@ const FrameRoot: React.FC<{ frame: IGraphFrame }> = ({ frame }) => {
  * The view a route renders.
  *
  * @param props.route - The frame's route.
+ * @param props.controllerReady - Whether a controller is up (a missing connection says why).
  * @returns The view.
  */
-export const FrameBody: React.FC<{ route: DocRoute }> = ({ route }) => {
+export const FrameBody: React.FC<{ route: DocRoute; controllerReady: boolean }> = ({ route, controllerReady }) => {
 	if (route.kind === 'landing') return <ConnectionsView />;
 	if (route.kind === 'unknown') {
 		return (
@@ -118,7 +122,7 @@ export const FrameBody: React.FC<{ route: DocRoute }> = ({ route }) => {
 			</div>
 		);
 	}
-	return <FrameConnectionDocument kind={route.kind} endpointKey={route.key} />;
+	return <FrameConnectionDocument kind={route.kind} endpointKey={route.key} controllerReady={controllerReady} />;
 };
 
 /**
@@ -128,24 +132,25 @@ export const FrameBody: React.FC<{ route: DocRoute }> = ({ route }) => {
  * @param props.endpointKey - The connection.
  * @returns The view, or why there is none yet.
  */
-const FrameConnectionDocument: React.FC<{ kind: 'workbench' | 'write'; endpointKey: string }> = ({ kind, endpointKey }) => {
+const FrameConnectionDocument: React.FC<{ kind: 'workbench' | 'write'; endpointKey: string; controllerReady: boolean }> = ({ kind, endpointKey, controllerReady }) => {
 	const env = useGraphEnv();
-	const { status, endpoints } = useGraphEndpoints();
+	const { status, endpoints, omitted } = useGraphEndpoints();
 	const endpoint = endpoints.find((candidate) => candidate.key === endpointKey) ?? null;
 
 	// A document restored before anything was discovered asks for discovery (an op: it also activates the controller).
+	// Automatic, so quiet: a refusal while the controller settles its identity is not announced.
 	useEffect(() => {
-		if (env.ready && status === 'idle') void env.refresh();
+		if (env.ready && status === 'idle') void env.refresh({ quiet: true });
 	}, [env, status]);
 
 	if (!endpoint) {
-		const looking = status === 'idle' || status === 'loading';
+		const missing = missingConnectionText(status, omitted, controllerReady);
 		return (
 			<div style={styles.center}>
 				<EmptyState
 					icon={<GraphIcon />}
-					title={looking ? 'Looking for this connection' : 'This connection is not listed'}
-					description={looking ? 'The sidebar is finding the graph connections of your running pipelines.' : 'Its pipeline is not running, or it belongs to another account. Open Connections to see what is available.'}
+					title={missing.title}
+					description={missing.description}
 					action={
 						<Button variant="primary" onClick={() => env.openDocument({ kind: 'connections' })}>
 							Open Connections

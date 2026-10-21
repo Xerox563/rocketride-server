@@ -51,20 +51,102 @@ describe('T5 - mount -> dispose -> mount leaves one live op server; ops answered
 		await until(() => engine.world.calls.length > 0, 'the first discovery and probe');
 		await settle();
 		const calls = engine.world.calls.length;
+		// The REAL VS Code order: the controller unmounts on the disconnect, the host publishes host:connection true at
+		// once on the reconnect, and only then (loadRemote, two React commits) does the controller remount.
 		second.controller.dispose();
+		first.h.setHostConnection(false);
+		first.h.setHostConnection(true);
+		await settle();
 		const third = mountController(engine.cm, {}, first.h, first);
 		assertSidebarSubscribers(third.spy, 'third graph controller');
 		await settle();
 		const afterReplay = engine.world.calls.filter((c, i) => i >= calls && c.tool !== 'dialect');
 		assert.deepEqual(afterReplay, [], 'nothing the frame sent before ran again (only discovery probes)');
-		// The replay reaches the op server (which drops events), not the channel; the frame says again which
-		// document it is when the host connection comes back, as it does around a VS Code controller remount.
-		first.h.setHostConnection(false);
-		first.h.setHostConnection(true);
-		await until(() => third.controller.activeConnection.get() === 'k1|some|key', 'the frame to announce itself again');
+		// The replay of the last frame event reaches the op server (which drops events), not the channel; the frame says
+		// again which document it is when it sees the NEW controller's readiness nonce.
+		await until(() => third.controller.activeConnection.get() === 'k1|some|key', 'the frame to announce itself to the new controller');
 		assert.deepEqual(first.h.violations, []);
 		frame.dispose();
 		third.controller.dispose();
+	});
+});
+
+describe('frames say which document they are once per controller, and stay quiet at mount', () => {
+	/**
+	 * The `active` events a frame signalled (transient bus signals; the retained copy is the replay slot).
+	 *
+	 * @param wire - The harness's wire log.
+	 * @returns How many.
+	 */
+	const actives = (wire: Array<{ value: unknown; transient: boolean }>): number => wire.filter((e) => e.transient && (e.value as { __rrtool?: string; name?: string })?.__rrtool === 'event' && (e.value as { name?: string }).name === 'active').length;
+
+	it('a frame mounted while the controller is ready sends `active` once, not once per retained topic it replays', async () => {
+		const engine = vscodeRealm();
+		signInVsCode(engine.realm);
+		const mounted = mountController(engine.cm);
+		mounted.h.setHostConnection(true);
+		await settle();
+		const before = actives(mounted.h.wire);
+		const { frame } = mountFrame(mounted.h, 'workbench:k1|x');
+		await settle();
+		assert.equal(actives(mounted.h.wire) - before, 1);
+		frame.dispose();
+		mounted.controller.dispose();
+	});
+
+	it('a frame that has no controller yet knows it, and announces itself when one becomes ready', async () => {
+		const engine = vscodeRealm();
+		signInVsCode(engine.realm);
+		const harness = mountController(engine.cm);
+		harness.controller.dispose();
+		harness.h.setHostConnection(true);
+		const { frame } = mountFrame(harness.h, 'workbench:k1|y');
+		await settle();
+		assert.equal(frame.controllerReady.get(), false, 'no controller: the frame can say "open the sidebar"');
+		const again = mountController(engine.cm, {}, harness.h, harness);
+		await until(() => frame.controllerReady.get(), 'the controller\'s readiness');
+		await until(() => again.controller.activeConnection.get() === 'k1|y', 'the frame announced itself to it');
+		frame.dispose();
+		again.controller.dispose();
+	});
+
+	it('the automatic first refresh is quiet: a refusal while the identity settles is not announced (an explicit one is)', async () => {
+		const engine = vscodeRealm();
+		engine.realm.root.connect(null);
+		const mounted = mountController(engine.cm);
+		mounted.h.setHostConnection(true);
+		const { frame, errors } = mountFrame(mounted.h, undefined);
+		await settle();
+		await frame.env(true).refresh({ quiet: true });
+		assert.deepEqual(errors, [], 'nothing said for the automatic refresh');
+		await frame.env(true).refresh();
+		assert.equal(errors.length, 1, 'the refresh a person asked for says why it was refused');
+		frame.dispose();
+		mounted.controller.dispose();
+	});
+
+	it('a frame\'s probe that cannot run returns "nothing tested" silently, as the full app\'s does', async () => {
+		const engine = vscodeRealm();
+		signInVsCode(engine.realm);
+		const mounted = mountController(engine.cm);
+		mounted.h.setHostConnection(false);
+		const { frame, errors } = mountFrame(mounted.h, undefined);
+		await settle();
+		assert.equal(await frame.env(false).probe('k1|any'), null);
+		assert.deepEqual(errors, []);
+		frame.dispose();
+		mounted.controller.dispose();
+	});
+
+	it('a schema load the sidebar starts by itself does not count as the user activating the tool', async () => {
+		const engine = rocketRealm();
+		engine.realm.login(account('u1'));
+		const mounted = mountController(engine.cm);
+		await mounted.controller.env(true).loadSchema('k1|unknown');
+		assert.equal(mounted.controller.activation.isOpen(), false, 'an effect-driven load opens nothing');
+		mounted.controller.env(true).openDocument({ kind: 'connections' });
+		assert.equal(mounted.controller.activation.reason(), 'user', 'a click does');
+		mounted.controller.dispose();
 	});
 });
 

@@ -52,7 +52,7 @@ import { HOST_CONNECTION_TOPIC, createFrameCaller } from 'shared/explorer/devtoo
 import type { IFrameCaller } from 'shared/explorer/devtool/frame';
 import { createFrameIdentityGuard } from 'shared/explorer/devtool/frameIdentity';
 import type { FrameResetReason, IFrameIdentityGuard } from 'shared/explorer/devtool/frameIdentity';
-import { channelFor } from 'shared/explorer/devtool/realm';
+import { CONTROLLER_STATE_TOPIC, channelFor } from 'shared/explorer/devtool/realm';
 import type { DevToolPeer } from 'shared/explorer/devtool/realm';
 import { TOOL } from '../adapters/explorer';
 import { DEVTOOL_HISTORY_PRIVACY_NOTE, memoryPrefs } from '../env';
@@ -94,6 +94,8 @@ export interface IGraphFrame {
 	readonly connected: IReadable<boolean>;
 	/** The controller's schema summaries (status, labels, failure), as last published. */
 	readonly schemas: IReadable<Record<string, IFrameSchema>>;
+	/** Whether a controller is up to carry this frame's calls (its readiness on the reserved topic). */
+	readonly controllerReady: IReadable<boolean>;
 	/** The REMOTE env (rebuild when `connected` changes). */
 	env(ready: boolean): IGraphEnv;
 	/** Why the frame last cleared its caches, or null. */
@@ -222,12 +224,21 @@ export function createGraphFrame(opts: IGraphFrameOptions): IGraphFrame {
 	let historyRev = 0;
 	offs.push(channel.onState(HOST_CONNECTION_TOPIC, (snapshot) => {
 		const value = field(snapshot, 'connected');
-		if (typeof value !== 'boolean') return;
-		const was = connected.get();
-		connected.set(value);
-		// A reconnect is when a VS Code controller remounts: its channel never hears the last event again (the
-		// replay goes to the op server, which drops events), so the frame says again which document it is.
-		if (value && !was) sendActive();
+		if (typeof value === 'boolean') connected.set(value);
+	}));
+	// Each controller mount publishes its own readiness nonce. A NEW one is a controller that has never heard this
+	// frame: a remounted controller's channel does not get the last frame event replayed (the replay goes to the op
+	// server, which drops events), and in VS Code host:connection comes back before the controller has remounted. So
+	// the frame says which document it is once per nonce, which is also once at mount when a controller is up.
+	const controllerReady = cell(false);
+	let announcedTo: string | null = null;
+	offs.push(channel.onState(CONTROLLER_STATE_TOPIC, (snapshot) => {
+		const ready = field(snapshot, 'ready');
+		const nonce = typeof ready === 'string' && ready !== '' ? ready : null;
+		controllerReady.set(nonce !== null);
+		if (nonce === null || nonce === announcedTo) return;
+		announcedTo = nonce;
+		sendActive();
 	}));
 	offs.push(channel.onState(STATE.endpoints, (snapshot) => {
 		if (Array.isArray(field(snapshot, 'endpoints'))) endpoints.set({ ...NO_ENDPOINTS, ...(snapshot as IGraphEndpointsState) });
@@ -344,7 +355,6 @@ export function createGraphFrame(opts: IGraphFrameOptions): IGraphFrame {
 		const payload: IActiveEvent = consumed === undefined ? { docKey } : { docKey, consumed };
 		channel.sendEvent(EVENT.active, payload);
 	}
-	sendActive();
 	const focusTarget = opts.focusTarget !== undefined ? opts.focusTarget : typeof window !== 'undefined' ? window : null;
 	const onFocus = (): void => sendActive();
 	focusTarget?.addEventListener('focus', onFocus);
@@ -403,6 +413,7 @@ export function createGraphFrame(opts: IGraphFrameOptions): IGraphFrame {
 		guard,
 		connected,
 		schemas,
+		controllerReady,
 		lastReset: () => resetWhy,
 		env(ready) {
 			const cached = envs.get(ready);
@@ -411,11 +422,13 @@ export function createGraphFrame(opts: IGraphFrameOptions): IGraphFrame {
 				mount: 'frame',
 				ready,
 				endpoints,
-				refresh: (o) => caller.callReply(OP.refreshEndpoints, o?.reprobe ? { reprobe: true } : {}, { timeoutMs: frameTimeoutFor(OP.refreshEndpoints) }).then(() => undefined, report),
-				probe: (key) => caller.callReply(OP.probe, { key }, { timeoutMs: frameTimeoutFor(OP.probe) }).then((value) => value as IProbeResult | null, (error: unknown) => {
-					report(error);
-					return null;
+				// An automatic refresh (quiet) says nothing when refused: at mount the controller may still be settling its
+				// identity, and the endpoints state says what happened.
+				refresh: (o) => caller.callReply(OP.refreshEndpoints, o?.reprobe ? { reprobe: true } : {}, { timeoutMs: frameTimeoutFor(OP.refreshEndpoints) }).then(() => undefined, (error: unknown) => {
+					if (!o?.quiet) report(error);
 				}),
+				// Silent, as the full app's probe: a probe that cannot run is "nothing was tested" (testResultText).
+				probe: (key) => caller.callReply(OP.probe, { key }, { timeoutMs: frameTimeoutFor(OP.probe) }).then((value) => value as IProbeResult | null, () => null),
 				schemaLabels: keyed(labelsSource, [] as readonly string[]),
 				schemas: null,
 				loadSchema: (key, o) => caller.callReply(OP.loadSchema, o?.fresh ? { key, fresh: true } : { key }, { timeoutMs: frameTimeoutFor(OP.loadSchema) }).then(() => undefined, report),

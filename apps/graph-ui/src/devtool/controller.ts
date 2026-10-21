@@ -462,16 +462,15 @@ export function createGraphController(opts: IGraphControllerOptions): IGraphCont
 				prefs: sidebarPrefs,
 				historyPrivacyNote: DEVTOOL_HISTORY_PRIVACY_NOTE,
 				refresh: (o) => {
-					activation.open('user');
-					return discovery.allowed() ? stores.endpoints.refresh(client, o) : Promise.resolve();
+					// A refresh asked for in the sidebar; an automatic one (quiet) is not the user activating the tool.
+					if (!o?.quiet) activation.open('user');
+					return discovery.allowed() ? stores.endpoints.refresh(client, { reprobe: o?.reprobe === true }) : Promise.resolve();
 				},
 			});
+			// The sidebar loads the active connection's schema by itself (an effect): that is not a user action, and a
+			// connection can only be active once the tool is, so loadSchema opens nothing.
 			const env: IGraphEnv = {
 				...local,
-				loadSchema: (key, o) => {
-					activation.open('user');
-					return local.loadSchema(key, o);
-				},
 				previews: {
 					...local.previews,
 					request: (input) => {

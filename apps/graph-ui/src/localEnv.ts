@@ -151,7 +151,7 @@ export function createLocalGraphEnv(opts: ILocalGraphEnvOptions): IGraphEnv {
 		mount: opts.mount,
 		ready: opts.ready,
 		endpoints,
-		refresh: opts.refresh ?? ((o) => (client ? stores.endpoints.refresh(client, o) : Promise.resolve())),
+		refresh: opts.refresh ?? ((o) => (client ? stores.endpoints.refresh(client, { reprobe: o?.reprobe === true }) : Promise.resolve())),
 		probe: (key) => (client ? stores.endpoints.probe(client, key) : Promise.resolve(null)),
 		schemaLabels,
 		schemas: stores.schemas,

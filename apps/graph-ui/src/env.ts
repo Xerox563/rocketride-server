@@ -87,8 +87,11 @@ export interface IGraphEnv {
 	ready: boolean;
 	/** Discovered connections and their probes. */
 	endpoints: IReadable<IGraphEndpointsState>;
-	/** Discover (and probe) now; failures show in `endpoints`. */
-	refresh(opts?: { reprobe?: boolean }): Promise<void>;
+	/**
+	 * Discover (and probe) now; failures show in `endpoints`. `quiet`: an automatic refresh (a mount) says nothing when
+	 * it is refused (the state says what happened); one a person asked for says why.
+	 */
+	refresh(opts?: { reprobe?: boolean; quiet?: boolean }): Promise<void>;
 	/** Test one connection again (null: nothing was tested). */
 	probe(key: string): Promise<IProbeResult | null>;
 	/** A connection's schema label names (graph colours). */

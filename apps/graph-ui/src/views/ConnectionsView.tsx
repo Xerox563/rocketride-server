@@ -50,9 +50,10 @@ export const ConnectionsView: React.FC = () => {
 	const { status, endpoints, probes, error, omitted } = useGraphEndpoints();
 	const [drawerKey, setDrawerKey] = useState<string | null>(null);
 
-	// First discovery as soon as the engine connection is live.
+	// First discovery as soon as the engine connection is live. Automatic, so quiet: a refusal (a dev-tool controller
+	// still settling its identity) is not announced; the state says what happened.
 	useEffect(() => {
-		if (isConnected && status === 'idle') void env.refresh();
+		if (isConnected && status === 'idle') void env.refresh({ quiet: true });
 	}, [env, isConnected, status]);
 
 	// A sign-out or a change of identity resets the store: the drawer closes with the connections it forgot.

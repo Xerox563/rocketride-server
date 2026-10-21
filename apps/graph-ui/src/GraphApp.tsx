@@ -47,7 +47,7 @@ import type { Documents, ShellAppProps } from 'shell';
 import { identityFingerprint, identityFromConnectResult } from 'shared/explorer';
 import type { IExplorerEndpoint, IPrefsAccessor } from 'shared/explorer';
 import { getBusExplorerClient } from 'shared/explorer/devtool/busClient';
-import { LiveRegion, activeConnection, appPreviews, dataVersions, graphEndpoints, graphHistory, schemas } from './adapters/explorer';
+import { activeConnection, appPreviews, dataVersions, graphEndpoints, graphHistory, schemas } from './adapters/explorer';
 import { GraphHistoryPrefsBridge, useEndpointStoreLifecycle } from './adapters/react';
 import { APP_HISTORY_PRIVACY_NOTE, GraphEnvProvider, useGraphEndpoints } from './env';
 import type { DocTarget } from './env';
@@ -58,6 +58,7 @@ import { createDocs, destroyDocs, getDocs } from './docs';
 import { forgetConnections } from './graph/identityChange';
 import type { IConnectionDocPayload } from './docs';
 import GraphSidebar from './GraphSidebar';
+import RealmLiveRegion from './components/RealmLiveRegion';
 import { GraphIcon } from './icons';
 import ConnectionsView from './views/ConnectionsView';
 import WorkbenchView from './views/WorkbenchView';
@@ -182,8 +183,8 @@ const GraphAppReady: React.FC<{ docs: Documents }> = ({ docs }) => {
 
 	return (
 		<div style={styles.container}>
-			{/* One polite live region for the whole app; every announcement goes through it. */}
-			<LiveRegion />
+			{/* One polite live region for the whole realm (dev-tool documents may share it); every announcement goes through it. */}
+			<RealmLiveRegion />
 			{/* History only records while a bridge is mounted; this one is app-level so a run in a tab whose connection page was closed still records. */}
 			<GraphHistoryPrefsBridge />
 			<DocSplitLayout

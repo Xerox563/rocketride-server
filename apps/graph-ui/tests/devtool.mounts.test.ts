@@ -25,6 +25,9 @@ import { createPreviewStore } from '../src/graph/previews';
 import { createSchemaStore } from '../src/graph/schemaStore';
 import { COPY_BLOCKED_NOTE, GRID_NOTICE } from '../src/graph/wording';
 import { chooseWorkerStrategy } from '../src/layout/workerStrategy';
+import { ExplorerToolError } from 'shared/explorer';
+import { CONTROLLER_NOT_READY_TEXT, frameFailureText, missingConnectionText } from '../src/devtool/frameText';
+import { createRegionClaims } from '../src/realmRegion';
 import { createLocalGraphEnv } from '../src/localEnv';
 import { graphRow, mountController, mountFrame, readOnlyNode, signInVsCode, until, vscodeRealm } from './support/devtool';
 
@@ -160,8 +163,8 @@ describe('T9 - docKey routing for every family', () => {
 		const frame = code(read('GraphDevToolFrame.tsx'));
 		assert.match(frame, /if \(route\.kind === 'landing'\) return <ConnectionsView \/>;/);
 		assert.match(frame, /if \(route\.kind === 'unknown'\) \{[\s\S]*?title=\{UNKNOWN_DOCUMENT_TITLE\}/);
-		assert.match(frame, /return <FrameConnectionDocument kind=\{route\.kind\} endpointKey=\{route\.key\} \/>;/);
-		assert.match(frame, /<FrameBody route=\{frame\.route\} \/>/);
+		assert.match(frame, /return <FrameConnectionDocument kind=\{route\.kind\} endpointKey=\{route\.key\} controllerReady=\{controllerReady\} \/>;/);
+		assert.match(frame, /<FrameBody route=\{frame\.route\} controllerReady=\{controllerReady\} \/>/);
 	});
 });
 
@@ -233,7 +236,7 @@ describe('R6 - one wiring module; mounts built in effects', () => {
 		assert.match(sidebar, /useEffect\(\(\) => \{[\s\S]*?const created = createGraphController\(\{[\s\S]*?return \(\) => \{\s*created\.dispose\(\);/);
 		assert.doesNotMatch(sidebar, /useMemo\(\(\) => createGraphController|peer\.subscribe/);
 		const frame = code(read('GraphDevToolFrame.tsx'));
-		assert.match(frame, /useEffect\(\(\) => \{\s*const created = createGraphFrame\(\{[\s\S]*?return \(\) => \{\s*created\.dispose\(\);/);
+		assert.match(frame, /useEffect\(\(\) => \{[\s\S]*?const created: IGraphFrame = createGraphFrame\(\{[\s\S]*?return \(\) => \{\s*created\.dispose\(\);/);
 		assert.doesNotMatch(frame, /useMemo\(\(\) => createGraphFrame|peer\.subscribe/);
 	});
 });
@@ -246,6 +249,60 @@ describe('R7 - the sidebar opens documents only on a click', () => {
 		for (const effect of effects) assert.doesNotMatch(effect, /openDocument|previews\.request/);
 		const select = sidebar.slice(sidebar.indexOf('const select = '), sidebar.indexOf('const open = '));
 		assert.match(select, /env\.openDocument\(/);
+	});
+});
+
+describe('one live region per realm (rocket-ui runs several Graph documents in one realm)', () => {
+	it('the first mounted region is the one that speaks; when it unmounts the next takes over; none is left after the last', () => {
+		const claims = createRegionClaims();
+		const a = {};
+		const b = {};
+		const c = {};
+		claims.claim(a);
+		claims.claim(b);
+		claims.claim(c);
+		assert.equal(claims.owner(), a, 'exactly one region speaks');
+		let changes = 0;
+		const off = claims.subscribe(() => { changes += 1; });
+		claims.release(a);
+		assert.equal(claims.owner(), b, 'the next one takes over');
+		claims.release(c);
+		assert.equal(claims.owner(), b);
+		claims.release(b);
+		assert.equal(claims.owner(), null);
+		claims.claim(a);
+		claims.claim(a);
+		claims.release(a);
+		assert.equal(claims.owner(), null, 'a claim is per token, not counted twice');
+		assert.ok(changes > 0);
+		off();
+	});
+
+	it('every mount renders the realm\'s region, portalled to the page so a hidden tab cannot silence it', () => {
+		for (const file of ['GraphDevToolFrame.tsx', 'GraphApp.tsx']) {
+			const text = code(read(file));
+			assert.match(text, /<RealmLiveRegion \/>/, `${file} renders the realm's region`);
+			assert.doesNotMatch(text, /<LiveRegion \/>/, `${file} renders no region of its own`);
+		}
+		const region = code(read('components/RealmLiveRegion.tsx'));
+		assert.match(region, /createPortal\(<LiveRegion \/>, document\.body\)/);
+	});
+});
+
+describe('what a frame says when it cannot reach the controller', () => {
+	it('a call that was never sent because no controller is up says to open the sidebar, not the op\'s name; a dropped call says nothing', () => {
+		const notSent = new ExplorerToolError({ kind: 'timeout', tool: 'graph.refreshEndpoints', message: "'graph.refreshEndpoints' was not sent: the tool's controller did not become ready within 15s." });
+		assert.equal(frameFailureText(notSent, false), CONTROLLER_NOT_READY_TEXT);
+		assert.doesNotMatch(CONTROLLER_NOT_READY_TEXT, /graph\./);
+		assert.equal(frameFailureText(new ExplorerToolError({ kind: 'stale', tool: 'x', message: 'dropped' }), true), null);
+		assert.equal(frameFailureText(new ExplorerToolError({ kind: 'unavailable', tool: 'x', message: 'Not signed in.' }), true), 'Not signed in.');
+	});
+
+	it('a connection a document cannot find says why: no sidebar yet, still looking, left out of a capped list, or not listed', () => {
+		assert.equal(missingConnectionText('idle', 0, false).description, CONTROLLER_NOT_READY_TEXT);
+		assert.match(missingConnectionText('loading', 0, true).title, /Looking/);
+		assert.match(missingConnectionText('ready', 12, true).description, /too many connections/);
+		assert.match(missingConnectionText('ready', 0, true).description, /not running, or it belongs to another account/);
 	});
 });
 
