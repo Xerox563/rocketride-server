@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — since 2026-10-16
 
+### Fixed
+
+- Pipeline Builder: Run is no longer locked with "Subscription required" on an OSS server, where every app is free (#2787).
+
 ## [3.5.0] - 2026-10-16
 
 ### Added
