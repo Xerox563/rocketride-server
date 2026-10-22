@@ -742,23 +742,23 @@ def _real(settings):
 @pytest.mark.parametrize(
     ('settings', 'text', 'estimate'),
     [
-        # 120 chars is 10 s of talking head: 0.265 credits
+        # 120 chars is 8 billed seconds of talking head: 0.213 credits
         (
-            {'action': 'talking_head', 'output': 'video', 'default_avatar': 'A', 'max_credits_per_call': 0.25},
+            {'action': 'talking_head', 'output': 'video', 'default_avatar': 'A', 'max_credits_per_call': 0.2},
             'x' * 120,
-            0.265,
+            0.213,
         ),
-        # personality mode assumes the avatar rewrites to 500 chars: 1.113 credits however short the text
+        # personality mode assumes the avatar rewrites to 500 chars: 0.8755 credits however short the text
         (
             {
                 'action': 'talking_head',
                 'output': 'video',
                 'text_mode': 'personality',
                 'default_avatar': 'A',
-                'max_credits_per_call': 1.0,
+                'max_credits_per_call': 0.8,
             },
             'hi',
-            1.113,
+            0.8755,
         ),
         # 5 s 720p draft scene video: 0.077 credits against a cap just under it
         (

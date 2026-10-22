@@ -256,14 +256,29 @@ def round_up_credits(credits: float) -> float:
     return math.ceil(round(credits * 1000, 6)) / 1000
 
 
+# Masky's own billing for speech (talking head, audio, live turns): seconds are
+# estimated from the spoken text, max(1, round(chars / 15)), plus a flat fee for
+# the text step. Confirmed by Masky on 2026-10-22 and reproduced exactly by our
+# three measured charges (0.004, 0.3985, 0.7165).
+SPEECH_BILLING_CHARS_PER_SEC = 15
+SPEECH_TEXT_STEP_FEE = 0.001
+
+
+def billed_speech_seconds(chars: int) -> int:
+    """Masky's billed seconds for ``chars`` characters of spoken text: max(1, round(chars / 15)), rounding half up."""
+    return max(1, math.floor(chars / SPEECH_BILLING_CHARS_PER_SEC + 0.5))
+
+
 def speech_seconds(text: str) -> int:
     """Conservative spoken length of ``text`` in whole seconds (at least 1)."""
     return max(1, math.ceil(len(text or '') / CHARS_PER_SEC))
 
 
-def _estimate(credits: float, basis: str, rates: tuple) -> Dict[str, Any]:
+def _estimate(credits: float, basis: str, rates: tuple, *, exact: bool = False) -> Dict[str, Any]:
     return {
-        'credits': round_up_credits(credits),
+        # Speech follows Masky's formula, which bills to four decimals; everything else
+        # rounds up to 0.001 so the guard errs high.
+        'credits': round(credits, 4) if exact else round_up_credits(credits),
         'basis': basis,
         'price_table_date': PRICE_TABLE_DATE,
         'verified': not any(r in UNVERIFIED_PRICES for r in rates),
@@ -273,18 +288,23 @@ def _estimate(credits: float, basis: str, rates: tuple) -> Dict[str, Any]:
 def estimate_speak(text: str, output: str, text_mode: str = 'literal') -> Dict[str, Any]:
     """Talking head (video) or voice-only (audio) speech.
 
-    In ``personality`` mode the avatar rewrites the text, so its length is unknown:
-    the estimate assumes the full 500 characters and is marked unverified.
+    Uses Masky's billing formula (seconds estimated from the text, plus the text-step
+    fee). In ``personality`` mode Masky bills the rewritten line, whose length is
+    unknown: the estimate assumes the full 500 characters and is marked unverified.
     """
     rewritten = text_mode == 'personality'
     chars = max(len(text or ''), LIMITS['speech_chars']) if rewritten else len(text or '')
-    seconds = max(1, math.ceil(chars / CHARS_PER_SEC))
+    seconds = billed_speech_seconds(chars)
     rate_key = 'talking_head_per_sec' if output == 'video' else 'audio_per_sec'
     rate = PRICES[rate_key]
     label = 'talking-head video' if output == 'video' else 'audio'
     what = f'a rewrite assumed to be {chars} chars' if rewritten else f'{chars} chars'
     est = _estimate(
-        seconds * rate, f'{seconds} s of {label} at {rate} credits/s ({what} at {CHARS_PER_SEC} chars/s)', (rate_key,)
+        seconds * rate + SPEECH_TEXT_STEP_FEE,
+        f'{seconds} s of {label} at {rate} credits/s plus {SPEECH_TEXT_STEP_FEE} for the text step '
+        f"({what} at {SPEECH_BILLING_CHARS_PER_SEC} chars/s, Masky's billing formula)",
+        (rate_key,),
+        exact=True,
     )
     if rewritten:
         est['verified'] = False

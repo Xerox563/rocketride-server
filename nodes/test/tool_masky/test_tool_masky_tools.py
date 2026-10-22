@@ -591,16 +591,73 @@ def test_round_up_credits():
 
 def test_estimate_speak_audio_32_chars():
     est = core.estimate_speak('x' * 32, 'audio')
-    assert est['credits'] == 0.005 and est['verified'] is True
-    assert est['price_table_date'] == core.PRICE_TABLE_DATE and '3 s' in est['basis']
+    assert est['credits'] == 0.004 and est['verified'] is True
+    assert est['price_table_date'] == core.PRICE_TABLE_DATE and '2 s' in est['basis']
 
 
 def test_estimate_speak_talking_head_verified():
     # 0.0265 credits per rendered second was measured on 2026-10-20 (15.04 s cost 0.3985).
     est = core.estimate_speak('x' * 32, 'video')
-    assert est['credits'] == 0.08 and est['verified'] is True
+    assert est['credits'] == 0.054 and est['verified'] is True  # 2 s x 0.0265 + 0.001 text step
 
-    # Masky bills one frame past the request, so estimates add a 0.1 s margin.
+
+@pytest.mark.parametrize(
+    ('chars', 'output', 'credits', 'seconds'),
+    [(32, 'audio', 0.004, 2), (223, 'video', 0.3985, 15), (400, 'video', 0.7165, 27)],
+)
+def test_estimate_speak_reproduces_measured_masky_charges(chars, output, credits, seconds):
+    assert core.billed_speech_seconds(chars) == seconds
+    assert core.estimate_speak('x' * chars, output)['credits'] == credits
+
+
+@pytest.mark.parametrize(
+    ('chars', 'seconds'),
+    [
+        (0, 1),
+        (1, 1),
+        (2, 1),
+        (3, 1),
+        (4, 1),
+        (5, 1),
+        (6, 1),
+        (7, 1),
+        (8, 1),
+        (22, 1),
+        (23, 2),
+        (37, 2),
+        (38, 3),
+        (105, 7),
+    ],
+)
+def test_billed_speech_seconds_edges(chars, seconds):
+    assert core.billed_speech_seconds(chars) == seconds
+
+
+def test_personality_video_passes_default_cap_and_is_refused_at_a_lower_one():
+    client = FakeClient()
+    _run(_driver(client), 'speak', avatar_id='A', text='hi', output='video', text_mode='personality')  # 0.8755 < 1.0
+    assert 'speak' in client.names()
+    low = FakeClient()
+    with pytest.raises(MaskyError) as ei:
+        _run(
+            _driver(low, settings={'max_credits_per_call': 0.8}),
+            'speak',
+            avatar_id='A',
+            text='hi',
+            output='video',
+            text_mode='personality',
+        )
+    assert 'Max Credits per Call' in str(ei.value)
+    assert low.calls == []
+
+
+def test_500_char_literal_talking_head_video_passes_default_cap():
+    est = core.estimate_speak('x' * 500, 'video')
+    assert est['credits'] == 0.8755  # 33 s
+    core.check_budget(est, 1.0)
+    client = FakeClient()
+    _run(_driver(client), 'speak', avatar_id='A', text='x' * 500, output='video')
+    assert 'speak' in client.names()
 
 
 def test_estimate_video_rates():
@@ -657,8 +714,8 @@ def test_check_budget_message_and_disable():
 def test_driver_speak_over_cap_makes_no_client_call():
     client = FakeClient()
     with pytest.raises(MaskyError) as ei:
-        _run(_driver(client), 'speak', avatar_id='A', text='x' * 500)  # ~1.113 credits as video > default cap 1.0
-    assert 'cap' in str(ei.value)
+        _run(_driver(client, settings={'max_credits_per_call': 0.5}), 'speak', avatar_id='A', text='x' * 500)
+    assert 'cap' in str(ei.value)  # 500 chars as video is 0.8755 credits > cap 0.5
     assert client.calls == []
 
 
@@ -686,7 +743,7 @@ def test_driver_estimate_cost_within_cap():
     client = FakeClient()
     out = _run(_driver(client), 'estimate_cost', kind='speak', text='x' * 32, output='audio')
     assert (
-        out['estimated_credits'] == 0.005 and out['cap'] == 1.0 and out['within_cap'] is True and out['kind'] == 'speak'
+        out['estimated_credits'] == 0.004 and out['cap'] == 1.0 and out['within_cap'] is True and out['kind'] == 'speak'
     )
     out = _run(
         _driver(client, settings={'max_credits_per_call': 0.001}),
@@ -729,7 +786,7 @@ def test_driver_402_mentions_estimate():
         _run(_driver(client), 'speak', avatar_id='A', text='x' * 32, output='audio')
     msg = str(ei.value)
     assert msg.count('insufficient credits') == 1 and msg.count('Top up') == 1
-    assert 'estimated at 0.005' in msg
+    assert 'estimated at 0.004' in msg
     assert ei.value.status == 402
 
 
@@ -739,7 +796,7 @@ def test_driver_402_keeps_masky_credit_numbers_without_repeating():
     with pytest.raises(MaskyError) as ei:
         _run(_driver(client), 'speak', avatar_id='A', text='x' * 32, output='audio')
     msg = str(ei.value)
-    assert '(needs 12.5, available 3)' in msg and 'estimated at 0.005' in msg
+    assert '(needs 12.5, available 3)' in msg and 'estimated at 0.004' in msg
     assert msg.count('insufficient credits') == 1 and msg.count('Top up') == 1
 
 
@@ -876,7 +933,7 @@ def test_driver_speak_202_is_queued_and_records_cost():
     d = _driver(FakeClient())
     r = _run(d, 'speak', avatar_id='A', text='x' * 32, output='audio')
     assert r['status'] == 'queued' and r['generation_id'] == 'speak:G1'
-    assert r['estimated_credits'] == 0.005 and r['media'] == {'mime': 'audio/mpeg'}
+    assert r['estimated_credits'] == 0.004 and r['media'] == {'mime': 'audio/mpeg'}
     assert 'userId' not in json.dumps(r) and 'firestorePath' not in json.dumps(r)
 
 
@@ -1979,9 +2036,9 @@ def test_estimate_speak_has_no_live_rates_parameter_and_uses_the_table():
     import inspect
 
     assert list(inspect.signature(core.estimate_speak).parameters) == ['text', 'output', 'text_mode']
-    text = 'x' * 120  # 10 s
+    text = 'x' * 120  # 8 billed seconds
     audio = core.estimate_speak(text, 'audio')
-    assert audio['credits'] == core.round_up_credits(10 * core.PRICES['audio_per_sec']) == 0.015
+    assert audio['credits'] == round(8 * core.PRICES['audio_per_sec'] + 0.001, 4) == 0.013
     assert f'{core.PRICES["audio_per_sec"]} credits/s' in audio['basis']
     with pytest.raises(TypeError):
         core.estimate_speak(text, 'audio', 'literal', core.rates_from_pricing(PRICING))
@@ -2058,7 +2115,7 @@ def test_estimate_cost_uses_live_pricing():
     assert 'live Masky pricing' in video['basis']
     assert video['estimated_credits'] == core.round_up_credits(5.1 * 0.02)
     audio = _run(d, 'estimate_cost', kind='speak', text='x' * 120, output='audio')
-    assert audio['estimated_credits'] == 0.015  # speech is never priced from the live audio rate
+    assert audio['estimated_credits'] == 0.013  # speech is never priced from the live audio rate
 
 
 def test_render_uses_live_rate_in_receipt_estimate():
@@ -2256,11 +2313,12 @@ def test_estimate_speak_personality_assumes_500_chars_and_is_unverified():
     assert core.CHAT_REPLY_CHARS == 500
     lit = core.estimate_speak('hi', 'audio')
     per = core.estimate_speak('hi', 'audio', 'personality')
-    assert lit['credits'] == 0.002 and lit['verified'] is True
-    assert per['credits'] == 0.063 and per['verified'] is False  # 500 chars -> 42 s
-    assert core.estimate_speak('hi', 'video', 'personality')['credits'] == 1.113
+    assert lit['credits'] == 0.0025 and lit['verified'] is True
+    assert per['credits'] == 0.0505 and per['verified'] is False  # 500 chars -> 33 s
+    assert per['assumed_rewrite'] is True
+    assert core.estimate_speak('hi', 'video', 'personality')['credits'] == 0.8755
     long = core.estimate_speak('x' * 600, 'audio', 'personality')
-    assert long['credits'] == core.round_up_credits(50 * 0.0015)  # never below the text length
+    assert long['credits'] == round(40 * 0.0015 + 0.001, 4)  # never below the text length
     assert core.estimate_speak('x' * 24, 'audio', 'literal') == core.estimate_speak('x' * 24, 'audio')
 
 
@@ -2283,9 +2341,9 @@ def test_estimate_turn_reinterpret_and_chat_assume_reply_length_plain_speak_does
 
 def test_estimate_cost_accepts_text_mode_and_reinterpret():
     d = _driver(FakeClient())
-    assert _run(d, 'estimate_cost', kind='speak', text='hi', output='audio')['estimated_credits'] == 0.002
+    assert _run(d, 'estimate_cost', kind='speak', text='hi', output='audio')['estimated_credits'] == 0.0025
     personality = _run(d, 'estimate_cost', kind='speak', text='hi', output='audio', text_mode='personality')
-    assert personality['estimated_credits'] == 0.063 and personality['verified'] is False
+    assert personality['estimated_credits'] == 0.0505 and personality['verified'] is False
     assert _run(d, 'estimate_cost', kind='turn', text='hi', mode='speak')['estimated_credits'] == 0.002
     assert (
         _run(d, 'estimate_cost', kind='turn', text='hi', mode='speak', reinterpret=True)['estimated_credits'] == 0.063
@@ -2296,16 +2354,16 @@ def test_speak_job_passes_text_mode_to_the_estimate_and_the_cap():
     client = FakeClient()
     d = _driver(client, settings={'max_credits_per_call': 0.5})
     with pytest.raises(MaskyError, match='cap'):
-        _run(d, 'speak', avatar_id='A', text='hi', output='video', text_mode='personality')  # 1.113 assumed
+        _run(d, 'speak', avatar_id='A', text='hi', output='video', text_mode='personality')  # 0.8755 assumed
     assert client.calls == []
-    out = _run(d, 'speak', avatar_id='A', text='hi', output='video', text_mode='literal')  # 0.027
+    out = _run(d, 'speak', avatar_id='A', text='hi', output='video', text_mode='literal')  # 0.054
     assert client.args_of('speak')[0][1]['textMode'] == 'literal'
     assert out['estimated_credits'] <= 0.5
     # personality is the estimate recorded on the receipt too, when the cap allows it
     big = _driver(FakeClient(), settings={'max_credits_per_call': 2})
     assert (
         _run(big, 'speak', avatar_id='A', text='hi', output='video', text_mode='personality')['estimated_credits']
-        == 1.113
+        == 0.8755
     )
 
 
@@ -2439,7 +2497,7 @@ def test_agent_estimate_cost_ignores_pipeline_settings():
     assert _run(d, 'estimate_cost', kind='video')['estimated_credits'] == 0.077
     assert _run(d, 'estimate_cost', kind='image')['estimated_credits'] == 0.005
     assert _run(d, 'estimate_cost', kind='image', image_url='https://i/x.png')['estimated_credits'] == 0.01
-    assert _run(d, 'estimate_cost', kind='speak', text='hi', output='audio')['estimated_credits'] == 0.002
+    assert _run(d, 'estimate_cost', kind='speak', text='hi', output='audio')['estimated_credits'] == 0.0025
 
 
 def test_bind_agent_kind_maps_to_body():
@@ -2627,7 +2685,7 @@ def test_wait_without_turn_id_gets_accurate_warning():
 def test_assumed_rewrite_refusal_names_the_setting(tool, args):
     fc = FakeClient()
     with pytest.raises(MaskyError) as info:
-        _run(_driver(fc), tool, **args)  # default cap 1.0; estimated 1.113
+        _run(_driver(fc, settings={'max_credits_per_call': 0.8}), tool, **args)  # estimated 0.8755
     message = str(info.value)
     assert 'Max Credits per Call' in message and 'writes 500 characters' in message
     assert fc.calls == []
@@ -2635,7 +2693,7 @@ def test_assumed_rewrite_refusal_names_the_setting(tool, args):
 
 def test_plain_refusal_has_no_rewrite_hint():
     with pytest.raises(MaskyError) as info:
-        core.check_budget(core.estimate_speak('x' * 480, 'video'), 1.0)
+        core.check_budget(core.estimate_speak('x' * 480, 'video'), 0.8)
     assert 'Max Credits per Call' in str(info.value) and 'writes 500 characters' not in str(info.value)
 
 

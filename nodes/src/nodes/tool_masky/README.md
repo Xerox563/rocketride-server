@@ -111,7 +111,7 @@ Required `avatar_id` and `image_url` (a public http(s) image up to 12 MB; Masky 
 
 ### `masky.speak`
 
-Required `text`, up to 500 characters. Optional `avatar_id` (defaults to **Default Avatar**), `output` (`video` for a lip-synced talking head, the default, or `audio`), `look_id` or `look_url`, `language`, `text_mode` (`literal` or `personality`) and `wait_for_completion` (default false). With `text_mode` `personality` the avatar rewrites the text, so the estimate assumes the full 500 characters. At the default 1.0 cap a personality-mode talking-head **video** is therefore always refused (estimated 1.113); audio passes. Returns a receipt with `spoken_text`, `share_url` and `reused`. Without waiting, the receipt is `queued`, unless Masky answers at once (for example a reused identical request), when it is `done`; check a queued job with `get_generation`. A video job whose video fails but whose audio rendered returns `failed` with the audio attached as media.
+Required `text`, up to 500 characters. Optional `avatar_id` (defaults to **Default Avatar**), `output` (`video` for a lip-synced talking head, the default, or `audio`), `look_id` or `look_url`, `language`, `text_mode` (`literal` or `personality`) and `wait_for_completion` (default false). The estimate uses Masky's billing formula: seconds estimated from the text as `max(1, round(characters / 15))`, times the rate, plus 0.001 for the text step. With `text_mode` `personality` Masky bills the rewritten line, whose length is unknown, so the estimate assumes the full 500 characters (0.8755 credits for a video, which passes the default 1.0 cap; a lower cap refuses it). Returns a receipt with `spoken_text`, `share_url` and `reused`. Without waiting, the receipt is `queued`, unless Masky answers at once (for example a reused identical request), when it is `done`; check a queued job with `get_generation`. A video job whose video fails but whose audio rendered returns `failed` with the audio attached as media.
 
 ### `masky.generate_video`
 
@@ -187,7 +187,7 @@ Supply the API key, choose the pipeline action, and set the defaults used when a
 
 **Pipeline Action** decides what the node does with each record in a pipeline: `talking_head` (the default), `scene_video`, `image` or `live`. The panel shows only the chosen action's settings:
 
-- **Talking head:** Output (video or audio) and Text Mode. The record must be 500 characters or fewer; at the default 1.0 cap, talking-head video records longer than about 440 characters, and every talking-head video in Personality mode, are refused by the cost guard, so raise the cap for those. The same applies to live video turns in Chat mode.
+- **Talking head:** Output (video or audio) and Text Mode. The record must be 500 characters or fewer. Estimates follow Masky's billing formula, so any talking-head video up to 500 characters (at most 0.8755 credits) passes the default 1.0 cap.
 - **Scene video:** Quality, Aspect Ratio, Frame Rate, Duration, Seed, Silent, Expand Prompt, Share Page, Source Image URL and Speech Line. The record is the prompt, up to 2,000 characters.
 - **Image:** Generation Engine, Edit Engine and Source Image URL. The record is the prompt, or the edit instruction when a source image is set.
 - **Live:** Conversation, Turn Mode, Turn Output and Wait for Each Turn.
