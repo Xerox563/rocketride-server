@@ -329,16 +329,23 @@ jobs:
         #       after the appropriate fixes have been made, see #743 #1048 for details.
         run: ${{ matrix.builder_cmd }} test --verbose --sequential
 
-      # What the test servers printed; the job log carries only the clients'
-      # side. Small text files, uploaded only on failure, so a week is cheap.
-      - name: Upload test server logs
+      # The test servers' side of a failure. Printed rather than uploaded:
+      # storage-cleanup.yml deletes artifacts after 3 days, the job log stays.
+      # Workflow commands are stopped around each file so log lines stay inert.
+      - name: Show test server logs
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: test-server-logs-${{ matrix.platform }}
-          retention-days: 7
-          path: ${{ github.workspace }}/dist/server/test-logs/
-          if-no-files-found: ignore
+        shell: bash
+        run: |
+          shopt -s nullglob
+          stop="stop-$(date +%s%N)-$$"
+          for log in dist/server/test-logs/*.log; do
+            echo "::group::$log"
+            echo "::stop-commands::$stop"
+            cat "$log"
+            echo
+            echo "::$stop::"
+            echo "::endgroup::"
+          done
 
       - name: Perform CodeQL Analysis
         if: inputs.codeql && matrix.platform == 'ubuntu'

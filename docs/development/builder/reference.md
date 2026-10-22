@@ -125,7 +125,7 @@ only.
 | `build/` | Temporary build artifacts |
 | `dist/` | Final distributable outputs |
 | `dist/server/` | Engine executable and runtime |
-| `dist/server/test-logs/` | Output of the test servers, one `<suite>-server.log` per suite, written with `--verbose` and always in CI. Each run replaces the file of the previous one. CI uploads it as an artifact when tests fail. Not packaged |
+| `dist/server/test-logs/` | Output of the test servers, one `<suite>-server.log` per suite, written with `--verbose` and always in CI. Each run replaces the file of the previous one. When tests fail, CI prints these files into the job log (step "Show test server logs"). Not packaged |
 | `dist/clients/` | Client library packages |
 | `dist/vscode/` | VSCode extension (.vsix) |
 | `dist/examples/` | Example applications |
