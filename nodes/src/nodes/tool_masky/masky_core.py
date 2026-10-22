@@ -686,7 +686,7 @@ def mp4_info(data: bytes) -> Dict[str, Any]:
             continue
         for sub, sbody, send in _boxes(data, body, end):
             if sub == b'mvhd':
-                if data[sbody] == 1:
+                if data[sbody : sbody + 1] == b'\x01':  # slice: an empty box must not raise
                     scale, duration = (
                         int.from_bytes(data[sbody + 20 : sbody + 24], 'big'),
                         int.from_bytes(data[sbody + 24 : sbody + 32], 'big'),
@@ -701,7 +701,7 @@ def mp4_info(data: bytes) -> Dict[str, Any]:
             elif sub == b'trak' and 'width' not in info:
                 for tk, tbody, _ in _boxes(data, sbody, send):
                     if tk == b'tkhd':
-                        off = tbody + (88 if data[tbody] == 1 else 76)
+                        off = tbody + (88 if data[tbody : tbody + 1] == b'\x01' else 76)
                         width, height = (
                             int.from_bytes(data[off : off + 4], 'big') >> 16,
                             int.from_bytes(data[off + 4 : off + 8], 'big') >> 16,

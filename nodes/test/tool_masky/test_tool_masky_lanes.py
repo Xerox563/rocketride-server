@@ -1128,3 +1128,21 @@ def test_live_receipt_has_no_warnings_when_every_turn_is_confirmed():
     run(inst, 'Hello there. How are you?')
     receipt = json.loads(inst.instance.of('writeText')[0][0])
     assert receipt['status'] == 'done' and 'warnings' not in receipt
+
+
+def _box(kind, body=b''):
+    return (8 + len(body)).to_bytes(4, 'big') + kind + body
+
+
+@pytest.mark.parametrize(
+    'data',
+    [
+        _box(b'ftyp', b'isom') + _box(b'moov', _box(b'mvhd')),  # empty mvhd at the very end
+        _box(b'ftyp', b'isom') + _box(b'moov', _box(b'trak', _box(b'tkhd'))),  # empty tkhd at the very end
+        _box(b'moov', _box(b'mvhd', b'\x00')),  # mvhd cut off after the version byte
+    ],
+)
+def test_truncated_mp4_boxes_do_not_raise(data):
+    # media_details runs after a paid render and download: a malformed file must degrade, not fail the record
+    assert core.mp4_info(data) == {}
+    assert core.media_details('video/mp4', data) == {'size_bytes': len(data)}
