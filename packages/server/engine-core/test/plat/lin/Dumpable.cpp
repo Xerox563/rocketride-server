@@ -26,7 +26,7 @@
 #include <sys/prctl.h>
 
 TEST_CASE("plat::lin closes the process") {
-    // plat::init() has run by now: the flag is 0, unless this run asked to
+    // ap::init() has run by now: the flag is 0, unless this run asked to
     // keep a debugger's way in (1, true, yes or on, in any case)
     auto value = plat::env("RR_ENABLE_DEBUGGER_CONNECTION");
     value.trim();

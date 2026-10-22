@@ -27,8 +27,6 @@
 
 namespace ap::plat::lin {
 
-namespace {
-
 // Closes this process to the other processes of its user. Reading its
 // /proc/<pid>/environ and memory, and ptrace, need its dumpable flag at 1, and
 // the engine and the tasks of every caller can run as one user. So the flag
@@ -64,12 +62,7 @@ void closeProcess() noexcept {
         dev::fatality(_location, "Could not clear the process's dumpable flag");
 }
 
-}  // namespace
-
 void init() noexcept {
-    // Before Crashpad, which finds the flag as it is when a crash comes
-    closeProcess();
-
     // Crashpad starts once, as early as possible, so a fault during startup is
     // still caught. Recovering the previous run's dumps is plat::minidumpSweep(),
     // called once the monitor and the per-task location exist -- no re-register
