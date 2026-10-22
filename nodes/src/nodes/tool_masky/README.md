@@ -55,7 +55,7 @@ The server name defaults to `masky`, registering the functions below as `masky.<
 | `masky.generate_image` | Generates an image. |
 | `masky.edit_image` | Edits or composes images. |
 | `masky.get_generation` | Checks a render by job id. |
-| `masky.estimate_cost` | Estimates a render's credits without calling Masky. |
+| `masky.estimate_cost` | Estimates a render's credits; makes no render request. |
 | `masky.create_conversation` | Starts a live conversation. |
 | `masky.set_conversation_visibility` | Makes a conversation public or private. |
 | `masky.send_turn` | Sends one turn into a live conversation. |
