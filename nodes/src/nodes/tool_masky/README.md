@@ -243,7 +243,7 @@ A look's `look_id` is Masky's asset id. The avatar's primary profile image has n
 
 ### Live conversations
 
-New conversations start private; use `set_conversation_visibility` to change that. If Masky rejects a turn outright, the pipeline step raises an error and sends no further turns from that record, even with **Wait for Each Turn** off; waiting only changes whether the node also waits for each accepted turn to finish rendering.
+New conversations start private; use `set_conversation_visibility` to change that. If Masky rejects a turn outright, the pipeline step raises an error and sends no further turns from that record, even with **Wait for Each Turn** off; waiting only changes whether the node also waits for each accepted turn to finish rendering. If Masky accepts a turn but returns no turn id to poll, that turn is recorded as `sent`, the record's remaining turns are still sent, and the receipt's `warnings` say which turn could not be confirmed.
 
 ### Nothing can be deleted through the API
 

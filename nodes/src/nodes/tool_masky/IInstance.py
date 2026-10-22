@@ -177,8 +177,8 @@ class IInstance(IInstanceBase):
         )
         conversation = driver.live_conversation(settings.get('conversation', ''))
         wait = bool(settings.get('wait_for_turn', True))
-        turn_ids, statuses, estimated, charged = [], [], 0.0, None
-        for chunk in chunks:
+        turn_ids, statuses, estimated, charged, warnings = [], [], 0.0, None, []
+        for index, chunk in enumerate(chunks, 1):
             turn = driver.turn_job(
                 conversation_id=conversation['conversation_id'],
                 slug=conversation['conversation_slug'],
@@ -198,6 +198,14 @@ class IInstance(IInstanceBase):
                     f'Live turn {turn.get("turn_id")} failed in conversation {conversation["conversation_slug"]}. '
                     f'Turns sent from this record so far: {sent}.'
                 )
+            if turn.get('unconfirmed'):
+                # The turn was sent (and may be charged) but could not be polled. Record it
+                # as sent and carry on, so the rest of the record is not dropped.
+                statuses[-1] = 'sent'
+                reason = '; '.join(turn.get('warnings') or ['Masky gave no way to poll it'])
+                label = turn.get('turn_id') or f'{index} of {len(chunks)}'
+                warnings.append(f'Turn {label} was sent but could not be confirmed: {reason}')
+                continue
             if wait and turn.get('status') != 'done':
                 timeout = settings.get('timeout_sec', 300)
                 raise MaskyError(
@@ -209,11 +217,15 @@ class IInstance(IInstanceBase):
             'share_url': conversation.get('share_url'),
             'live_url': conversation.get('live_url'),
             'turn_ids': turn_ids,
-            'status': 'done' if wait else 'sent',
+            'status': 'done' if wait and not warnings else 'sent',
             'turn_statuses': statuses,
             'estimated_credits': round(estimated, 3),
             'credits_charged': None if charged is None else round(charged, 4),
         }
+        if warnings:
+            receipt['warnings'] = warnings
+            for message in warnings:
+                warning(f'Masky ({conversation["conversation_slug"]}): {message}')
         self.instance.writeText(json.dumps(receipt))
 
     def _deliver(self, receipt: Dict[str, Any]) -> None:

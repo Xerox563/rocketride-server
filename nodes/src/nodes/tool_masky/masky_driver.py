@@ -1682,6 +1682,9 @@ class MaskyDriver(ToolsBase):
                 ]
         else:
             shaped = self._shape_turn(turn, output, include_urls)
+            if wait:
+                # Sent, but the node could not poll it: callers must not treat this as a timeout.
+                shaped['unconfirmed'] = True
             if wait and not slug:
                 shaped['warnings'] = [
                     'Not waited for: pass the conversation slug (not only conversation_id) so the node can poll the turn. Check it later with get_turns.'

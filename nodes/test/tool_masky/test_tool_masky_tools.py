@@ -2637,3 +2637,14 @@ def test_plain_refusal_has_no_rewrite_hint():
     with pytest.raises(MaskyError) as info:
         core.check_budget(core.estimate_speak('x' * 480, 'video'), 1.0)
     assert 'Max Credits per Call' in str(info.value) and 'writes 500 characters' not in str(info.value)
+
+
+def test_turn_without_id_is_flagged_unconfirmed_not_timed_out():
+    fc = FakeClient(send_turn={'turn': {'role': 'user', 'status': 'pending'}, 'async': True})
+    d = _driver(fc)
+    slug = _run(d, 'create_conversation', avatar_id='A')['conversation_slug']
+    out = d.turn_job(conversation_id='C1', slug=slug, text='hi', mode='speak', output='audio', wait=True)
+    assert out['unconfirmed'] is True and out['status'] == 'running'
+    assert 'did not return a turn id' in out['warnings'][0]
+    confirmed = d.turn_job(conversation_id='C1', slug=slug, text='hi', mode='speak', output='audio', wait=False)
+    assert 'unconfirmed' not in confirmed

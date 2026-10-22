@@ -1077,3 +1077,54 @@ def test_download_http_403(http):
     http['resp'] = FakeResp(status=403)
     with pytest.raises(MaskyError, match='expired'):
         MaskyClient('k').download('https://signed/x')
+
+
+class UnconfirmedTurnDriver(LiveDriver):
+    """Second turn comes back without an id, so the driver could not poll it."""
+
+    def turn_job(self, **kw):
+        self.turns.append(kw)
+        n = len(self.turns)
+        if n == 2:
+            return {
+                'turn_id': None,
+                'status': 'running',
+                'estimated_credits': self.credits,
+                'unconfirmed': True,
+                'warnings': [
+                    'Not waited for: Masky did not return a turn id to poll. Check the conversation with get_turns.'
+                ],
+            }
+        return {'turn_id': f'T{n}', 'status': 'done', 'estimated_credits': self.credits}
+
+
+def test_live_unconfirmed_turn_is_marked_sent_and_record_continues():
+    text = _sentences(1200)
+    driver = UnconfirmedTurnDriver()
+    inst = build(
+        {'action': 'live', 'conversation': '', 'turn_mode': 'speak', 'turn_output': 'audio', 'wait_for_turn': True},
+        driver,
+    )
+    run(inst, text)  # must not raise "Still rendering"
+
+    chunks = len(driver.turns)
+    assert chunks >= 3, 'every chunk of the record is still sent after the unconfirmed turn'
+    receipt = json.loads(inst.instance.of('writeText')[0][0])
+    assert receipt['status'] == 'sent'
+    assert receipt['turn_statuses'][1] == 'sent'
+    assert all(s == 'done' for i, s in enumerate(receipt['turn_statuses']) if i != 1)
+    assert len(receipt['warnings']) == 1
+    assert receipt['warnings'][0].startswith(f'Turn 2 of {chunks} was sent but could not be confirmed')
+    assert 'did not return a turn id' in receipt['warnings'][0]
+    assert 'Render Timeout' not in receipt['warnings'][0]
+
+
+def test_live_receipt_has_no_warnings_when_every_turn_is_confirmed():
+    driver = LiveDriver()
+    inst = build(
+        {'action': 'live', 'conversation': '', 'turn_mode': 'speak', 'turn_output': 'audio', 'wait_for_turn': True},
+        driver,
+    )
+    run(inst, 'Hello there. How are you?')
+    receipt = json.loads(inst.instance.of('writeText')[0][0])
+    assert receipt['status'] == 'done' and 'warnings' not in receipt
