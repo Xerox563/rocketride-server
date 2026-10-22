@@ -36,10 +36,11 @@ def _popen_raises(monkeypatch):
     monkeypatch.setattr(subprocess, 'Popen', _popen)
 
 
-def test_shared_host_refuses_stdio_before_launching(monkeypatch):
+@pytest.mark.parametrize('flags', [('--hosted', '--shared-host'), ('--shared-host',)])
+def test_shared_host_refuses_stdio_before_launching(monkeypatch, flags):
     launched = []
     monkeypatch.setattr(subprocess, 'Popen', lambda *a, **k: launched.append(a))
-    _argv_with(monkeypatch, '--hosted', '--shared-host')
+    _argv_with(monkeypatch, *flags)
 
     with pytest.raises(RuntimeError, match='not available on RocketRide Cloud'):
         McpStdioClient(command='true', args=[]).start()
