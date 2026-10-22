@@ -222,6 +222,11 @@ class IInstance(IInstanceBase):
             'estimated_credits': round(estimated, 3),
             'credits_charged': None if charged is None else round(charged, 4),
         }
+        if charged is None:
+            receipt['credits_note'] = (
+                'Masky charges each rendered turn, but its turn record does not report the charge yet; '
+                'see the credit ledger on masky.ai.'
+            )
         if warnings:
             receipt['warnings'] = warnings
             for message in warnings:

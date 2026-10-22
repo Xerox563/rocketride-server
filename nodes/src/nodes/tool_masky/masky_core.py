@@ -362,17 +362,26 @@ def estimate_image(*, edit: bool, engine: str) -> Dict[str, Any]:
 
 
 def estimate_turn(text: str, *, mode: str, output: str, reinterpret: bool = False) -> Dict[str, Any]:
-    """One live-conversation turn: the avatar speaks the text (speak) or its own reply (chat, or reinterpreted speak)."""
-    chars = len(text or '') if (mode == 'speak' and not reinterpret) else max(len(text or ''), CHAT_REPLY_CHARS)
+    """One live-conversation turn: the avatar speaks the text (speak) or its own reply (chat, or reinterpreted speak).
+
+    Masky charges each rendered turn with the same formula as speech (seconds estimated
+    from the spoken text plus the text-step fee).
+    """
+    literal = mode == 'speak' and not reinterpret
+    chars = len(text or '') if literal else max(len(text or ''), CHAT_REPLY_CHARS)
     rate_key = 'talking_head_per_sec' if output == 'video' else 'audio_per_sec'
-    seconds = max(1, math.ceil(chars / CHARS_PER_SEC))
+    seconds = billed_speech_seconds(chars)
     rate = PRICES[rate_key]
-    what = (
-        'the text' if (mode == 'speak' and not reinterpret) else f'text the avatar writes, assumed to be {chars} chars'
+    what = 'the text' if literal else f'text the avatar writes, assumed to be {chars} chars'
+    est = _estimate(
+        seconds * rate + SPEECH_TEXT_STEP_FEE,
+        f'{seconds} s of {output} speaking {what} at {rate} credits/s plus {SPEECH_TEXT_STEP_FEE} for the text step '
+        "(Masky's billing formula; turns are charged after they render)",
+        (rate_key,),
+        exact=True,
     )
-    est = _estimate(seconds * rate, f'{seconds} s of {output} speaking {what} at {rate} credits/s', (rate_key,))
-    est['verified'] = False  # live-turn billing has not been measured
-    if not (mode == 'speak' and not reinterpret):
+    if not literal:
+        est['verified'] = False
         est['assumed_rewrite'] = True
     return est
 

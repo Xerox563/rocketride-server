@@ -157,7 +157,7 @@ Pass `slug` or `conversation_id`, plus required `text` (up to 500 characters). O
 - `reinterpret`: speak mode only; lets the avatar rewrite the text in its own voice.
 - `wait_for_agent`: wait until the turn renders. Waiting needs the slug (or a conversation created in this run); with only an unknown `conversation_id`, the result says it did not wait.
 
-Chat and reinterpreted turns are estimated as if the avatar writes 500 characters, because their length is unknown. At the default 1.0 cap that refuses every chat-mode or reinterpreted **video** turn (estimated 1.113 credits), whatever the input length; audio turns (0.063) pass. Raise **Max Credits per Call** to send video chat turns. Returns `{turn_id, role, status, user_text, avatar_text, media, share_url, created_at, credits_charged, estimated_credits, conversation_slug, warnings?}`.
+Turns are charged after they render, with the same formula as `speak`. Chat and reinterpreted turns are estimated as if the avatar writes 500 characters, because their length is unknown (0.8755 credits for a video turn, 0.0505 for audio). `credits_charged` is null for now: Masky's turn record shows 0 even after the charge lands, so the node does not pass that on. Returns `{turn_id, role, status, user_text, avatar_text, media, share_url, created_at, credits_charged, estimated_credits, conversation_slug, warnings?}`.
 
 ### `masky.get_turns`
 

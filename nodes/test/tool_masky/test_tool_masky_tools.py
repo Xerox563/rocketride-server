@@ -694,12 +694,14 @@ def test_estimate_image_edit_and_generate():
 
 
 def test_estimate_turn_chat_vs_speak():
+    # Masky bills turns like speech: max(1, round(chars / 15)) s x rate + 0.001.
     speak = core.estimate_turn('x' * 24, mode='speak', output='audio')
-    assert speak['credits'] == 0.003 and speak['verified'] is False
+    assert speak['credits'] == 0.004 and speak['verified'] is True  # 2 s
     chat = core.estimate_turn('x', mode='chat', output='audio')
-    assert chat['credits'] == 0.063  # 500 assumed chars -> 42 s
+    assert chat['credits'] == 0.0505 and chat['verified'] is False  # 500 assumed chars -> 33 s
     assert chat['credits'] > speak['credits']
-    assert core.estimate_turn('x' * 24, mode='speak', output='video')['credits'] == 0.053
+    assert core.estimate_turn('x' * 24, mode='speak', output='video')['credits'] == 0.054
+    assert core.estimate_turn('x', mode='chat', output='video')['credits'] == 0.8755
 
 
 def test_check_budget_message_and_disable():
@@ -771,8 +773,8 @@ def test_driver_estimate_cost_kinds():
     assert (
         _run(d, 'estimate_cost', kind='image', image_url='https://i/x.png', engine='qwen')['estimated_credits'] == 0.03
     )
-    assert _run(d, 'estimate_cost', kind='turn', text='hi')['estimated_credits'] == 0.063  # chat default
-    assert _run(d, 'estimate_cost', kind='turn', text='hi', mode='speak')['estimated_credits'] == 0.002
+    assert _run(d, 'estimate_cost', kind='turn', text='hi')['estimated_credits'] == 0.0505  # chat default
+    assert _run(d, 'estimate_cost', kind='turn', text='hi', mode='speak')['estimated_credits'] == 0.0025
 
 
 # ---------------------------------------------------------------------------
@@ -1269,14 +1271,14 @@ def test_send_turn_uses_cached_conversation_and_payload():
     assert client.args_of('send_turn') == [('C1', {'userText': 'hi', 'mode': 'speak', 'output': 'audio'})]
     assert 'get_conversation' not in client.names()
     assert out['turn_id'] == 'T1' and out['status'] == 'running' and out['user_text'] == 'hi'
-    assert out['conversation_slug'] == 'c-26-10-abcd' and out['estimated_credits'] == 0.002
+    assert out['conversation_slug'] == 'c-26-10-abcd' and out['estimated_credits'] == 0.0025
 
 
 def test_send_turn_defaults_chat_audio_and_conversation_id():
     client = FakeClient()
     out = _run(_driver(client), 'send_turn', conversation_id='C7', text='hi')
     assert client.args_of('send_turn') == [('C7', {'userText': 'hi', 'mode': 'chat', 'output': 'audio'})]
-    assert out['estimated_credits'] == 0.063
+    assert out['estimated_credits'] == 0.0505
 
 
 def test_send_turn_unknown_slug_fetches_conversation():
@@ -1735,11 +1737,20 @@ def test_video_job_wait_returns_ready_receipt(clock):
     assert receipt['status'] == 'done' and 'get_video' in client.names()
 
 
-def test_turn_receipt_carries_actual_credits():
-    # Masky reports creditCost per turn; a live speak/audio turn measured 0 on 2026-10-20.
+def test_turn_receipt_never_passes_on_maskys_zero_credit_cost():
+    # Masky charges every rendered turn, but its turn record shows creditCost 0 (a Masky bug,
+    # confirmed 2026-10-22): the receipt must say "unknown" (null), never 0.
     d = _driver(FakeClient())
     shaped = d._shape_turn({'id': 'T1', 'status': 'audio', 'output': 'audio', 'creditCost': 0}, 'audio')
-    assert shaped['credits_charged'] == 0 and shaped['status'] == 'done'
+    assert shaped['credits_charged'] is None and shaped['status'] == 'done'
+    missing = d._shape_turn({'id': 'T2', 'status': 'audio', 'output': 'audio'}, 'audio')
+    assert missing['credits_charged'] is None
+
+
+def test_turn_receipt_passes_on_a_real_charge_once_masky_reports_it():
+    d = _driver(FakeClient())
+    shaped = d._shape_turn({'id': 'T1', 'status': 'audio', 'output': 'audio', 'creditCost': 0.004}, 'audio')
+    assert shaped['credits_charged'] == 0.004
 
 
 # ---------------------------------------------------------------------------
@@ -2323,20 +2334,21 @@ def test_estimate_speak_personality_assumes_500_chars_and_is_unverified():
 
 
 def test_estimate_turn_reinterpret_and_chat_assume_reply_length_plain_speak_does_not():
-    assert core.estimate_turn('hi', mode='speak', output='audio')['credits'] == 0.002
-    assert core.estimate_turn('hi', mode='speak', output='audio', reinterpret=True)['credits'] == 0.063
-    assert core.estimate_turn('hi', mode='chat', output='audio')['credits'] == 0.063
-    assert core.estimate_turn('hi', mode='chat', output='audio', reinterpret=True)['credits'] == 0.063
+    assert core.estimate_turn('hi', mode='speak', output='audio')['credits'] == 0.0025
+    assert core.estimate_turn('hi', mode='speak', output='audio', reinterpret=True)['credits'] == 0.0505
+    assert core.estimate_turn('hi', mode='chat', output='audio')['credits'] == 0.0505
+    assert core.estimate_turn('hi', mode='chat', output='audio', reinterpret=True)['credits'] == 0.0505
     # the assumption is a floor, never below the text itself
-    assert core.estimate_turn('x' * 600, mode='speak', output='audio', reinterpret=True)[
-        'credits'
-    ] == core.round_up_credits(50 * 0.0015)
-    assert core.estimate_turn('x' * 600, mode='speak', output='audio')['credits'] == core.round_up_credits(50 * 0.0015)
-    assert all(
-        core.estimate_turn('hi', mode=m, output='audio', reinterpret=r)['verified'] is False
-        for m in ('chat', 'speak')
-        for r in (False, True)
-    )
+    assert core.estimate_turn('x' * 600, mode='speak', output='audio', reinterpret=True)['credits'] == round(
+        40 * 0.0015 + 0.001, 4
+    )  # 600 chars -> 40 s
+    assert core.estimate_turn('x' * 600, mode='speak', output='audio')['credits'] == round(
+        40 * 0.0015 + 0.001, 4
+    )  # 600 chars -> 40 s
+    # Masky's formula is confirmed: only the assumed-length cases (chat, reinterpret) are unverified.
+    for m, r in (('chat', False), ('chat', True), ('speak', True)):
+        assert core.estimate_turn('hi', mode=m, output='audio', reinterpret=r)['verified'] is False
+    assert core.estimate_turn('hi', mode='speak', output='audio')['verified'] is True
 
 
 def test_estimate_cost_accepts_text_mode_and_reinterpret():
@@ -2344,9 +2356,9 @@ def test_estimate_cost_accepts_text_mode_and_reinterpret():
     assert _run(d, 'estimate_cost', kind='speak', text='hi', output='audio')['estimated_credits'] == 0.0025
     personality = _run(d, 'estimate_cost', kind='speak', text='hi', output='audio', text_mode='personality')
     assert personality['estimated_credits'] == 0.0505 and personality['verified'] is False
-    assert _run(d, 'estimate_cost', kind='turn', text='hi', mode='speak')['estimated_credits'] == 0.002
+    assert _run(d, 'estimate_cost', kind='turn', text='hi', mode='speak')['estimated_credits'] == 0.0025
     assert (
-        _run(d, 'estimate_cost', kind='turn', text='hi', mode='speak', reinterpret=True)['estimated_credits'] == 0.063
+        _run(d, 'estimate_cost', kind='turn', text='hi', mode='speak', reinterpret=True)['estimated_credits'] == 0.0505
     )
 
 

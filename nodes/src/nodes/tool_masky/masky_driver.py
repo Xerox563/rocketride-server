@@ -596,7 +596,7 @@ class MaskyDriver(ToolsBase):
                     'Send one turn into a live conversation. Required: slug (or conversation_id), text (up to 500 chars). Optional: mode '
                     '(chat: the avatar answers; speak: it says the text as written; default chat), output (audio|video, default audio), '
                     'wait_for_agent (wait until the turn renders; needs the slug). Returns {turn_id, status, user_text, avatar_text, media, share_url, '
-                    'credits_charged, estimated_credits, warnings?}.'
+                    'credits_charged (null until Masky reports turn charges), estimated_credits, warnings?}.'
                 ),
                 'schema': _obj(
                     {
@@ -1623,7 +1623,9 @@ class MaskyDriver(ToolsBase):
             'media': media,
             'share_url': turn.get('shareUrl'),
             'created_at': turn.get('createdAt'),
-            'credits_charged': turn.get('creditCost'),
+            # Masky's turn record shows creditCost 0 even after the turn is charged (a Masky
+            # bug); the real charge is only in the account's credit ledger. Never pass on a 0.
+            'credits_charged': turn.get('creditCost') or None,
         }
 
     def _send_turn(self, a: Dict[str, Any]) -> Dict[str, Any]:
