@@ -202,7 +202,7 @@ On by default. Turn it off on any node bound to an agent: results then carry job
 
 ### Default Avatar and Default Look
 
-**Default Avatar** takes an avatar id or `@handle` and is used whenever a call or record names no avatar; talking head and live need one. **Default Look** takes a `look_id` or a look URL; blank uses the avatar's primary image. It is used by `speak` and `create_conversation`, and by the talking_head and live actions; scene video uses a look only when one is passed.
+**Default Avatar** takes an avatar id or `@handle` and is used whenever a call or record names no avatar; talking head and live need one. **Default Look** takes a `look_id` or a look URL; blank uses the avatar's primary image. It is used by `speak` and `create_conversation`, by the talking_head action, and by the live action only when the node creates a new conversation; with an existing **Conversation** slug, that conversation keeps its own look. Scene video uses a look only when one is passed.
 
 ### Aspect Ratio
 
