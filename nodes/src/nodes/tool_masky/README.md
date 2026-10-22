@@ -234,20 +234,21 @@ Masky's media links are signed and expire after about an hour. The pipeline step
 
 A look's `look_id` is Masky's asset id. The avatar's primary profile image has none, so the node derives one from a hash of the image URL. Job ids carry their kind (`speak:<id>`, `video:<id>`, `image:<id>`) because Masky polls each kind at a different endpoint. Image results are returned immediately and can't be looked up later: an `image:` id resolves only within the run that created it.
 
-### Cost and speed (measured 2026-10-20)
+### Cost and speed
 
-- **Talking head:** bills 0.0265 credits per rendered second; a 15.04 s clip cost 0.3985. Rendering takes about 3× the clip length (46 s for that clip). The node's estimate assumes 12 characters per spoken second, which overestimates normal speech by about a quarter.
+- **Talking head and audio:** Masky bills on estimated seconds from the text, not on the rendered length: `max(1, round(characters / 15))` seconds at 0.0265 credits per second for a talking head (0.0015 for voice-only audio), plus 0.001 for the text step. The node's estimates use the same formula, so they match the charge for literal text; a 223-character line was estimated as 15 s and charged 0.3985. In personality mode Masky bills the rewritten line. Rendering takes about 3× the clip length (46 s for that clip).
 - **Scene video:** a 720p draft 5 s clip rendered as 5.04 s (1280×704) in 53 s and cost 0.0756. Masky bills the rendered length, which runs one frame past the request, so scene-video estimates add 0.1 s. Scene video renders at about 10× the clip length, against about 3× for talking heads, so set **Render Timeout** with that in mind.
 - **Images:** a default-engine image cost 0.005 and returned in about 3.5 s.
-- **Live turns:** a speak-mode audio turn finished in about 14 s and Masky charged 0 credits for it; the node still estimates turns at the audio rate.
+- **Live turns:** each rendered turn is charged with the same formula as speech; a speak-mode audio turn finished in about 14 s. Masky's turn record currently shows 0 for the charge (a Masky bug), so receipts report `credits_charged` as null; the real charge is in the credit ledger on masky.ai.
+- **Failed video with audio:** when a talking-head video fails but its audio rendered, Masky charges only the audio.
 
 ### Live conversations
 
 New conversations start private; use `set_conversation_visibility` to change that. If Masky rejects a turn outright, the pipeline step raises an error and sends no further turns from that record, even with **Wait for Each Turn** off; waiting only changes whether the node also waits for each accepted turn to finish rendering. If Masky accepts a turn but returns no turn id to poll, that turn is recorded as `sent`, the record's remaining turns are still sent, and the receipt's `warnings` say which turn could not be confirmed.
 
-### Nothing can be deleted through the API
+### What can be deleted
 
-Masky has no delete endpoint for avatars, looks, conversations, turns or generations, so this node cannot clean any of them up. Remove test avatars, conversations and renders on masky.ai.
+Masky can delete conversations and their turns (a turn delete is soft and can be restored). It has no delete for avatars, looks or generations, so remove test avatars, looks and renders on masky.ai.
 
 ### Not supported
 
