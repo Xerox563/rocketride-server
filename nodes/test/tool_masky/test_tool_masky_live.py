@@ -47,6 +47,7 @@ _install_stubs()
 try:
     from tool_masky.masky_client import MaskyClient  # noqa: E402
     from tool_masky.masky_driver import MaskyDriver  # noqa: E402
+    from tool_masky import masky_core as core  # noqa: E402
 finally:
     for _n, _m in _saved.items():
         if _m is None:
@@ -130,10 +131,15 @@ def test_load_pricing_live_returns_parsed_rates(client):
 
 def test_estimate_cost_makes_no_http_requests(client):
     d = MaskyDriver(server_name='masky', client=client)
-    d.load_pricing()
+    live_rates = d.load_pricing()
     client.sent.clear()
     speak = _run(d, 'estimate_cost', kind='speak', text='Hello from the live test.', output='audio')
     video = _run(d, 'estimate_cost', kind='video', resolution='720p', draft=True, duration_sec=5)
-    assert speak['estimated_credits'] > 0 and video['estimated_credits'] > 0
-    assert 'live Masky pricing' in video['basis']
+    assert speak['estimated_credits'] > 0
+    # Whatever Masky charges today, the estimate uses the higher of its live rate and the
+    # dated table, for 5 s plus the billing margin. (Not the basis label: that depends on prices.)
+    table = core.PRICES['video_per_sec'][('720p', True)]
+    live = (live_rates or {}).get('video_per_sec', {}).get(('720p', True)) or table
+    seconds = 5 + core.VIDEO_BILLING_MARGIN_SEC
+    assert video['estimated_credits'] == core.round_up_credits(seconds * max(live, table))
     assert client.sent == []
