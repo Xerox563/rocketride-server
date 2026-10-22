@@ -120,6 +120,11 @@ def read_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
         'default_look': str(cfg.get('defaultLook') or '').strip(),
         'language': str(cfg.get('language') or 'en').strip(),
         'include_media_urls': parse_bool(cfg.get('includeMediaUrls', True)),
+        # Permission switches for agent tools (all off by default). readOnly does not
+        # affect the pipeline action; allowPublicSharing also applies to scene_video.
+        'read_only': parse_bool(cfg.get('readOnly', False)),
+        'allow_delete': parse_bool(cfg.get('allowDelete', False)),
+        'allow_public_sharing': parse_bool(cfg.get('allowPublicSharing', False)),
         'action': _choice(cfg, 'action', 'talking_head', ACTIONS),
         # talking_head
         'output': _choice(cfg, 'output', 'video', ('video', 'audio')),
@@ -156,6 +161,10 @@ def config_warnings(cfg: Dict[str, Any]) -> List[str]:
     except ValueError as e:
         found.append(str(e))
         return found
+    if settings['action'] == 'scene_video' and settings['share'] == 'public' and not settings['allow_public_sharing']:
+        found.append(
+            "Scene video Share Page is Public, but 'allowPublicSharing' is off, so every render will be refused. Enable Allow Public Sharing or set Share Page to Private."
+        )
     url = settings['source_image_url']
     if settings['action'] in ('scene_video', 'image') and url and not url.lower().startswith(('http://', 'https://')):
         found.append('Source image URL must be a public http(s) URL; Masky cannot read uploaded or local files')

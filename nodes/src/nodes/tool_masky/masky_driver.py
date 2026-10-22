@@ -125,6 +125,32 @@ TOOL_DEFAULTS: Dict[str, Any] = {
     'edit_engine': 'default',
 }
 
+# Permission switches, matching the repo's conventions (tool_github/tool_gohighlevel
+# readOnly, tool_filesystem/calendar allowDelete, calendar allowPublicSharing).
+# Tools that change or spend nothing stay available in read-only mode.
+READ_TOOLS = frozenset(
+    {
+        'list_avatars',
+        'get_avatar',
+        'get_stream_identity',
+        'list_voices',
+        'list_looks',
+        'get_generation',
+        'estimate_cost',
+        'get_turns',
+        'get_binding',
+    }
+)
+# Tools that delete something need allowDelete, even when read-only mode is off.
+DELETE_TOOLS = frozenset({'unbind_agent'})
+
+READ_ONLY_REFUSAL = 'This operation is not permitted: the node is configured in read-only mode (readOnly).'
+
+
+def _flag_refusal(op: str, flag: str) -> str:
+    return f'{op} is gated by {flag!r}, which is off by default. Enable {flag!r} in the node config to allow it.'
+
+
 # Bound on the run-scoped job and image caches, so a long-lived pipeline
 # (fed by a webhook, say) does not grow them without limit.
 CACHE_LIMIT = 500
@@ -710,10 +736,25 @@ class MaskyDriver(ToolsBase):
     # ToolsBase hooks
     # ------------------------------------------------------------------
 
+    def _gate(self, bare: str) -> Optional[str]:
+        """Why a tool is switched off for this node, or None when it is available."""
+        if self._settings.get('read_only') and bare not in READ_TOOLS:
+            return READ_ONLY_REFUSAL
+        if bare in DELETE_TOOLS and not self._settings.get('allow_delete'):
+            return _flag_refusal(f'{self._server_name}.{bare}', 'allowDelete')
+        return None
+
+    def _require_public_sharing(self, op: str) -> None:
+        """Making something public needs allowPublicSharing; making it private never does."""
+        if not self._settings.get('allow_public_sharing'):
+            raise ValueError(_flag_refusal(op, 'allowPublicSharing'))
+
     def _tool_query(self) -> List[Dict[str, Any]]:
+        # A switched-off tool is hidden, so an agent never sees it; invoking it anyway is refused.
         return [
             {'name': f'{self._server_name}.{name}', 'description': info['description'], 'inputSchema': info['schema']}
             for name, info in self._tools.items()
+            if self._gate(name) is None
         ]
 
     def _bare(self, tool_name: str) -> str:
@@ -725,6 +766,9 @@ class MaskyDriver(ToolsBase):
             raise ValueError(
                 f'Unknown tool {tool_name!r}. Available: {", ".join(f"{self._server_name}.{t}" for t in self._tools)}'
             )
+        refusal = self._gate(bare)
+        if refusal:
+            raise ValueError(refusal)
         if input_obj is None:
             input_obj = {}
         if not isinstance(input_obj, dict):
@@ -752,11 +796,15 @@ class MaskyDriver(ToolsBase):
                     if not isinstance(url, str) or not _is_http(url.strip()):
                         raise ValueError('knowledge_urls must contain public http(s) URLs')
             _bool_arg(a, 'public')
+            if _as_bool(a.get('public'), False):
+                self._require_public_sharing(f'{self._server_name}.create_avatar(public=true)')
         elif bare in ('train_avatar', 'list_looks', 'get_binding', 'unbind_agent'):
             _need(a, 'avatar_id')
         elif bare == 'set_avatar_public':
             _need(a, 'avatar_id')
             _need_bool(a, 'public')
+            if _as_bool(a['public'], False):
+                self._require_public_sharing(f'{self._server_name}.set_avatar_public(public=true)')
         elif bare == 'set_stream_identity':
             _bool_arg(a, 'clear')
             _opt_str(a, 'avatar_id')
@@ -807,6 +855,8 @@ class MaskyDriver(ToolsBase):
             _enum(a, 'aspect_ratio', ASPECT_RATIOS)
             _int_range(a, 'seed', 0)
             _enum(a, 'share', ('private', 'public'))
+            if a.get('share') == 'public':
+                self._require_public_sharing(f'{self._server_name}.generate_video(share=public)')
             _bool_arg(a, 'draft', 'silent', 'expand_prompt', 'wait_for_completion')
         elif bare == 'generate_image':
             _max_len(_need(a, 'prompt'), 'prompt', LIMITS['image_prompt_chars'], 'Shorten the prompt.')
@@ -855,6 +905,8 @@ class MaskyDriver(ToolsBase):
         elif bare == 'set_conversation_visibility':
             self._need_conversation(a)
             _need_bool(a, 'public')
+            if _as_bool(a['public'], False):
+                self._require_public_sharing(f'{self._server_name}.set_conversation_visibility(public=true)')
         elif bare == 'send_turn':
             self._need_conversation(a)
             _bool_arg(a, 'reinterpret')

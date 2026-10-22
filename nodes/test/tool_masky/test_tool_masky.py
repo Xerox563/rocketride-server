@@ -234,7 +234,7 @@ ALL_TOOLS = [
 
 
 def test_tool_query_lists_all_25_tools():
-    tools = _driver()._tool_query()
+    tools = _driver(settings={'allow_delete': True})._tool_query()
     assert [t['name'] for t in tools] == [f'masky.{n}' for n in ALL_TOOLS]
     assert len(tools) == 25
     for t in tools:
@@ -242,8 +242,14 @@ def test_tool_query_lists_all_25_tools():
         assert t['inputSchema']['type'] == 'object'
 
 
+def test_tool_query_default_hides_unbind_agent():
+    tools = _driver()._tool_query()
+    assert [t['name'] for t in tools] == [f'masky.{n}' for n in ALL_TOOLS if n != 'unbind_agent']
+    assert len(tools) == 24
+
+
 def test_tool_query_custom_server_name():
-    tools = _driver(server_name='avatars')._tool_query()
+    tools = _driver(server_name='avatars', settings={'allow_delete': True})._tool_query()
     assert [t['name'] for t in tools] == [f'avatars.{n}' for n in ALL_TOOLS]
 
 
@@ -979,3 +985,68 @@ def test_base_url_refused(url):
 
 def test_default_base_url_is_https():
     assert IGlobalMod.read_settings({})['base_url'].startswith('https://')
+
+
+# ---------------------------------------------------------------------------
+# Permission switches: settings, services.json, warnings
+# ---------------------------------------------------------------------------
+
+
+def test_read_settings_permission_switches_default_off():
+    s = IGlobalMod.read_settings({})
+    assert (s['read_only'], s['allow_delete'], s['allow_public_sharing']) == (False, False, False)
+
+
+@pytest.mark.parametrize(
+    'raw,expected',
+    [('true', True), ('false', False), ('True', True), (True, True), (False, False)],
+)
+def test_read_settings_permission_switches_parse(raw, expected):
+    s = IGlobalMod.read_settings({'readOnly': raw, 'allowDelete': raw, 'allowPublicSharing': raw})
+    assert (s['read_only'], s['allow_delete'], s['allow_public_sharing']) == (expected,) * 3
+
+
+def test_services_permission_fields():
+    svc = _load_services()
+    expected = {
+        'tool_masky.readOnly': 'Does not affect the pipeline action',
+        'tool_masky.allowDelete': "Destructive: enable only when the agent is trusted to delete Masky conversations, turns and agent bindings. Deleted conversations can't be recovered.",
+        'tool_masky.allowPublicSharing': 'Making something private is never gated',
+    }
+    for name, phrase in expected.items():
+        field = svc['fields'][name]
+        assert field['type'] == 'boolean', name
+        assert field['default'] is False, name
+        assert phrase in field['description'], name
+
+
+def test_services_permission_fields_sit_between_language_and_max_credits():
+    svc = _load_services()
+    props = [p for section in svc['shape'] for p in section['properties']]
+    i = props.index('tool_masky.language')
+    j = props.index('tool_masky.maxCreditsPerCall')
+    assert props[i + 1 : j] == ['tool_masky.readOnly', 'tool_masky.allowDelete', 'tool_masky.allowPublicSharing']
+
+
+def test_services_default_profile_has_read_only_false():
+    svc = _load_services()
+    profile = svc['preconfig']['profiles'][svc['preconfig']['default']]
+    assert profile['readOnly'] is False
+
+
+_PUBLIC_WARNING = "'allowPublicSharing'"
+
+
+def _public_warnings(cfg):
+    return [m for m in IGlobalMod.config_warnings({'apikey': KEY, **cfg}) if _PUBLIC_WARNING in m]
+
+
+def test_config_warns_for_public_scene_video_without_switch():
+    assert len(_public_warnings({'action': 'scene_video', 'share': 'public'})) == 1
+
+
+def test_config_no_public_warning_when_switch_on_private_or_other_action():
+    assert _public_warnings({'action': 'scene_video', 'share': 'public', 'allowPublicSharing': 'true'}) == []
+    assert _public_warnings({'action': 'scene_video', 'share': 'private'}) == []
+    assert _public_warnings({'action': 'talking_head', 'share': 'public'}) == []
+    assert _public_warnings({'action': 'image', 'share': 'public'}) == []

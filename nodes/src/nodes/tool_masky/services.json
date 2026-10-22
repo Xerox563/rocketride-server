@@ -51,7 +51,8 @@
 				"maxCreditsPerCall": 1.0,
 				"timeoutSec": 300,
 				"pollIntervalSec": 3,
-				"includeMediaUrls": true
+				"includeMediaUrls": true,
+				"readOnly": false
 			}
 		}
 	},
@@ -129,6 +130,40 @@
 			"title": "Include Media URLs in Tool Results",
 			"description": "Turn off when an agent calls this node: results then carry job ids only, so signed URLs stay out of the model's context. Pipeline receipts always include URLs.",
 			"default": true,
+			"enum": [
+				[true, "Yes"],
+				[false, "No"]
+			]
+		},
+		//
+		// Permission switches for agent tools (conventions from tool_github,
+		// tool_gohighlevel, tool_filesystem and the calendar node)
+		//
+		"tool_masky.readOnly": {
+			"type": "boolean",
+			"title": "Read-only mode",
+			"description": "When enabled, every agent tool that changes or spends anything (create, train, set, add, speak, generate, edit, conversations and turns, agent binding, visibility, rename, delete, restore) is hidden from the agent rather than merely refused. Listing, get, get_generation and estimate_cost remain. Does not affect the pipeline action. Safe for agents that should only inspect the account.",
+			"default": false,
+			"enum": [
+				[true, "Yes: read only"],
+				[false, "No: allow writes"]
+			]
+		},
+		"tool_masky.allowDelete": {
+			"type": "boolean",
+			"title": "Allow deletion",
+			"description": "Destructive: enable only when the agent is trusted to delete Masky conversations, turns and agent bindings. Deleted conversations can't be recovered.",
+			"default": false,
+			"enum": [
+				[true, "Yes"],
+				[false, "No"]
+			]
+		},
+		"tool_masky.allowPublicSharing": {
+			"type": "boolean",
+			"title": "Allow public sharing",
+			"description": "Off by default. When off, making an avatar or conversation public, creating a public avatar, and scene video with Share Page Public (agent tools and the scene_video action) are refused. Making something private is never gated.",
+			"default": false,
 			"enum": [
 				[true, "Yes"],
 				[false, "No"]
@@ -355,6 +390,9 @@
 				"tool_masky.defaultAvatar",
 				"tool_masky.defaultLook",
 				"tool_masky.language",
+				"tool_masky.readOnly",
+				"tool_masky.allowDelete",
+				"tool_masky.allowPublicSharing",
 				"tool_masky.maxCreditsPerCall",
 				"tool_masky.timeoutSec",
 				"tool_masky.pollIntervalSec",

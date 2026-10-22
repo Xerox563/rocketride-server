@@ -43,7 +43,7 @@ The server name defaults to `masky`, registering the functions below as `masky.<
 | `masky.get_avatar` | Gets one avatar with its looks. |
 | `masky.create_avatar` | Creates a new avatar. |
 | `masky.train_avatar` | Starts Gem training for an avatar. |
-| `masky.set_avatar_public` | Makes an avatar public or private. |
+| `masky.set_avatar_public` | Makes an avatar public or private. Making it public needs `allowPublicSharing`. |
 | `masky.get_stream_identity` | Reads the account's stream identity. |
 | `masky.set_stream_identity` | Sets or clears the account's stream identity. |
 | `masky.list_voices` | Lists preset and custom voices. |
@@ -57,13 +57,13 @@ The server name defaults to `masky`, registering the functions below as `masky.<
 | `masky.get_generation` | Checks a render by job id. |
 | `masky.estimate_cost` | Estimates a render's credits; makes no render request. |
 | `masky.create_conversation` | Starts a live conversation. |
-| `masky.set_conversation_visibility` | Makes a conversation public or private. |
+| `masky.set_conversation_visibility` | Makes a conversation public or private. Making it public needs `allowPublicSharing`. |
 | `masky.send_turn` | Sends one turn into a live conversation. |
 | `masky.get_turns` | Reads a conversation's turns. |
 | `masky.set_conversation_look` | Changes the look a conversation shows. |
 | `masky.bind_agent` | Binds an external agent to an avatar over Nostr. |
 | `masky.get_binding` | Reads an avatar's agent binding. |
-| `masky.unbind_agent` | Removes an avatar's agent binding. |
+| `masky.unbind_agent` | Removes an avatar's agent binding. Only available when `allowDelete` is enabled. |
 
 ### `masky.list_avatars`
 
@@ -177,7 +177,7 @@ Required `avatar_id`. Returns `{avatar_id, agent_binding}`, where `agent_binding
 
 ### `masky.unbind_agent`
 
-Required `avatar_id`. Returns `{avatar_id, agent_binding: null}`.
+Required `avatar_id`. Only available when **Allow deletion** (`allowDelete`) is enabled; otherwise it is hidden from the agent and a direct call is refused. Returns `{avatar_id, agent_binding: null}`.
 
 ## Configuration
 
@@ -195,6 +195,20 @@ Supply the API key, choose the pipeline action, and set the defaults used when a
 ### Max Credits per Call
 
 A cost guard. A render whose estimate exceeds this value is refused before any request reaches Masky, with a message naming the estimate and the cap. It applies per tool call, and per record in a pipeline: a live record split into several turns is checked as one total. The default is 1.0 credit; 0 turns the guard off. Scene-video estimates use Masky's live pricing, read once per run, but never a rate below the dated price table. A request that Masky answers with a server error is not resent, because the job may already have started and resending could charge twice.
+
+### Read-only mode
+
+When **Read-only mode** (`readOnly`) is `true`, every agent tool that changes or spends anything is dropped from the published set: the agent does not see it in `tool.query`, and invoking it anyway is refused before any request with "This operation is not permitted: the node is configured in read-only mode". That covers creating, training, renaming and attaching voices to avatars, adding looks, setting the stream identity, every render (`speak`, `generate_video`, `generate_image`, `edit_image`), live conversations and turns, visibility changes, agent binding, and deletes and restores. Listing and reading stay available: `list_avatars`, `get_avatar`, `get_stream_identity`, `list_voices`, `list_looks`, `get_generation`, `estimate_cost`, `get_turns` and `get_binding`.
+
+Read-only mode applies to agent tools only. It does not affect the **Pipeline Action**, because a pipeline step that cannot render has no purpose. The default is `false`, so a freshly added node can spend credits; turn read-only mode on explicitly for agents that should only inspect the account.
+
+### Allow deletion
+
+Destructive: enable **Allow deletion** (`allowDelete`) only when the agent is trusted to delete Masky conversations, turns and agent bindings. Deleted conversations can't be recovered. It is off by default, and it is required even when read-only mode is off: without it, the delete tools are hidden from the agent and a direct call is refused with a message naming `allowDelete`.
+
+### Allow public sharing
+
+**Allow public sharing** (`allowPublicSharing`) is off by default. When off, anything that makes content public is refused before any request: `set_avatar_public` with `public: true`, `set_conversation_visibility` with `public: true`, `create_avatar` with `public: true`, `generate_video` with `share: public`, and the scene_video action with **Share Page** set to Public. Making something private is never gated.
 
 ### Include Media URLs in Tool Results
 

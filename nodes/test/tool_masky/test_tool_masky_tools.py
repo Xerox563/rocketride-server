@@ -47,7 +47,7 @@ try:
     from tool_masky import masky_driver as driver_mod  # noqa: E402
     from tool_masky.masky_client import MaskyClient  # noqa: E402
     from tool_masky.masky_core import MaskyCancelled, MaskyError  # noqa: E402
-    from tool_masky.masky_driver import MaskyDriver  # noqa: E402
+    from tool_masky.masky_driver import DELETE_TOOLS, READ_ONLY_REFUSAL, READ_TOOLS, MaskyDriver  # noqa: E402
 finally:
     for _n, _m in _saved.items():
         if _m is None:
@@ -1437,7 +1437,7 @@ def test_bind_agent_minimal_body_omits_optionals():
 
 def test_get_binding_and_unbind_pass_through():
     client = FakeClient(get_binding={'avatarId': 'A', 'agentBinding': {'relay': 'wss://r'}})
-    d = _driver(client)
+    d = _driver(client, settings={'allow_delete': True})
     assert _run(d, 'get_binding', avatar_id='A') == {'avatar_id': 'A', 'agent_binding': {'relay': 'wss://r'}}
     assert _run(d, 'unbind_agent', avatar_id='A') == {'avatar_id': 'A', 'agent_binding': None}
     assert client.names() == ['get_binding', 'delete_binding']
@@ -1452,7 +1452,7 @@ def test_get_binding_and_unbind_pass_through():
 def test_generate_video_body_with_speech_and_look():
     client = FakeClient()
     _run(
-        _driver(client),
+        _driver(client, settings={'allow_public_sharing': True}),
         'generate_video',
         prompt='p',
         avatar_id='A',
@@ -1776,7 +1776,7 @@ def _refused(d, tool, match=None, **args):
 
 def test_set_avatar_public_happy_path_and_string_bools():
     client = FakeClient()
-    d = _driver(client)
+    d = _driver(client, settings={'allow_public_sharing': True})
     assert _run(d, 'set_avatar_public', avatar_id=' A ', public=True) == {'avatar_id': 'A', 'public': True}
     assert _run(d, 'set_avatar_public', avatar_id='A', public='false') == {'avatar_id': 'A', 'public': False}
     assert client.args_of('set_avatar_public') == [('A', True), ('A', False)]
@@ -1791,7 +1791,7 @@ def test_set_avatar_public_validation_before_any_call():
 
 def test_set_conversation_visibility_by_id_and_by_slug():
     client = FakeClient(get_conversation={'conversationId': 'C9', 'turns': []})
-    d = _driver(client)
+    d = _driver(client, settings={'allow_public_sharing': True})
     assert _run(d, 'set_conversation_visibility', conversation_id='C1', public=True) == {
         'conversation_slug': None,
         'conversation_id': 'C1',
@@ -1813,7 +1813,13 @@ def test_set_conversation_visibility_validation_before_any_call():
 
 def test_create_avatar_public_flag():
     client = FakeClient(create_avatar={'avatar': {'avatarId': 'N1', 'displayName': 'Nova', 'publiclyRenderable': True}})
-    out = _run(_driver(client), 'create_avatar', name='Nova', image_url='https://i/x.png', public='true')
+    out = _run(
+        _driver(client, settings={'allow_public_sharing': True}),
+        'create_avatar',
+        name='Nova',
+        image_url='https://i/x.png',
+        public='true',
+    )
     (body,) = client.args_of('create_avatar')[0]
     assert body['publiclyRenderable'] is True
     assert out['public'] is True
@@ -2477,7 +2483,7 @@ def test_agent_generate_video_ignores_pipeline_settings():
 def test_agent_explicit_arguments_still_override_the_tool_defaults():
     client = FakeClient()
     _run(
-        _driver(client, settings=dict(SETTINGS_THAT_MUST_NOT_LEAK)),
+        _driver(client, settings={**SETTINGS_THAT_MUST_NOT_LEAK, 'allow_public_sharing': True}),
         'generate_video',
         prompt='p',
         resolution='1080p',
@@ -2718,3 +2724,146 @@ def test_turn_without_id_is_flagged_unconfirmed_not_timed_out():
     assert 'did not return a turn id' in out['warnings'][0]
     confirmed = d.turn_job(conversation_id='C1', slug=slug, text='hi', mode='speak', output='audio', wait=False)
     assert 'unconfirmed' not in confirmed
+
+
+# ---------------------------------------------------------------------------
+# Permission switches: readOnly, allowDelete, allowPublicSharing
+# ---------------------------------------------------------------------------
+
+EXPECTED_READ_TOOLS = {
+    'list_avatars',
+    'get_avatar',
+    'get_stream_identity',
+    'list_voices',
+    'list_looks',
+    'get_generation',
+    'estimate_cost',
+    'get_turns',
+    'get_binding',
+}
+
+
+def _listed(d):
+    return [t['name'].split('.', 1)[1] for t in d._tool_query()]
+
+
+def test_read_tools_set_is_exactly_the_reviewed_one():
+    assert set(READ_TOOLS) == EXPECTED_READ_TOOLS
+    assert set(DELETE_TOOLS) == {'unbind_agent'}
+    assert EXPECTED_READ_TOOLS <= set(_driver()._tools)
+
+
+def test_default_listing_hides_only_unbind_agent():
+    d = _driver()
+    registered = list(d._tools)
+    assert len(registered) == 25
+    assert _listed(d) == [n for n in registered if n != 'unbind_agent']
+    assert len(_listed(d)) == 24
+
+
+def test_allow_delete_lists_all_tools():
+    d = _driver(settings={'allow_delete': True})
+    assert _listed(d) == list(d._tools)
+
+
+def test_read_only_lists_exactly_the_read_tools():
+    d = _driver(settings={'read_only': True})
+    assert set(_listed(d)) == EXPECTED_READ_TOOLS
+
+
+def test_read_only_hides_every_other_registered_tool_and_refuses_it():
+    client = FakeClient()
+    d = _driver(client, settings={'read_only': True, 'allow_delete': True, 'allow_public_sharing': True})
+    hidden = [n for n in d._tools if n not in EXPECTED_READ_TOOLS]
+    assert hidden  # a new write tool must land here, not slip through
+    assert not set(hidden) & set(_listed(d))
+    for name in hidden:
+        with pytest.raises(ValueError) as ei:
+            _run(d, name)
+        assert str(ei.value) == READ_ONLY_REFUSAL, name
+    assert client.calls == []
+
+
+def test_read_only_keeps_read_tools_working():
+    d = _driver(FakeClient(), settings={'read_only': True})
+    assert _run(d, 'get_avatar', avatar_id='A')['avatar_id'] == 'A'
+    assert _run(d, 'estimate_cost', kind='speak', text='hi', output='audio')['estimated_credits'] == 0.0025
+
+
+def test_read_only_blocks_unbind_agent_even_with_allow_delete():
+    client = FakeClient()
+    d = _driver(client, settings={'read_only': True, 'allow_delete': True})
+    assert 'unbind_agent' not in _listed(d)
+    _refused(d, 'unbind_agent', READ_ONLY_REFUSAL, avatar_id='A')
+    assert client.calls == []
+
+
+def test_unbind_agent_refused_without_allow_delete_even_when_not_read_only():
+    client = FakeClient()
+    d = _driver(client, settings={'read_only': False})
+    assert 'unbind_agent' not in _listed(d)
+    _refused(d, 'unbind_agent', "'allowDelete'", avatar_id='A')
+    assert client.calls == []
+
+
+def test_unbind_agent_works_with_allow_delete():
+    client = FakeClient()
+    d = _driver(client, settings={'allow_delete': True})
+    assert 'unbind_agent' in _listed(d)
+    assert _run(d, 'unbind_agent', avatar_id='A') == {'avatar_id': 'A', 'agent_binding': None}
+    assert client.names() == ['delete_binding']
+
+
+def test_missing_switches_default_to_off():
+    d = _driver(settings={})
+    assert 'unbind_agent' not in _listed(d)
+    _refused(d, 'set_avatar_public', "'allowPublicSharing'", avatar_id='A', public=True)
+
+
+@pytest.mark.parametrize(
+    'tool,args',
+    [
+        ('set_avatar_public', {'avatar_id': 'A', 'public': True}),
+        ('set_avatar_public', {'avatar_id': 'A', 'public': 'true'}),
+        ('set_conversation_visibility', {'conversation_id': 'C1', 'public': True}),
+        ('set_conversation_visibility', {'slug': 'c-1', 'public': True}),
+        ('create_avatar', {'name': 'Nova', 'image_url': 'https://i/x.png', 'public': True}),
+        ('generate_video', {'prompt': 'p', 'share': 'public'}),
+    ],
+)
+def test_public_variants_refused_before_any_client_call(tool, args):
+    d = _driver(FakeClient())
+    _refused(d, tool, "'allowPublicSharing'", **args)
+
+
+def test_public_sharing_tools_stay_listed_when_switch_is_off():
+    listed = _listed(_driver())
+    for name in ('set_avatar_public', 'set_conversation_visibility', 'create_avatar', 'generate_video'):
+        assert name in listed
+
+
+def test_private_variants_always_work_without_allow_public_sharing():
+    client = FakeClient(get_conversation={'conversationId': 'C9', 'turns': []})
+    d = _driver(client)
+    assert _run(d, 'set_avatar_public', avatar_id='A', public=False)['public'] is False
+    assert _run(d, 'set_conversation_visibility', conversation_id='C1', public=False)['public'] is False
+    assert _run(d, 'create_avatar', name='Nova', image_url='https://i/x.png', public=False)
+    assert _run(d, 'create_avatar', name='Nova', image_url='https://i/x.png')
+    _run(d, 'generate_video', prompt='p', share='private')
+    _run(d, 'generate_video', prompt='p')
+    assert client.args_of('set_avatar_public') == [('A', False)]
+    assert client.args_of('set_conversation_visibility') == [('C1', False)]
+
+
+def test_public_variants_work_with_allow_public_sharing():
+    client = FakeClient()
+    d = _driver(client, settings={'allow_public_sharing': True})
+    assert _run(d, 'set_avatar_public', avatar_id='A', public=True)['public'] is True
+    _run(d, 'generate_video', prompt='p', share='public')
+    assert client.args_of('set_avatar_public') == [('A', True)]
+
+
+def test_read_only_hides_set_avatar_public_even_with_public_sharing_on():
+    # readOnly hides writes; the public gate is a separate switch and stays independent.
+    d = _driver(FakeClient(), settings={'read_only': True, 'allow_public_sharing': True})
+    assert 'set_avatar_public' not in _listed(d)

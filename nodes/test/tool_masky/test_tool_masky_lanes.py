@@ -489,6 +489,7 @@ def test_scene_video_maps_settings_draft():
             'silent': True,
             'expand_prompt': False,
             'share': 'public',
+            'allow_public_sharing': True,
             'source_image_url': 'https://src/p.png',
             'speech_line': 'hello there',
         },
@@ -1146,3 +1147,38 @@ def test_truncated_mp4_boxes_do_not_raise(data):
     # media_details runs after a paid render and download: a malformed file must degrade, not fail the record
     assert core.mp4_info(data) == {}
     assert core.media_details('video/mp4', data) == {'size_bytes': len(data)}
+
+
+# ---------------------------------------------------------------------------
+# Permission switches and the pipeline action
+# ---------------------------------------------------------------------------
+
+
+def test_read_only_does_not_affect_talking_head():
+    driver = FakeDriver(receipt(), make_mp4())
+    inst = build({'action': 'talking_head', 'output': 'video', 'read_only': True}, driver)
+    run(inst, 'hello world')
+    assert len(driver.speak) == 1 and driver.speak[0]['text'] == 'hello world'
+
+
+def test_scene_video_public_refused_before_driver_call_when_switch_off():
+    for extra in ({}, {'allow_public_sharing': False}):
+        driver = VideoDriver(receipt(job='video:V1'), make_mp4())
+        inst = build({'action': 'scene_video', 'share': 'public', **extra}, driver)
+        with pytest.raises(ValueError, match='allowPublicSharing'):
+            inst.writeText('a fox')
+        assert driver.video == []
+
+
+def test_scene_video_public_works_when_switch_on():
+    driver = VideoDriver(receipt(job='video:V1'), make_mp4())
+    inst = build({'action': 'scene_video', 'share': 'public', 'allow_public_sharing': True}, driver)
+    run(inst, 'a fox')
+    assert driver.video[0]['share'] == 'public'
+
+
+def test_scene_video_private_works_without_switch():
+    driver = VideoDriver(receipt(job='video:V1'), make_mp4())
+    inst = build({'action': 'scene_video', 'share': 'private'}, driver)
+    run(inst, 'a fox')
+    assert driver.video[0]['share'] == 'private'

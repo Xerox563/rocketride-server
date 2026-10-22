@@ -143,6 +143,11 @@ class IInstance(IInstanceBase):
                 raise ValueError(
                     f'Speech Line is {len(speech)} characters; Masky accepts {LIMITS["video_speech_chars"]}. Shorten it in the node settings.'
                 )
+            if settings.get('share') == 'public' and not settings.get('allow_public_sharing'):
+                raise ValueError(
+                    "Scene video with Share Page Public is gated by 'allowPublicSharing', which is off by default. "
+                    "Enable 'allowPublicSharing' in the node config, or set Share Page to Private."
+                )
             quality = settings.get('quality', '720p-draft')
             return driver.video_job(
                 prompt=text,
