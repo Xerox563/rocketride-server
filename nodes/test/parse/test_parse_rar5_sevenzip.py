@@ -31,7 +31,7 @@ End-to-end guard for the parse node's RAR5 path through 7-Zip-JBinding.
 ``TikaApi.init()`` treats a 7-Zip-JBinding load failure as non-fatal: it logs a warning,
 ``ConfigBuilder`` keeps Tika's junrar ``RarParser`` (RAR4 only) and every other format still
 parses. A pipeline that sends a PDF therefore passes even when the Java load path
-(``SevenZip.initSevenZipFromPlatformJAR()``) or
+(``SevenZipLoader.load()``) or
 ``RarSevenZipParser`` is broken. Only a RAR5 archive goes through that path, so this test
 builds one (one stored file, no compression, standard library only) and requires its content
 in the response.

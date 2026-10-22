@@ -319,7 +319,7 @@ public final class TikaApi {
 	 */
 	// synchronized so the initialized check and assignment below are one atomic
 	// step. Two threads could otherwise both pass the guard and race into
-	// SevenZip.initSevenZipFromPlatformJAR().
+	// SevenZipLoader.load().
 	public static synchronized void init() throws Exception {
 		// Get the root path
 		logger.log(Level.INFO, "Tika.rootPath (Before set): " + TikaApi.rootPath);
@@ -334,12 +334,13 @@ public final class TikaApi {
 		logger.log(Level.INFO, "Aspose parsers available: " + asposeAvailable);
 
 		// Initialize 7-Zip-JBinding once for the JVM. Required by RarSevenZipParser;
-		// the call extracts the platform-specific native lib from the bundled jar
-		// and loads it. Failures are logged but not fatal: non-RAR parsing still
-		// works, and ConfigBuilder keeps Tika's RAR4 parser when this did not load.
+		// SevenZipLoader extracts the platform-specific native lib from the bundled
+		// jar, safely against other tasks doing the same, and loads it. Failures are
+		// logged but not fatal: non-RAR parsing still works, and ConfigBuilder keeps
+		// Tika's RAR4 parser when this did not load.
 		try {
 			if (!SevenZip.isInitializedSuccessfully()) {
-				SevenZip.initSevenZipFromPlatformJAR();
+				SevenZipLoader.load();
 				logger.log(Level.INFO, "7-Zip-JBinding initialized: " + SevenZip.getSevenZipVersion().version);
 			}
 			sevenZipReady = true;
