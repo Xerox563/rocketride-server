@@ -61,6 +61,9 @@ The server name defaults to `masky`, registering the functions below as `masky.<
 | `masky.send_turn` | Sends one turn into a live conversation. |
 | `masky.get_turns` | Reads a conversation's turns. |
 | `masky.set_conversation_look` | Changes the look a conversation shows. |
+| `masky.delete_conversation` | Deletes a conversation and its turns. Only available when `allowDelete` is enabled. |
+| `masky.delete_turn` | Soft-deletes one turn. Only available when `allowDelete` is enabled. |
+| `masky.restore_turn` | Restores a soft-deleted turn. |
 | `masky.bind_agent` | Binds an external agent to an avatar over Nostr. |
 | `masky.get_binding` | Reads an avatar's agent binding. |
 | `masky.unbind_agent` | Removes an avatar's agent binding. Only available when `allowDelete` is enabled. |
@@ -166,6 +169,18 @@ Required `slug`. Optional `since` (a `turn_id`, or a `createdAt` value in epoch 
 ### `masky.set_conversation_look`
 
 Pass `slug` or `conversation_id`, plus `look_id` or `look_url`. Optional `avatar_id` when the conversation was not created in this run. Returns `{ok, look_id}`.
+
+### `masky.delete_conversation`
+
+Required `conversation_id`. Deletes the conversation and all its turns; deleted conversations can't be recovered. Only available when **Allow deletion** (`allowDelete`) is enabled. The endpoint comes from Masky's answers to our questions and isn't in the published OpenAPI spec yet. Returns `{conversation_id, deleted: true}`.
+
+### `masky.delete_turn`
+
+Required `conversation_id` and `turn_id`. A soft delete: `restore_turn` brings the turn back. Only available when **Allow deletion** is enabled. The node does not offer Masky's permanent purge. The endpoint comes from Masky's answers and isn't in the published spec yet. Returns `{conversation_id, turn_id, deleted: true, restorable: true}`.
+
+### `masky.restore_turn`
+
+Required `conversation_id` and `turn_id`. Restores a turn removed with `delete_turn`. It is a write, so read-only mode blocks it, but it does not need **Allow deletion**. The endpoint comes from Masky's answers and isn't in the published spec yet. Returns `{conversation_id, turn_id, restored: true}`.
 
 ### `masky.bind_agent`
 

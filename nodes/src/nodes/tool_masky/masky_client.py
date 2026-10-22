@@ -281,6 +281,21 @@ class MaskyClient:
             'POST', f'/conversations/{_seg(conversation_id)}/visibility', body={'isPublic': bool(public)}
         )
 
+    # The three endpoints below come from Masky's answers (2026-10-22); they are not in
+    # the published OpenAPI spec yet. The permanent turn purge (.../forever) is not used.
+
+    def delete_conversation(self, conversation_id: str) -> Any:  # noqa: ANN401
+        """DELETE /conversations/{id}: owner only; removes the conversation and its turns."""
+        return self._request('DELETE', f'/conversations/{_seg(conversation_id)}')
+
+    def delete_turn(self, conversation_id: str, turn_id: str) -> Any:  # noqa: ANN401
+        """DELETE /conversations/{id}/turns/{turnId}: soft delete, restorable."""
+        return self._request('DELETE', f'/conversations/{_seg(conversation_id)}/turns/{_seg(turn_id)}')
+
+    def restore_turn(self, conversation_id: str, turn_id: str) -> Any:  # noqa: ANN401
+        """POST /conversations/{id}/turns/{turnId}/restore: undo a soft delete."""
+        return self._request('POST', f'/conversations/{_seg(conversation_id)}/turns/{_seg(turn_id)}/restore')
+
     def set_conversation_image(self, conversation_id: str, image_url: str) -> Dict[str, Any]:
         """POST /conversations/{id}/avatar-image -> {ok, avatarImageUrl}."""
         return self._request(

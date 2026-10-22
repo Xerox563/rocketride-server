@@ -227,25 +227,29 @@ ALL_TOOLS = [
     'send_turn',
     'get_turns',
     'set_conversation_look',
+    'delete_conversation',
+    'delete_turn',
+    'restore_turn',
     'bind_agent',
     'get_binding',
     'unbind_agent',
 ]
 
 
-def test_tool_query_lists_all_25_tools():
+def test_tool_query_lists_all_28_tools():
     tools = _driver(settings={'allow_delete': True})._tool_query()
     assert [t['name'] for t in tools] == [f'masky.{n}' for n in ALL_TOOLS]
-    assert len(tools) == 25
+    assert len(tools) == 28
     for t in tools:
         assert t['description']
         assert t['inputSchema']['type'] == 'object'
 
 
-def test_tool_query_default_hides_unbind_agent():
+def test_tool_query_default_hides_the_delete_tools():
     tools = _driver()._tool_query()
-    assert [t['name'] for t in tools] == [f'masky.{n}' for n in ALL_TOOLS if n != 'unbind_agent']
-    assert len(tools) == 24
+    hidden = {'unbind_agent', 'delete_conversation', 'delete_turn'}
+    assert [t['name'] for t in tools] == [f'masky.{n}' for n in ALL_TOOLS if n not in hidden]
+    assert len(tools) == 25
 
 
 def test_tool_query_custom_server_name():
@@ -1050,3 +1054,62 @@ def test_config_no_public_warning_when_switch_on_private_or_other_action():
     assert _public_warnings({'action': 'scene_video', 'share': 'private'}) == []
     assert _public_warnings({'action': 'talking_head', 'share': 'public'}) == []
     assert _public_warnings({'action': 'image', 'share': 'public'}) == []
+
+
+# ---------------------------------------------------------------------------
+# Delete / restore tools: client level (real MaskyClient, stubbed requests)
+# ---------------------------------------------------------------------------
+
+
+def test_client_delete_conversation_path_and_method(http):
+    http['resp'] = FakeResp(200, {'ok': True})
+    MaskyClient(KEY).delete_conversation('C1')
+    assert len(http['calls']) == 1
+    call = http['calls'][0]
+    assert call['method'] == 'DELETE'
+    assert call['url'] == 'https://masky.ai/api/conversations/C1'
+    assert call['headers']['Authorization'] == f'Bearer {KEY}'
+
+
+def test_client_delete_turn_path_and_method(http):
+    http['resp'] = FakeResp(200, {'ok': True})
+    MaskyClient(KEY).delete_turn('C1', 'T1')
+    assert len(http['calls']) == 1
+    call = http['calls'][0]
+    assert call['method'] == 'DELETE'
+    assert call['url'] == 'https://masky.ai/api/conversations/C1/turns/T1'
+    assert call['headers']['Authorization'] == f'Bearer {KEY}'
+
+
+def test_client_restore_turn_path_and_method(http):
+    http['resp'] = FakeResp(200, {'ok': True})
+    MaskyClient(KEY).restore_turn('C1', 'T1')
+    assert len(http['calls']) == 1
+    call = http['calls'][0]
+    assert call['method'] == 'POST'
+    assert call['url'] == 'https://masky.ai/api/conversations/C1/turns/T1/restore'
+    assert call['headers']['Authorization'] == f'Bearer {KEY}'
+
+
+def test_client_delete_and_restore_quote_ids_with_slashes(http):
+    http['resp'] = FakeResp(200, {'ok': True})
+    client = MaskyClient(KEY)
+    client.delete_conversation('a/b')
+    client.delete_turn('a/b', 'c/d')
+    client.restore_turn('a/b', 'c/d')
+    urls = [c['url'] for c in http['calls']]
+    assert urls == [
+        'https://masky.ai/api/conversations/a%2Fb',
+        'https://masky.ai/api/conversations/a%2Fb/turns/c%2Fd',
+        'https://masky.ai/api/conversations/a%2Fb/turns/c%2Fd/restore',
+    ]
+
+
+def test_client_delete_5xx_is_sent_once_and_raises(http):
+    http['queue'] = [ClosableResp(502, {'error': 'bad gateway'}), ClosableResp(200, {'ok': True})]
+    with pytest.raises(MaskyError) as ei:
+        MaskyClient(KEY).delete_turn('C1', 'T1')
+    assert len(http['calls']) == 1 and http['calls'][0]['method'] == 'DELETE'
+    assert http['sleeps'] == []
+    assert ei.value.status == 502
+    assert KEY not in str(ei.value)

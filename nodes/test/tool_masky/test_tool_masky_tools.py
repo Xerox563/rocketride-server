@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Aparavi Software AG
 # =============================================================================
 
-"""Offline tests for the tool_masky phase-2 tool surface (25 tools).
+"""Offline tests for the tool_masky phase-2 tool surface (28 tools).
 
 No engine, no network: the driver gets a ``FakeClient`` that records every call
 and returns canned Masky response bodies. ``rocketlib`` / ``ai.common.tools``
@@ -163,6 +163,9 @@ class FakeClient:
             'put_binding': {'avatarId': 'A', 'agentBinding': {'pubkey': 'p'}},
             'get_binding': {'avatarId': 'A', 'agentBinding': None},
             'delete_binding': {'avatarId': 'A', 'agentBinding': None},
+            'delete_conversation': {'ok': True},
+            'delete_turn': {'ok': True},
+            'restore_turn': {'ok': True},
             'set_avatar_public': {'ok': True},
             'set_conversation_visibility': {'ok': True},
             # Default: pricing endpoint unreachable. Pass a dict for a configured body.
@@ -276,6 +279,15 @@ class FakeClient:
 
     def delete_binding(self, avatar_id):
         return self._do('delete_binding', avatar_id)
+
+    def delete_conversation(self, conversation_id):
+        return self._do('delete_conversation', conversation_id)
+
+    def delete_turn(self, conversation_id, turn_id):
+        return self._do('delete_turn', conversation_id, turn_id)
+
+    def restore_turn(self, conversation_id, turn_id):
+        return self._do('restore_turn', conversation_id, turn_id)
 
 
 def _driver(client=None, **kw):
@@ -2749,16 +2761,16 @@ def _listed(d):
 
 def test_read_tools_set_is_exactly_the_reviewed_one():
     assert set(READ_TOOLS) == EXPECTED_READ_TOOLS
-    assert set(DELETE_TOOLS) == {'unbind_agent'}
+    assert set(DELETE_TOOLS) == {'unbind_agent', 'delete_conversation', 'delete_turn'}
     assert EXPECTED_READ_TOOLS <= set(_driver()._tools)
 
 
-def test_default_listing_hides_only_unbind_agent():
+def test_default_listing_hides_only_the_delete_tools():
     d = _driver()
     registered = list(d._tools)
-    assert len(registered) == 25
-    assert _listed(d) == [n for n in registered if n != 'unbind_agent']
-    assert len(_listed(d)) == 24
+    assert len(registered) == 28
+    assert _listed(d) == [n for n in registered if n not in DELETE_TOOLS]
+    assert len(_listed(d)) == 25
 
 
 def test_allow_delete_lists_all_tools():
@@ -2867,3 +2879,138 @@ def test_read_only_hides_set_avatar_public_even_with_public_sharing_on():
     # readOnly hides writes; the public gate is a separate switch and stays independent.
     d = _driver(FakeClient(), settings={'read_only': True, 'allow_public_sharing': True})
     assert 'set_avatar_public' not in _listed(d)
+
+
+# ---------------------------------------------------------------------------
+# delete_conversation / delete_turn / restore_turn
+# ---------------------------------------------------------------------------
+
+_DEL_ARGS = {
+    'delete_conversation': {'conversation_id': 'C1'},
+    'delete_turn': {'conversation_id': 'C1', 'turn_id': 'T1'},
+    'restore_turn': {'conversation_id': 'C1', 'turn_id': 'T1'},
+}
+_DEL_CALL = {
+    'delete_conversation': ('C1',),
+    'delete_turn': ('C1', 'T1'),
+    'restore_turn': ('C1', 'T1'),
+}
+
+
+def test_delete_conversation_success():
+    client = FakeClient()
+    d = _driver(client, settings={'allow_delete': True})
+    assert _run(d, 'delete_conversation', conversation_id='C1') == {'conversation_id': 'C1', 'deleted': True}
+    assert client.calls == [('delete_conversation', 'C1')]
+
+
+def test_delete_turn_success():
+    client = FakeClient()
+    d = _driver(client, settings={'allow_delete': True})
+    out = _run(d, 'delete_turn', conversation_id='C1', turn_id='T1')
+    assert out == {'conversation_id': 'C1', 'turn_id': 'T1', 'deleted': True, 'restorable': True}
+    assert client.calls == [('delete_turn', 'C1', 'T1')]
+
+
+@pytest.mark.parametrize('settings', [{'allow_delete': True}, {}])
+def test_restore_turn_success_with_or_without_allow_delete(settings):
+    client = FakeClient()
+    d = _driver(client, settings=settings)
+    out = _run(d, 'restore_turn', conversation_id='C1', turn_id='T1')
+    assert out == {'conversation_id': 'C1', 'turn_id': 'T1', 'restored': True}
+    assert client.calls == [('restore_turn', 'C1', 'T1')]
+
+
+@pytest.mark.parametrize('tool', list(_DEL_ARGS))
+@pytest.mark.parametrize('status,text', [(404, 'found nothing'), (403, 'refused access')])
+def test_delete_tools_propagate_masky_errors(tool, status, text):
+    err = MaskyError(f'Masky {text} at /conversations/C1.', status=status)
+    client = FakeClient(**{tool: err})
+    d = _driver(client, settings={'allow_delete': True})
+    with pytest.raises(MaskyError) as ei:
+        _run(d, tool, **_DEL_ARGS[tool])
+    assert ei.value is err and ei.value.status == status
+    assert client.calls == [(tool, *_DEL_CALL[tool])]
+
+
+@pytest.mark.parametrize(
+    'tool,args',
+    [
+        ('delete_conversation', {}),
+        ('delete_conversation', {'conversation_id': ''}),
+        ('delete_turn', {'turn_id': 'T1'}),
+        ('delete_turn', {'conversation_id': 'C1'}),
+        ('delete_turn', {}),
+        ('restore_turn', {'turn_id': 'T1'}),
+        ('restore_turn', {'conversation_id': 'C1'}),
+        ('restore_turn', {}),
+    ],
+)
+def test_delete_tools_validate_ids_before_any_client_call(tool, args):
+    d = _driver(FakeClient(), settings={'allow_delete': True})
+    _refused(d, tool, **args)
+
+
+@pytest.mark.parametrize('tool', ['delete_conversation', 'delete_turn'])
+def test_delete_tools_hidden_and_refused_without_allow_delete(tool):
+    client = FakeClient()
+    d = _driver(client, settings={'read_only': False})
+    assert tool not in _listed(d)
+    _refused(d, tool, "'allowDelete'", **_DEL_ARGS[tool])
+    assert client.calls == []
+
+
+def test_restore_turn_listed_without_allow_delete():
+    d = _driver(FakeClient())
+    assert 'restore_turn' in _listed(d)
+    for name in ('delete_conversation', 'delete_turn', 'unbind_agent'):
+        assert name not in _listed(d)
+
+
+@pytest.mark.parametrize('tool', list(_DEL_ARGS))
+def test_read_only_hides_and_refuses_delete_and_restore_tools(tool):
+    client = FakeClient()
+    d = _driver(client, settings={'read_only': True, 'allow_delete': True})
+    assert tool not in _listed(d)
+    _refused(d, tool, READ_ONLY_REFUSAL, **_DEL_ARGS[tool])
+    assert client.calls == []
+
+
+def test_delete_conversation_clears_cached_conversation():
+    client = FakeClient(get_conversation={'conversationId': 'C1', 'turns': []})
+    d = _driver(client, settings={'default_avatar': 'A', 'allow_delete': True})
+    created = _run(d, 'create_conversation')
+    slug = created['conversation_slug']
+    assert slug in d._conversations
+    _run(d, 'delete_conversation', conversation_id=created['conversation_id'])
+    assert slug not in d._conversations
+    _run(d, 'send_turn', slug=slug, text='hi')
+    assert client.args_of('get_conversation') == [(slug,)]
+
+
+def test_delete_conversation_keeps_other_cached_conversations():
+    client = FakeClient()
+    d = _driver(client, settings={'allow_delete': True})
+    d._conversations['other'] = {'conversation_id': 'C2'}
+    d._conversations['mine'] = {'conversation_id': 'C1'}
+    _run(d, 'delete_conversation', conversation_id='C1')
+    assert list(d._conversations) == ['other']
+
+
+def test_delete_conversation_resets_pipeline_conversation():
+    client = FakeClient()
+    d = _driver(client, settings={'default_avatar': 'A', 'allow_delete': True})
+    first = d.live_conversation('')
+    assert client.names().count('create_conversation') == 1
+    _run(d, 'delete_conversation', conversation_id=first['conversation_id'])
+    d.live_conversation('')
+    assert client.names().count('create_conversation') == 2
+
+
+def test_delete_conversation_of_other_id_keeps_pipeline_conversation():
+    client = FakeClient()
+    d = _driver(client, settings={'default_avatar': 'A', 'allow_delete': True})
+    first = d.live_conversation('')
+    _run(d, 'delete_conversation', conversation_id='OTHER')
+    assert d.live_conversation('') == first
+    assert client.names().count('create_conversation') == 1

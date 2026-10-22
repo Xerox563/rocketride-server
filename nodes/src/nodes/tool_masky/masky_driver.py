@@ -142,7 +142,7 @@ READ_TOOLS = frozenset(
     }
 )
 # Tools that delete something need allowDelete, even when read-only mode is off.
-DELETE_TOOLS = frozenset({'unbind_agent'})
+DELETE_TOOLS = frozenset({'unbind_agent', 'delete_conversation', 'delete_turn'})
 
 READ_ONLY_REFUSAL = 'This operation is not permitted: the node is configured in read-only mode (readOnly).'
 
@@ -671,6 +671,39 @@ class MaskyDriver(ToolsBase):
                 ),
                 'run': self._set_conversation_look,
             },
+            # Cleanup (endpoints from Masky's answers, not yet in the published spec)
+            'delete_conversation': {
+                'description': (
+                    'Delete one of your live conversations and all its turns. Deleted conversations cannot be recovered. '
+                    "Required: conversation_id. Needs the node's Allow deletion switch. Returns {conversation_id, deleted}."
+                ),
+                'schema': _obj(
+                    {'conversation_id': _s('Conversation id (from create_conversation).')}, ['conversation_id']
+                ),
+                'run': self._delete_conversation,
+            },
+            'delete_turn': {
+                'description': (
+                    'Delete one turn from a live conversation. This is a soft delete: restore_turn brings it back. '
+                    "Required: conversation_id, turn_id. Needs the node's Allow deletion switch. Returns {conversation_id, turn_id, deleted, restorable}."
+                ),
+                'schema': _obj(
+                    {
+                        'conversation_id': _s('Conversation id.'),
+                        'turn_id': _s('Turn id (from send_turn or get_turns).'),
+                    },
+                    ['conversation_id', 'turn_id'],
+                ),
+                'run': self._delete_turn,
+            },
+            'restore_turn': {
+                'description': 'Restore a turn removed with delete_turn. Required: conversation_id, turn_id. Returns {conversation_id, turn_id, restored}.',
+                'schema': _obj(
+                    {'conversation_id': _s('Conversation id.'), 'turn_id': _s('Turn id.')},
+                    ['conversation_id', 'turn_id'],
+                ),
+                'run': self._restore_turn,
+            },
             # Agent binding
             'bind_agent': {
                 'description': (
@@ -798,6 +831,11 @@ class MaskyDriver(ToolsBase):
             _bool_arg(a, 'public')
             if _as_bool(a.get('public'), False):
                 self._require_public_sharing(f'{self._server_name}.create_avatar(public=true)')
+        elif bare == 'delete_conversation':
+            _need(a, 'conversation_id')
+        elif bare in ('delete_turn', 'restore_turn'):
+            _need(a, 'conversation_id')
+            _need(a, 'turn_id')
         elif bare in ('train_avatar', 'list_looks', 'get_binding', 'unbind_agent'):
             _need(a, 'avatar_id')
         elif bare == 'set_avatar_public':
@@ -1776,6 +1814,33 @@ class MaskyDriver(ToolsBase):
         url = self._look_url(avatar_id, a, info.get('owner'), use_default=False)
         self._client.set_conversation_image(conversation_id, url)
         return {'ok': True, 'look_id': self._look_id_of(avatar_id, url, info.get('owner'))}
+
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
+
+    def _delete_conversation(self, a: Dict[str, Any]) -> Dict[str, Any]:
+        conversation_id = _str(a['conversation_id'])
+        self._client.delete_conversation(conversation_id)
+        # Forget the deleted conversation so a later call never reuses it.
+        with self._lock:
+            for slug in [
+                s for s, info in self._conversations.items() if info.get('conversation_id') == conversation_id
+            ]:
+                self._conversations.pop(slug, None)
+            if self._pipeline_conversation and self._pipeline_conversation.get('conversation_id') == conversation_id:
+                self._pipeline_conversation = None
+        return {'conversation_id': conversation_id, 'deleted': True}
+
+    def _delete_turn(self, a: Dict[str, Any]) -> Dict[str, Any]:
+        conversation_id, turn_id = _str(a['conversation_id']), _str(a['turn_id'])
+        self._client.delete_turn(conversation_id, turn_id)
+        return {'conversation_id': conversation_id, 'turn_id': turn_id, 'deleted': True, 'restorable': True}
+
+    def _restore_turn(self, a: Dict[str, Any]) -> Dict[str, Any]:
+        conversation_id, turn_id = _str(a['conversation_id']), _str(a['turn_id'])
+        self._client.restore_turn(conversation_id, turn_id)
+        return {'conversation_id': conversation_id, 'turn_id': turn_id, 'restored': True}
 
     # ------------------------------------------------------------------
     # Agent binding
