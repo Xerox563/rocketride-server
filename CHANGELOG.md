@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — since 2026-10-16
 
+### Fixed
+
+- Profiler: the call tree no longer repeats a function's callees under every path that reaches it; its copies split the callee totals and add up to them. The all-threads tree is each thread's tree summed, and `rrext_cprofile_report_tree` returns `functions`, the exact per-function totals the Profiler app's table now shows (#2786).
+
 ## [3.5.0] - 2026-10-16
 
 ### Added
