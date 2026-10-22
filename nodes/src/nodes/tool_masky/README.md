@@ -35,7 +35,7 @@ The incoming text is not passed through. Empty records are skipped without a req
 
 ## As a tool
 
-The server name defaults to `masky`, registering the functions below as `masky.<function>`. Agent calls ignore **Pipeline Action** and its settings: an argument a call leaves out takes the default documented below (720p draft, 5 s, 24 fps, 16:9, literal text mode, default engines, private share), never a pipeline setting. Default Avatar, Default Look, Language, the cost cap and the timeouts do apply to agent calls. Render functions return a receipt: `{generation_id, kind, status: queued|running|done|failed, media: {mime, url?, url_expires_at?}, estimated_credits, credits_charged, elapsed_sec, warnings, error?}`. With **Include Media URLs in Tool Results** off, `url` and `url_expires_at` are removed from every result.
+The server name defaults to `masky`, registering the functions below as `masky.<function>`. Agent calls ignore **Pipeline Action** and its settings: an argument a call leaves out takes the default documented below (720p draft, 5 s, 24 fps, 16:9, literal text mode, default engines, private share), never a pipeline setting. Default Avatar, Language, the cost cap and the timeouts do apply to agent calls. Default Look applies only to `speak` and `create_conversation`; `generate_video`, `set_stream_identity` and `set_conversation_look` use a look only when the call passes one. Render functions return a receipt: `{generation_id, kind, status: queued|running|done|failed, media: {mime, url?, url_expires_at?}, estimated_credits, credits_charged, elapsed_sec, warnings, error?}`. With **Include Media URLs in Tool Results** off, `url` and `url_expires_at` are removed from every result.
 
 | Function | Description |
 |---|---|
@@ -202,7 +202,7 @@ On by default. Turn it off on any node bound to an agent: results then carry job
 
 ### Default Avatar and Default Look
 
-**Default Avatar** takes an avatar id or `@handle` and is used whenever a call or record names no avatar; talking head and live need one. **Default Look** takes a `look_id` or a look URL; blank uses the avatar's primary image.
+**Default Avatar** takes an avatar id or `@handle` and is used whenever a call or record names no avatar; talking head and live need one. **Default Look** takes a `look_id` or a look URL; blank uses the avatar's primary image. It is used by `speak` and `create_conversation`, and by the talking_head and live actions; scene video uses a look only when one is passed.
 
 ### Aspect Ratio
 
