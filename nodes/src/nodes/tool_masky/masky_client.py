@@ -180,6 +180,10 @@ class MaskyClient:
         """POST /avatars/{id}/train (no body)."""
         return self._request('POST', f'/avatars/{_seg(avatar_id)}/train')
 
+    def rename_avatar(self, avatar_id: str, name: str) -> Dict[str, Any]:
+        """PATCH /avatars/{id} {displayName}: owner only. From Masky's answers; not in the published spec yet."""
+        return self._request('PATCH', f'/avatars/{_seg(avatar_id)}', body={'displayName': name})
+
     def set_avatar_voice(self, avatar_id: str, voice_id: str) -> Any:  # noqa: ANN401
         """POST /avatars/{id}/voice."""
         return self._request('POST', f'/avatars/{_seg(avatar_id)}/voice', body={'voiceId': voice_id})

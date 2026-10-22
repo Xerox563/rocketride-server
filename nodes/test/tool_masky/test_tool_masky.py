@@ -209,6 +209,7 @@ ALL_TOOLS = [
     'get_avatar',
     'create_avatar',
     'train_avatar',
+    'rename_avatar',
     'set_avatar_public',
     'get_stream_identity',
     'set_stream_identity',
@@ -236,10 +237,10 @@ ALL_TOOLS = [
 ]
 
 
-def test_tool_query_lists_all_28_tools():
+def test_tool_query_lists_all_29_tools():
     tools = _driver(settings={'allow_delete': True})._tool_query()
     assert [t['name'] for t in tools] == [f'masky.{n}' for n in ALL_TOOLS]
-    assert len(tools) == 28
+    assert len(tools) == 29
     for t in tools:
         assert t['description']
         assert t['inputSchema']['type'] == 'object'
@@ -249,7 +250,7 @@ def test_tool_query_default_hides_the_delete_tools():
     tools = _driver()._tool_query()
     hidden = {'unbind_agent', 'delete_conversation', 'delete_turn'}
     assert [t['name'] for t in tools] == [f'masky.{n}' for n in ALL_TOOLS if n not in hidden]
-    assert len(tools) == 25
+    assert len(tools) == 26
 
 
 def test_tool_query_custom_server_name():
@@ -1113,3 +1114,11 @@ def test_client_delete_5xx_is_sent_once_and_raises(http):
     assert http['sleeps'] == []
     assert ei.value.status == 502
     assert KEY not in str(ei.value)
+
+
+def test_client_rename_avatar_sends_patch_with_display_name(http):
+    http['resp'] = FakeResp(200, {'avatar': {'avatarId': 'A b', 'displayName': 'New'}})
+    MaskyClient(KEY).rename_avatar('A b', 'New')
+    call = http['calls'][-1]
+    assert call['method'] == 'PATCH' and call['url'] == 'https://masky.ai/api/avatars/A%20b'
+    assert call['json'] == {'displayName': 'New'} and call['headers']['Authorization'] == f'Bearer {KEY}'

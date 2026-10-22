@@ -42,6 +42,7 @@ The server name defaults to `masky`, registering the functions below as `masky.<
 | `masky.list_avatars` | Lists your avatars, optionally with public ones. |
 | `masky.get_avatar` | Gets one avatar with its looks. |
 | `masky.create_avatar` | Creates a new avatar. |
+| `masky.rename_avatar` | Renames one of your avatars. |
 | `masky.train_avatar` | Starts Gem training for an avatar. |
 | `masky.set_avatar_public` | Makes an avatar public or private. Making it public needs `allowPublicSharing`. |
 | `masky.get_stream_identity` | Reads the account's stream identity. |
@@ -79,6 +80,10 @@ Pass exactly one of `avatar_id`, `handle` or `twitch_name`. Returns the avatar's
 ### `masky.create_avatar`
 
 Required `name` (up to 80 characters) and `image_url` (a public http(s) face image). Optional `personality` (up to 4,000 characters), `voice_id`, `knowledge_urls` (up to 10 public URLs) and `public` (default false). Masky has no edit endpoint, so every call creates another avatar. Returns `{avatar_id, name, voice_id, public}`.
+
+### `masky.rename_avatar`
+
+Required `avatar_id` (one of your avatars) and `name` (1 to 80 characters, checked before the request). An avatar whose name is locked to a linked Twitch account is refused with "This avatar's name is locked to its linked Twitch account; change it on Twitch or masky.ai." Read-only mode blocks it. The endpoint comes from Masky's answers to our questions and isn't in the published OpenAPI spec yet. Returns `{avatar_id, name}`.
 
 ### `masky.train_avatar`
 

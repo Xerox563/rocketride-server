@@ -146,6 +146,8 @@ DELETE_TOOLS = frozenset({'unbind_agent', 'delete_conversation', 'delete_turn'})
 
 READ_ONLY_REFUSAL = 'This operation is not permitted: the node is configured in read-only mode (readOnly).'
 
+NAME_LOCKED_MESSAGE = "This avatar's name is locked to its linked Twitch account; change it on Twitch or masky.ai."
+
 
 def _flag_refusal(op: str, flag: str) -> str:
     return f'{op} is gated by {flag!r}, which is off by default. Enable {flag!r} in the node config to allow it.'
@@ -373,6 +375,17 @@ class MaskyDriver(ToolsBase):
                 ),
                 'schema': _obj({'avatar_id': _s('Masky avatar id.')}, ['avatar_id']),
                 'run': self._train_avatar,
+            },
+            'rename_avatar': {
+                'description': (
+                    'Rename one of your avatars. Required: avatar_id, name (1 to 80 characters). An avatar whose name is '
+                    'locked to a linked Twitch account cannot be renamed here. Returns {avatar_id, name}.'
+                ),
+                'schema': _obj(
+                    {'avatar_id': _s('One of your avatar ids.'), 'name': _s('New display name, 1 to 80 characters.')},
+                    ['avatar_id', 'name'],
+                ),
+                'run': self._rename_avatar,
             },
             'set_avatar_public': {
                 'description': (
@@ -838,6 +851,9 @@ class MaskyDriver(ToolsBase):
             _need(a, 'turn_id')
         elif bare in ('train_avatar', 'list_looks', 'get_binding', 'unbind_agent'):
             _need(a, 'avatar_id')
+        elif bare == 'rename_avatar':
+            _need(a, 'avatar_id')
+            _max_len(_need(a, 'name'), 'name', LIMITS['avatar_name_chars'], 'Shorten it.')
         elif bare == 'set_avatar_public':
             _need(a, 'avatar_id')
             _need_bool(a, 'public')
@@ -1198,6 +1214,21 @@ class MaskyDriver(ToolsBase):
             'voice_id': avatar.get('voiceId'),
             'public': bool(avatar.get('publiclyRenderable', body.get('publiclyRenderable', False))),
         }
+
+    def _rename_avatar(self, a: Dict[str, Any]) -> Dict[str, Any]:
+        avatar_id, name = _str(a['avatar_id']), _str(a['name'])
+        try:
+            result = self._client.rename_avatar(avatar_id, name)
+        except MaskyError as e:
+            if e.status == 403 and 'lock' in str(e).lower():
+                raise MaskyError(NAME_LOCKED_MESSAGE, status=403) from None
+            raise
+        avatar = (
+            result.get('avatar')
+            if isinstance(result, dict) and isinstance(result.get('avatar'), dict)
+            else (result if isinstance(result, dict) else {})
+        )
+        return {'avatar_id': avatar.get('avatarId') or avatar_id, 'name': avatar.get('displayName') or name}
 
     def _set_avatar_public(self, a: Dict[str, Any]) -> Dict[str, Any]:
         public = _as_bool(a['public'], False)

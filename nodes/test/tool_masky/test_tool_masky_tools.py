@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Aparavi Software AG
 # =============================================================================
 
-"""Offline tests for the tool_masky phase-2 tool surface (28 tools).
+"""Offline tests for the tool_masky tool surface (29 tools).
 
 No engine, no network: the driver gets a ``FakeClient`` that records every call
 and returns canned Masky response bodies. ``rocketlib`` / ``ai.common.tools``
@@ -2768,9 +2768,9 @@ def test_read_tools_set_is_exactly_the_reviewed_one():
 def test_default_listing_hides_only_the_delete_tools():
     d = _driver()
     registered = list(d._tools)
-    assert len(registered) == 28
+    assert len(registered) == 29
     assert _listed(d) == [n for n in registered if n not in DELETE_TOOLS]
-    assert len(_listed(d)) == 25
+    assert len(_listed(d)) == 26
 
 
 def test_allow_delete_lists_all_tools():
@@ -3014,3 +3014,74 @@ def test_delete_conversation_of_other_id_keeps_pipeline_conversation():
     _run(d, 'delete_conversation', conversation_id='OTHER')
     assert d.live_conversation('') == first
     assert client.names().count('create_conversation') == 1
+
+
+# ---------------------------------------------------------------------------
+# rename_avatar (PATCH /avatars/{id}, from Masky's answers; not in the published spec)
+# ---------------------------------------------------------------------------
+
+
+class RenameClient(FakeClient):
+    def rename_avatar(self, avatar_id, name):
+        return self._do('rename_avatar', avatar_id, name)
+
+
+def test_rename_avatar_success():
+    fc = RenameClient(rename_avatar={'avatar': {'avatarId': 'A', 'displayName': 'New Name'}})
+    out = _run(_driver(fc), 'rename_avatar', avatar_id='A', name='  New Name  ')
+    assert fc.args_of('rename_avatar') == [('A', 'New Name')]
+    assert out == {'avatar_id': 'A', 'name': 'New Name'}
+
+
+@pytest.mark.parametrize(
+    ('args', 'match'),
+    [
+        ({'name': 'x'}, 'avatar_id is required'),
+        ({'avatar_id': 'A'}, 'name is required'),
+        ({'avatar_id': 'A', 'name': '   '}, 'name is required'),
+        ({'avatar_id': 'A', 'name': 'x' * 81}, 'name is 81 characters; Masky accepts 80'),
+    ],
+)
+def test_rename_avatar_validation_before_any_request(args, match):
+    fc = RenameClient()
+    with pytest.raises(ValueError, match=match):
+        _run(_driver(fc), 'rename_avatar', **args)
+    assert fc.calls == []
+
+
+def test_rename_avatar_accepts_exactly_80_chars():
+    fc = RenameClient(rename_avatar={'avatar': {'avatarId': 'A', 'displayName': 'y' * 80}})
+    assert _run(_driver(fc), 'rename_avatar', avatar_id='A', name='y' * 80)['name'] == 'y' * 80
+
+
+def test_rename_avatar_twitch_locked_name_gets_its_own_message():
+    locked = MaskyError(
+        'Masky refused access to /avatars/A (Name is locked to a linked Twitch identity (nameLocked)).', status=403
+    )
+    fc = RenameClient(rename_avatar=locked)
+    with pytest.raises(MaskyError) as info:
+        _run(_driver(fc), 'rename_avatar', avatar_id='A', name='New')
+    assert (
+        str(info.value) == "This avatar's name is locked to its linked Twitch account; change it on Twitch or masky.ai."
+    )
+
+
+def test_rename_avatar_other_403_and_404_pass_through():
+    for err in (
+        MaskyError('Masky refused access to /avatars/A (not your avatar).', status=403),
+        MaskyError('Masky found nothing at /avatars/A. Check the id.', status=404),
+    ):
+        fc = RenameClient(rename_avatar=err)
+        with pytest.raises(MaskyError) as info:
+            _run(_driver(fc), 'rename_avatar', avatar_id='A', name='New')
+        assert str(info.value) == str(err) and 'Twitch' not in str(info.value)
+
+
+def test_rename_avatar_is_blocked_by_read_only_but_not_gated_by_allow_delete():
+    fc = RenameClient()
+    d = _driver(fc, settings={'read_only': True})
+    assert 'rename_avatar' not in _listed(d)
+    with pytest.raises(ValueError, match='read-only mode'):
+        _run(d, 'rename_avatar', avatar_id='A', name='New')
+    assert fc.calls == []
+    assert 'rename_avatar' in _listed(_driver(RenameClient()))
