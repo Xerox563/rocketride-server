@@ -935,3 +935,47 @@ def test_validate_config_warns_on_unfilled_key_placeholder(stubs, monkeypatch):
     ig = _iglobal(monkeypatch, IGlobalMod.OPEN_MODE.SOURCE, {'apikey': '${ROCKETRIDE_MASKY_KEY}'})
     ig.validateConfig()
     assert any('unfilled placeholder' in str(m) for m in seen)
+
+
+# ---------------------------------------------------------------------------
+# baseUrl: https only, plain http only for a parsed loopback hostname
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    'url',
+    [
+        'https://masky.ai/api',
+        'HTTPS://masky.ai/api',
+        'https://staging.example.com/api',
+        'http://localhost:8080/api',
+        'http://LOCALHOST/api',
+        'http://127.0.0.1:9000',
+        'http://[::1]:9000/api',
+    ],
+)
+def test_base_url_accepted(url):
+    assert IGlobalMod.read_settings({'baseUrl': url})['base_url'] == url
+
+
+@pytest.mark.parametrize(
+    'url',
+    [
+        'http://masky.ai/api',
+        'http://localhost.evil.com/api',
+        'http://127.0.0.1.evil.com/api',
+        'http://localhost@evil.com/api',
+        'http://evil.com/?h=localhost',
+        'ftp://localhost/api',
+        'localhost/api',
+        'https://',
+        'http://[::1',
+    ],
+)
+def test_base_url_refused(url):
+    with pytest.raises(ValueError, match='https://'):
+        IGlobalMod.read_settings({'baseUrl': url})
+
+
+def test_default_base_url_is_https():
+    assert IGlobalMod.read_settings({})['base_url'].startswith('https://')

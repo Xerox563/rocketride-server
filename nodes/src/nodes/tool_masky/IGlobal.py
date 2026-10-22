@@ -33,6 +33,7 @@ value fails the pipeline at start rather than on the first record.
 from __future__ import annotations
 
 import math
+import urllib.parse
 from typing import Any, Dict, List
 
 from ai.common.config import Config, check_credential_resolved
@@ -44,6 +45,29 @@ from .masky_core import ACTIONS, ASPECT_RATIOS, ENV_API_KEY, LIMITS, MASKY_BASE_
 from .masky_driver import MaskyDriver
 
 QUALITIES = ('720p-draft', '720p', '1080p-draft', '1080p')
+
+# Plain http is accepted only for these hosts (a local mock server), so the API
+# key, sent as a Bearer header on every request, never crosses a network unencrypted.
+LOCAL_HOSTS = ('localhost', '127.0.0.1', '::1')
+
+
+def validate_base_url(raw: str) -> str:
+    """Return the base URL if it is https, or http to a loopback host; raise ValueError otherwise."""
+    url = (raw or '').strip()
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = (parts.hostname or '').lower()
+    except ValueError:
+        parts, host = None, ''
+    scheme = parts.scheme.lower() if parts else ''
+    if scheme == 'https' and host:
+        return url
+    if scheme == 'http' and host in LOCAL_HOSTS:
+        return url
+    raise ValueError(
+        'baseUrl must start with https:// (plain http is allowed only for localhost, 127.0.0.1 or ::1), '
+        'so the API key is never sent unencrypted.'
+    )
 
 
 def _choice(cfg: Dict[str, Any], name: str, default: str, allowed: tuple) -> str:
@@ -88,7 +112,7 @@ def read_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         'server_name': str(cfg.get('serverName') or 'masky').strip(),
-        'base_url': str(cfg.get('baseUrl') or MASKY_BASE_URL).strip(),
+        'base_url': validate_base_url(str(cfg.get('baseUrl') or MASKY_BASE_URL)),
         'max_credits_per_call': max_credits,
         'timeout_sec': _int(cfg, 'timeoutSec', 300, 10),
         'poll_interval_sec': _int(cfg, 'pollIntervalSec', 3, 1),
