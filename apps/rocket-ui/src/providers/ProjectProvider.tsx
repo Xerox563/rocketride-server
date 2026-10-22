@@ -173,7 +173,8 @@ const ProjectProvider: React.FC<ProjectPageProps> = ({ uri, pipeline, isDirty, i
 	// to the canvas/context subtree.
 	const isSubscribed = useMemo(() => {
 		const s = getStatus('rocketride.pipeBuilder');
-		return s === 'subscribed' || s === 'trialing';
+		// 'free' needs no subscription: OSS marks every app free
+		return s === 'free' || s === 'subscribed' || s === 'trialing';
 	}, [getStatus]);
 	const [servicesJson, setServicesJson] = useState<Record<string, any>>({});
 	const [envKeys, setEnvKeys] = useState<string[]>([]);
