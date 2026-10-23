@@ -36,6 +36,7 @@ depends(requirements)
 # Load what we need
 import json
 import threading
+import time
 from datetime import timedelta
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
@@ -188,6 +189,7 @@ class Store(DocumentStoreBase):
         self._tableObj = None
         self._ftsReady = False
         self._vectorIndexed = False
+        self._indexCheckedAt = 0.0
         self._writes = 0
         self._writeLock = threading.Lock()
 
@@ -244,12 +246,23 @@ class Store(DocumentStoreBase):
         # A table indexed by another pipeline or an earlier run still needs the
         # refine pass in searchSemantic, even if this store never writes
         self._vectorIndexed = self._hasVectorIndex(table)
+        self._indexCheckedAt = time.monotonic()
         self._tableObj = table
         return self._tableObj
 
     def _hasVectorIndex(self, table) -> bool:
         """Return True when the table has an index on the vector column."""
         return any('vector' in (index.columns or []) for index in table.list_indices())
+
+    def _refreshVectorIndexed(self, table) -> None:
+        """Pick up a vector index another pipeline built after this one opened the table."""
+        if self._vectorIndexed:
+            return
+        now = time.monotonic()
+        if now - self._indexCheckedAt < READ_CONSISTENCY_INTERVAL.total_seconds():
+            return
+        self._indexCheckedAt = now
+        self._vectorIndexed = self._hasVectorIndex(table)
 
     def _limit(self, docFilter: DocFilter) -> int:
         """The result limit for a query, defaulting like DocFilter does."""
@@ -523,6 +536,7 @@ class Store(DocumentStoreBase):
             else:
                 search = table.search(vector, vector_column_name='vector').distance_type(self.distance)
 
+            self._refreshVectorIndexed(table)
             if self._vectorIndexed:
                 search = search.nprobes(INDEX_NPROBES).refine_factor(INDEX_REFINE_FACTOR)
 
@@ -614,9 +628,11 @@ class Store(DocumentStoreBase):
         """
         Add document chunks to the store.
 
-        Writing chunk 0 of an object first removes every chunk the object had,
-        so a document that shrank on re-ingest does not keep stale tail chunks.
-        The remaining rows are upserted by id.
+        Writing chunk 0 of an object replaces every chunk the object had, so a
+        document that shrank on re-ingest does not keep stale tail chunks. The
+        old chunks are dropped in the same merge that writes the new ones, so a
+        failed write leaves the previous version in place. Other rows are
+        upserted by id.
         """
         if not len(chunks):
             return
@@ -641,9 +657,16 @@ class Store(DocumentStoreBase):
         try:
             with self._writeLock:
                 if replaced:
-                    self._deleteWhere(table, 'objectId', list(replaced.keys()))
-                for batch in _batches(rows):
-                    table.merge_insert('id').when_matched_update_all().when_not_matched_insert_all().execute(batch)
+                    (
+                        table.merge_insert('id')
+                        .when_matched_update_all()
+                        .when_not_matched_insert_all()
+                        .when_not_matched_by_source_delete(self._in('objectId', list(replaced), 'objectIds'))
+                        .execute(rows)
+                    )
+                else:
+                    for batch in _batches(rows):
+                        table.merge_insert('id').when_matched_update_all().when_not_matched_insert_all().execute(batch)
                 self._afterWrite(table)
         except Exception as e:
             raise Exception(self._error('write', e)) from e

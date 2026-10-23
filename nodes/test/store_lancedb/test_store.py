@@ -13,6 +13,7 @@ counts, and that a fresh Store sees what an earlier one wrote.
 from datetime import timedelta
 
 import pytest
+from lancedb.merge import LanceMergeInsertBuilder
 
 from ai.common.schema import DocFilter
 from nodes.store_lancedb import lancedb_store
@@ -171,10 +172,26 @@ class TestWrites:
     def test_reingest_replaces_every_chunk(self, make_store, rng):
         store = make_store()
         store.addChunks([chunk('doc-a', i, f'old {i}', random_vector(rng)) for i in range(5)])
+        store.addChunks([chunk('doc-b', i, f'other {i}', random_vector(rng)) for i in range(3)])
         store.addChunks([chunk('doc-a', i, f'new {i}', random_vector(rng)) for i in range(2)])
 
         docs = store.get(DocFilter(objectIds=['doc-a'], limit=100))
         assert sorted(_texts(docs)) == ['new 0', 'new 1']
+        assert len(store.get(DocFilter(objectIds=['doc-b'], limit=100))) == 3
+
+    def test_failed_reingest_keeps_the_previous_version(self, make_store, rng, monkeypatch):
+        store = make_store()
+        store.addChunks([chunk('doc-a', i, f'old {i}', random_vector(rng)) for i in range(3)])
+
+        def fail(*args, **kwargs):
+            raise RuntimeError('write interrupted')
+
+        monkeypatch.setattr(LanceMergeInsertBuilder, 'execute', fail)
+        with pytest.raises(Exception, match='write interrupted'):
+            store.addChunks([chunk('doc-a', i, f'new {i}', random_vector(rng)) for i in range(2)])
+
+        docs = store.get(DocFilter(objectIds=['doc-a'], limit=100))
+        assert sorted(_texts(docs)) == ['old 0', 'old 1', 'old 2']
 
     def test_later_chunks_upsert_without_dropping_earlier_ones(self, make_store, rng):
         store = make_store()
