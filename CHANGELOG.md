@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **nodes**: add tool_tenki - disposable Tenki Sandbox Linux VM for agents: run commands and code, edit files, work in git repositories, private ones through Tenki secret policies (#2302)
+- **nodes**: add store_lancedb, an embedded vector store whose tables live in a local directory or on S3, GCS or Azure Blob storage, with semantic, keyword and hybrid search, soft delete, an automatic vector index once a table grows, and the shared vector store tools (#2804)
 
 ### Fixed
 
