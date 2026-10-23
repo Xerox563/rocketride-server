@@ -9,7 +9,10 @@ A table that crosses indexAfterRows gets a vector index, and search through
 that index still agrees with an exact search computed here in Python.
 """
 
+from datetime import timedelta
+
 from ai.common.schema import DocFilter
+from nodes.store_lancedb import lancedb_store
 
 from ._helpers import chunk, question, random_vector
 
@@ -74,6 +77,22 @@ def test_rows_written_after_the_index_are_still_found(make_store, rng):
     late = random_vector(rng)
     store.addChunks([chunk('doc-late', 0, 'late arrival', late)])
     assert store.searchSemantic(question('q', late), DocFilter(limit=1))[0].metadata.objectId == 'doc-late'
+
+
+def test_open_reader_picks_up_an_index_built_later(make_store, rng, monkeypatch):
+    monkeypatch.setattr(lancedb_store, 'READ_CONSISTENCY_INTERVAL', timedelta(0))
+    writer = make_store(indexAfterRows=500)
+    writer.addChunks([chunk(f'doc-{i}', 0, f'text {i}', random_vector(rng)) for i in range(100)])
+
+    reader = make_store(indexAfterRows=0)
+    reader.searchSemantic(question('q', random_vector(rng)), DocFilter(limit=1))
+    assert not reader._vectorIndexed
+
+    writer.addChunks([chunk(f'doc-{i}', 0, f'text {i}', random_vector(rng)) for i in range(100, 600)])
+    assert _vector_indexed(writer)
+
+    reader.searchSemantic(question('q', random_vector(rng)), DocFilter(limit=1))
+    assert reader._vectorIndexed
 
 
 def test_index_is_never_built_when_disabled(make_store, rng):
