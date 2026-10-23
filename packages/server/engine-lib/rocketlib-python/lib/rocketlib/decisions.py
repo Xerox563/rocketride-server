@@ -143,7 +143,7 @@ def check_questions(questions) -> None:
             raise DecisionError(f'question {name!r}: "values" must be a non-empty list of strings, numbers or booleans')
 
 
-def _check_answer(name: str, answer) -> None:
+def _check_answer(name: str, answer, values) -> None:
     if not isinstance(answer, dict) or 'answer' not in answer:
         raise DecisionError(f'{name}: each answer must be a dict with an "answer"')
     value = answer['answer']
@@ -155,6 +155,11 @@ def _check_answer(name: str, answer) -> None:
         raise DecisionError(f'{name}: "index" must be an integer')
     if 'best' in answer and value != UNCERTAIN:
         raise DecisionError(f'{name}: "best" is only allowed with answer "{UNCERTAIN}"')
+    if values is not None:
+        if value != UNCERTAIN and value not in values:
+            raise DecisionError(f'{name}: answer {value!r} is not one of the declared values {values}')
+        if 'index' in answer and not 0 <= answer['index'] < len(values):
+            raise DecisionError(f'{name}: "index" {answer["index"]} is outside the declared values')
 
 
 def _check_item(item: dict, questions: dict) -> None:
@@ -178,7 +183,7 @@ def _check_item(item: dict, questions: dict) -> None:
     if not isinstance(answers, dict) or set(answers) != set(questions):
         raise DecisionError(f'an "ok" item must answer exactly the group questions {sorted(questions)}')
     for name, answer in answers.items():
-        _check_answer(name, answer)
+        _check_answer(name, answer, questions[name].get('values'))
 
 
 def _plain(value):
