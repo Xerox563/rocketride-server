@@ -105,7 +105,8 @@ Most deployments only touch the location and the table name.
 
 For the local profile, a relative directory is placed under the engine's data
 directory and may not climb out of it with `..`; an absolute path is used as
-given. For the object storage profile, give a uri such as `s3://my-bucket/rag`.
+given. For the object storage profile, give a uri such as `s3://my-bucket/rag`;
+the profile refuses an empty or local uri.
 
 ### Distance and search mode
 
@@ -138,6 +139,7 @@ A local directory needs no credentials. For object storage, either set the stand
 
 - **Not available on RocketRide Cloud** (`nosaas`): a local directory there does not survive a restart, so the node runs on self-hosted engines only.
 - **One engine per local directory.** LanceDB does not document concurrent writers on one local directory, so treat a directory as owned by a single engine process. Point several engines at object storage instead.
+- **Reads catch up within 5 seconds.** A pipeline that has a table open checks for writes from other pipelines at most every 5 seconds, so a new or deleted document can take that long to show up in its searches.
 - **Filesystem access.** The local profile writes under the engine data directory, or under the absolute path the node owner configures.
 
 ## Notes

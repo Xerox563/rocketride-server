@@ -47,6 +47,11 @@ def test_index_is_built_after_the_threshold_and_matches_exact_search(make_store,
     assert _vector_indexed(store)
     assert store._vectorIndexed
 
+    # A store that only reads finds the existing index when it opens the table
+    reader = make_store(indexAfterRows=0)
+    assert reader.doesCollectionExist()
+    assert reader._vectorIndexed
+
     top_one = 0
     overlap = 0
     for _ in range(SAMPLES):

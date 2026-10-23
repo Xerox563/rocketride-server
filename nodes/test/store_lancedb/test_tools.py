@@ -80,6 +80,8 @@ def test_upsert_search_get_and_delete(tools):
     assert deleted['success'] is True
     assert node.stats({})['count'] == 1
     assert node.objdir({})['paths'] == {'/food/soup.txt': 'doc-soup'}
+    after = node.search({'query': 'paris is the capital of france', 'top_k': 5})
+    assert all(hit['metadata']['objectId'] != 'doc-paris' for hit in after['results'])
 
 
 def test_writes_refused_when_not_allowed(tools):
@@ -89,12 +91,14 @@ def test_writes_refused_when_not_allowed(tools):
     reader = tools(allow_write=False)
     reader.IGlobal.store = writer.IGlobal.store
 
-    assert reader.upsert({'documents': _documents()})['success'] is False
+    new_doc = {'object_id': 'doc-rome', 'content': 'rome is the capital of italy'}
+    assert reader.upsert({'documents': [new_doc]})['success'] is False
     assert reader.delete({'object_ids': ['doc-paris']})['success'] is False
     assert reader.search({'query': 'capital of france'})['results']
     assert set(reader._collect_tool_methods()) >= {'search', 'objdir', 'get', 'stats'}
     assert not {'upsert', 'delete'} & set(reader._collect_tool_methods())
     assert writer.IGlobal.store.count_documents() == 2
+    assert 'doc-rome' not in writer.objdir({})['paths'].values()
 
 
 def test_no_tools_when_not_exposed(tools):

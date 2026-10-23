@@ -70,7 +70,7 @@ class IGlobal(StoreGlobalBase):
         storage options JSON and the numeric settings.
         """
         try:
-            resolve_uri(config.get('uri'), CONST_TASK_DATA_PATH)
+            resolve_uri(config.get('uri'), CONST_TASK_DATA_PATH, object_only=config.get('mode') == 'object')
             validate_table(config.get('table'))
             read_choice(config, 'distance', DISTANCES, 'cosine')
             read_choice(config, 'searchMode', SEARCH_MODES, 'vector')

@@ -54,6 +54,14 @@ class TestResolveUri:
         with pytest.raises(ValueError, match='Unsupported uri'):
             resolve_uri(uri, str(tmp_path))
 
+    @pytest.mark.parametrize('uri', ['', None, '  ', './lancedb', '/abs/path'])
+    def test_object_profile_needs_object_uri(self, tmp_path, uri):
+        with pytest.raises(ValueError, match='object storage profile'):
+            resolve_uri(uri, str(tmp_path), object_only=True)
+
+    def test_object_profile_keeps_object_uri(self, tmp_path):
+        assert resolve_uri('s3://bucket/rag', str(tmp_path), object_only=True) == 's3://bucket/rag'
+
 
 class TestStorageOptions:
     def test_json_object(self):
@@ -100,8 +108,9 @@ class TestTableAndSettings:
         assert read_count({'n': 0}, 'n', 7) == 0
         assert read_count({}, 'n', 7) == 7
         assert read_count({'n': ''}, 'n', 7) == 7
+        assert read_count({'n': 3.0}, 'n', 7) == 3
 
-    @pytest.mark.parametrize('value', [-1, 'many'])
+    @pytest.mark.parametrize('value', [-1, 'many', 0.5, 2.5, '1.5', True, float('inf')])
     def test_bad_counts_are_refused(self, value):
         with pytest.raises(ValueError, match='n '):
             read_count({'n': value}, 'n', 7)
