@@ -36,6 +36,7 @@ depends(requirements)
 # Load what we need
 import json
 import threading
+from datetime import timedelta
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import lancedb
@@ -79,6 +80,10 @@ MAX_ERROR_LENGTH = 300
 INDEX_TYPE = 'IVF_HNSW_SQ'
 INDEX_NPROBES = 20
 INDEX_REFINE_FACTOR = 50
+
+# How often an open table checks for writes made by other pipelines. Without
+# it a cached table keeps the version it first saw until the engine restarts.
+READ_CONSISTENCY_INTERVAL = timedelta(seconds=5)
 
 # Columns every table carries. The metadata column keeps the whole DocMetadata
 # as JSON so extra fields survive; the others are copies used for filtering.
@@ -162,7 +167,7 @@ class Store(DocumentStoreBase):
         # Read and check every setting before touching storage, so a bad value
         # fails at pipeline start with the name of the field
         try:
-            self.uri = resolve_uri(config.get('uri'), CONST_TASK_DATA_PATH)
+            self.uri = resolve_uri(config.get('uri'), CONST_TASK_DATA_PATH, object_only=config.get('mode') == 'object')
             self.table = validate_table(config.get('table'))
             self.distance = read_choice(config, 'distance', DISTANCES, 'cosine')
             self.searchMode = read_choice(config, 'searchMode', SEARCH_MODES, 'vector')
@@ -188,9 +193,13 @@ class Store(DocumentStoreBase):
 
         try:
             if self.storageOptions:
-                self.db = lancedb.connect(self.uri, storage_options=self.storageOptions)
+                self.db = lancedb.connect(
+                    self.uri,
+                    storage_options=self.storageOptions,
+                    read_consistency_interval=READ_CONSISTENCY_INTERVAL,
+                )
             else:
-                self.db = lancedb.connect(self.uri)
+                self.db = lancedb.connect(self.uri, read_consistency_interval=READ_CONSISTENCY_INTERVAL)
         except Exception as e:
             self.db = None
             raise Exception(self._error('connect', e)) from e
@@ -231,8 +240,16 @@ class Store(DocumentStoreBase):
             return self._tableObj
         if self.db is None or self.table not in self._tableNames():
             return None
-        self._tableObj = self.db.open_table(self.table)
+        table = self.db.open_table(self.table)
+        # A table indexed by another pipeline or an earlier run still needs the
+        # refine pass in searchSemantic, even if this store never writes
+        self._vectorIndexed = self._hasVectorIndex(table)
+        self._tableObj = table
         return self._tableObj
+
+    def _hasVectorIndex(self, table) -> bool:
+        """Return True when the table has an index on the vector column."""
+        return any('vector' in (index.columns or []) for index in table.list_indices())
 
     def _limit(self, docFilter: DocFilter) -> int:
         """The result limit for a query, defaulting like DocFilter does."""
@@ -318,6 +335,9 @@ class Store(DocumentStoreBase):
         """Build a Doc from a table row."""
         # Unset fields are left out, since DocMetadata refuses an explicit None
         fields = {key: value for key, value in json.loads(row['metadata']).items() if value is not None}
+        # markDeleted and markActive only change the deleted column
+        if row.get('deleted') is not None:
+            fields['isDeleted'] = bool(row['deleted'])
         metadata = DocMetadata(**fields)
         return Doc(score=score, page_content=row.get('text') or '', metadata=metadata)
 
@@ -373,7 +393,7 @@ class Store(DocumentStoreBase):
 
         if self.indexAfterRows and not self._vectorIndexed:
             try:
-                if any('vector' in (index.columns or []) for index in table.list_indices()):
+                if self._hasVectorIndex(table):
                     self._vectorIndexed = True
                 elif table.count_rows() >= self.indexAfterRows:
                     table.create_index(

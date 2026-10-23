@@ -10,9 +10,12 @@ keyword and hybrid search, re-ingest, soft delete, remove, render, paths and
 counts, and that a fresh Store sees what an earlier one wrote.
 """
 
+from datetime import timedelta
+
 import pytest
 
 from ai.common.schema import DocFilter
+from nodes.store_lancedb import lancedb_store
 
 from ._helpers import DIM, chunk, nearby, question, random_vector
 
@@ -32,6 +35,17 @@ class TestCollection:
         assert store.count_documents() == 0
         store.remove(['nothing'])
         store.markDeleted(['nothing'])
+
+    def test_open_store_sees_writes_from_another_store(self, make_store, rng, monkeypatch):
+        monkeypatch.setattr(lancedb_store, 'READ_CONSISTENCY_INTERVAL', timedelta(0))
+        writer = make_store()
+        writer.addChunks([chunk('doc-a', 0, 'alpha', random_vector(rng))])
+        reader = make_store()
+        assert reader.count_documents() == 1
+
+        writer.addChunks([chunk('doc-b', 0, 'beta', random_vector(rng))])
+        writer.markDeleted(['doc-a'])
+        assert {doc.metadata.objectId for doc in reader.get(DocFilter(limit=10))} == {'doc-b'}
 
     def test_fresh_store_sees_earlier_writes(self, make_store, rng):
         make_store().addChunks([chunk('doc-a', 0, 'alpha', random_vector(rng))])
@@ -184,8 +198,10 @@ class TestWrites:
 
         hidden = store.get(DocFilter(objectIds=['doc-a'], isDeleted=True))
         assert _texts(hidden) == ['alpha']
+        assert hidden[0].metadata.isDeleted is True
 
         store.markActive(['doc-a'])
+        assert store.get(DocFilter(objectIds=['doc-a']))[0].metadata.isDeleted is False
         assert store.searchSemantic(question('alpha', target), DocFilter())[0].metadata.objectId == 'doc-a'
         assert store.count_documents() == 2
 

@@ -56,7 +56,7 @@ def is_object_uri(uri: str) -> bool:
     return (uri or '').strip().lower().startswith(OBJECT_STORE_SCHEMES)
 
 
-def resolve_uri(uri: Optional[str], data_dir: str) -> str:
+def resolve_uri(uri: Optional[str], data_dir: str, object_only: bool = False) -> str:
     """
     Turn the configured uri into the location LanceDB connects to.
 
@@ -64,7 +64,13 @@ def resolve_uri(uri: Optional[str], data_dir: str) -> str:
     given too, since the node owner chose it. A relative path is placed under
     the engine's data directory and may not climb out of it, so a pipeline
     cannot point the store at an arbitrary path with something like ../../etc.
+
+    With object_only (the object storage profile) only an object storage uri
+    is accepted, so an empty field cannot fall back to a local directory.
     """
+    if object_only and not is_object_uri(uri or ''):
+        raise ValueError('The object storage profile needs an s3://, gs:// or az:// uri')
+
     uri = (uri or '').strip() or DEFAULT_URI
 
     if is_object_uri(uri):
@@ -136,9 +142,12 @@ def read_count(config: Dict[str, Any], key: str, default: int) -> int:
     value = config.get(key, default)
     if value is None or value == '':
         return default
+    # int() would quietly turn 0.5 into 0, which switches the feature off
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        raise ValueError(f'{key} must be a whole number, got {value!r}')
     try:
         number = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise ValueError(f'{key} must be a whole number, got {value!r}') from None
     if number < 0:
         raise ValueError(f'{key} cannot be negative, got {number}')
