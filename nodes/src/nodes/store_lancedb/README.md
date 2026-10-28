@@ -17,7 +17,7 @@ Uses the official **`lancedb`** Python library in process. There is nothing to d
 
 Documents must be run through an embedding node before reaching this node: the store does not compute embeddings on the data lane and raises an error if a chunk arrives without one.
 
-Each chunk is one row: the text, the vector, the full chunk metadata as JSON, and copies of the fields the filters use (`objectId`, chunk number, `nodeId`, parent path, `permissionId`, `isTable`, `tableId`, deleted flag). Writing chunk 0 of an object first deletes every row with the same `objectId`, so re-ingesting a document replaces it, including any tail chunks a shorter new version no longer has. Writes go in batches of 1,000 rows.
+Each chunk is one row: the text, the vector, the full chunk metadata as JSON, and copies of the fields the filters use (`objectId`, chunk number, `nodeId`, parent path, `permissionId`, `isTable`, `tableId`, deleted flag). Writing chunk 0 of an object first deletes every row with the same `objectId`, so re-ingesting a document replaces it, including any tail chunks a shorter new version no longer has. A write that contains chunk 0 writes all of its rows in one merge; writes without chunk 0 go in batches of 1,000 rows.
 
 ## Example pipelines
 
@@ -138,7 +138,7 @@ A local directory needs no credentials. For object storage, either set the stand
 ## Limitations
 
 - **Not available on RocketRide Cloud** (`nosaas`): a local directory there does not survive a restart, so the node runs on self-hosted engines only.
-- **One engine per local directory.** LanceDB does not document concurrent writers on one local directory, so treat a directory as owned by a single engine process. Point several engines at object storage instead.
+- **One engine per local directory, and verify object-storage concurrency.** LanceDB does not document concurrent writers on one local directory, so treat a directory as owned by a single engine process. Sharing a table between engines needs object storage whose commits are atomic and conditional; S3-compatible providers vary, so verify that before pointing several engines at one index.
 - **Reads catch up within 5 seconds.** A pipeline that has a table open checks for writes from other pipelines at most every 5 seconds, so a new or deleted document can take that long to show up in its searches.
 - **Filesystem access.** The local profile writes under the engine data directory, or under the absolute path the node owner configures.
 

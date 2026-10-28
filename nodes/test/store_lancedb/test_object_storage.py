@@ -55,4 +55,6 @@ def test_ingest_search_and_reopen_on_object_storage(remote_store, make_store, rn
     reopened = make_store(uri=URI, table=remote_store.table, storageOptions=STORAGE_OPTIONS)
     assert reopened.doesCollectionExist()
     assert [doc.page_content for doc in reopened.get(DocFilter(objectIds=['doc-a']))] == ['replaced text']
+    assert reopened.get(DocFilter(objectIds=['doc-1'])) == []
+    assert [doc.page_content for doc in reopened.get(DocFilter(objectIds=['doc-2']))] == ['filler text 2']
     assert reopened.count_documents() == 50
